@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -25,9 +24,13 @@ Rules:
 - Only recommend buying a ticker directly mentioned in the news.
 - Only recommend selling if the news is clearly negative for a ticker you currently hold.
 - Be conservative — only act on clearly bullish or clearly bearish news.
-- Return ONLY a JSON object, nothing else:
-  {{"action": "buy" | "sell" | "hold", "ticker": "SYMBOL or null", "reasoning": "one sentence"}}
+- Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
+  {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence"}}
+  {{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence"}}
+  {{"action": "hold", "ticker": null, "reasoning": "one sentence"}}
 """
+
+_VALID_ACTIONS = frozenset({"buy", "sell", "hold"})
 
 
 @dataclass
@@ -38,15 +41,32 @@ class Decision:
 
 
 def _parse_response(text: str) -> Decision:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError(f"No JSON object found in response: {text!r}")
-    data = json.loads(match.group())
-    return Decision(
-        action=data["action"],
-        ticker=data.get("ticker") or None,
-        reasoning=data.get("reasoning", ""),
-    )
+    decoder = json.JSONDecoder()
+    idx = 0
+    last_action_error: ValueError | None = None
+    while idx < len(text):
+        pos = text.find("{", idx)
+        if pos == -1:
+            break
+        try:
+            data, _ = decoder.raw_decode(text, pos)
+            action = data.get("action", "")
+            if action not in _VALID_ACTIONS:
+                last_action_error = ValueError(f"Unexpected action {action!r}; expected one of {_VALID_ACTIONS}")
+                idx = pos + 1
+                continue
+            raw_ticker = data.get("ticker")
+            ticker = None if raw_ticker in (None, "null", "") else str(raw_ticker)
+            return Decision(
+                action=action,
+                ticker=ticker,
+                reasoning=data.get("reasoning", ""),
+            )
+        except (json.JSONDecodeError, KeyError):
+            idx = pos + 1
+    if last_action_error is not None:
+        raise last_action_error
+    raise ValueError(f"No valid decision JSON found in response: {text!r}")
 
 
 class LLMAdvisor:
@@ -63,11 +83,14 @@ class LLMAdvisor:
         try:
             message = self._client.messages.create(
                 model=_MODEL,
-                max_tokens=256,
+                max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = message.content[0].text
             return _parse_response(text)
+        except ValueError as e:
+            logger.error("LLM parse error: %s", e)
+            return Decision(action="hold", ticker=None, reasoning=f"parse error: {e}")
         except Exception as e:
-            logger.error("LLM error: %s", e)
-            return Decision(action="hold", ticker=None, reasoning=f"error: {e}")
+            logger.error("LLM API error: %s", e)
+            return Decision(action="hold", ticker=None, reasoning=f"api error: {e}")

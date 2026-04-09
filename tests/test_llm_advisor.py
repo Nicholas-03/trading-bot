@@ -34,3 +34,22 @@ def test_parse_response_with_surrounding_text():
 def test_parse_invalid_response_raises():
     with pytest.raises(ValueError):
         _parse_response("I cannot determine what to do here.")
+
+
+def test_parse_invalid_action_raises():
+    text = '{"action": "Buy", "ticker": "AAPL", "reasoning": "good news"}'
+    with pytest.raises(ValueError, match="Unexpected action"):
+        _parse_response(text)
+
+
+def test_parse_hold_with_string_null_ticker():
+    text = '{"action": "hold", "ticker": "null", "reasoning": "Neutral"}'
+    decision = _parse_response(text)
+    assert decision.ticker is None
+
+
+def test_parse_picks_first_valid_json_when_multiple_present():
+    text = 'Context: {"not": "valid decision"} Final: {"action": "buy", "ticker": "MSFT", "reasoning": "Strong results"}'
+    decision = _parse_response(text)
+    assert decision.action == "buy"
+    assert decision.ticker == "MSFT"
