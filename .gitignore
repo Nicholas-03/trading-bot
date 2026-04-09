@@ -18,3 +18,5 @@ build/
 *.log
 *.egg
 .eggs/
+.claude
+TODO
