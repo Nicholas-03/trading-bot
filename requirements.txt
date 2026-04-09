@@ -1,4 +1,5 @@
-alpaca-py>=0.26.0
-anthropic>=0.25.0
+# Requires Python 3.11+
+alpaca-py>=0.38.0
+anthropic>=0.50.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
