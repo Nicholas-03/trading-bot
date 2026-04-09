@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -73,7 +74,7 @@ class LLMAdvisor:
     def __init__(self, config: Config) -> None:
         self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
 
-    def analyze(self, headline: str, summary: str, symbols: list[str], held_tickers: set[str]) -> Decision:
+    async def analyze(self, headline: str, summary: str, symbols: list[str], held_tickers: set[str]) -> Decision:
         prompt = _PROMPT_TEMPLATE.format(
             headline=headline,
             summary=summary or "(no summary)",
@@ -81,7 +82,9 @@ class LLMAdvisor:
             held_tickers=", ".join(held_tickers) if held_tickers else "none",
         )
         try:
-            message = self._client.messages.create(
+            # Run the blocking Anthropic SDK call in a thread so it doesn't freeze the event loop
+            message = await asyncio.to_thread(
+                self._client.messages.create,
                 model=_MODEL,
                 max_tokens=512,
                 messages=[{"role": "user", "content": prompt}],

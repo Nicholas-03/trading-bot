@@ -1,6 +1,5 @@
 # Requires Python 3.11+
-alpaca-py>=0.38.0
+alpaca-py>=0.38.0,<1.0.0
 anthropic>=0.50.0
 python-dotenv>=1.0.0
 pytest>=8.0.0
-pytz>=2024.1

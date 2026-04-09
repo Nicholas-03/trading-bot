@@ -44,7 +44,7 @@ class NewsHandler:
                 logger.debug("No tickers in news event — skipping")
                 return
 
-            decision = self._advisor.analyze(
+            decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
                 symbols=symbols,
