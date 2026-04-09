@@ -14,6 +14,7 @@ class Config:
     gemini_model: str
     llm_provider: str
     trade_amount_usd: float
+    short_qty: int
     stop_loss_pct: float
     take_profit_pct: float
 
@@ -57,12 +58,15 @@ def load_config() -> Config:
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
+        short_qty=int(os.getenv("SHORT_QTY", "1")),
         stop_loss_pct=_parse_float("STOP_LOSS_PCT", "0.05"),
         take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "0.10"),
     )
 
     if cfg.trade_amount_usd <= 0:
         raise ValueError("TRADE_AMOUNT_USD must be positive")
+    if cfg.short_qty <= 0:
+        raise ValueError("SHORT_QTY must be a positive integer")
     if not (0 < cfg.stop_loss_pct < 1):
         raise ValueError("STOP_LOSS_PCT must be between 0 and 1 exclusive")
     if not (0 < cfg.take_profit_pct < 1):

@@ -49,12 +49,15 @@ class NewsHandler:
                 summary=summary,
                 symbols=symbols,
                 held_tickers=self._executor.held_tickers,
+                shorted_tickers=self._executor.shorted_tickers,
             )
 
             logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
             if decision.action == "buy" and decision.ticker:
                 self._executor.buy(decision.ticker)
+            elif decision.action == "short" and decision.ticker:
+                self._executor.short(decision.ticker)
             elif decision.action == "sell" and decision.ticker:
                 self._executor.sell(decision.ticker)
         except Exception:

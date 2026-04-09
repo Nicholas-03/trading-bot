@@ -53,3 +53,10 @@ def test_parse_picks_first_valid_json_when_multiple_present():
     decision = _parse_response(text)
     assert decision.action == "buy"
     assert decision.ticker == "MSFT"
+
+
+def test_parse_short_decision():
+    text = '{"action": "short", "ticker": "META", "reasoning": "Revenue miss and weak guidance"}'
+    decision = _parse_response(text)
+    assert decision.action == "short"
+    assert decision.ticker == "META"

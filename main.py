@@ -14,24 +14,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_held_tickers(config: Config) -> set[str]:
+def _load_open_positions(config: Config) -> tuple[set[str], set[str]]:
     client = TradingClient(
         api_key=config.alpaca_api_key,
         secret_key=config.alpaca_secret_key,
         paper=config.paper,
     )
     positions = client.get_all_positions()
-    tickers = {p.symbol for p in positions}
-    if tickers:
-        logger.info("Resuming with existing positions: %s", tickers)
-    return tickers
+    held = {p.symbol for p in positions if p.side.value == "long"}
+    shorted = {p.symbol for p in positions if p.side.value == "short"}
+    if held:
+        logger.info("Resuming with existing long positions: %s", held)
+    if shorted:
+        logger.info("Resuming with existing short positions: %s", shorted)
+    return held, shorted
 
 
 async def main() -> None:
     config = load_config()
-    held_tickers = _load_held_tickers(config)
+    held_tickers, shorted_tickers = _load_open_positions(config)
 
-    order_executor = OrderExecutor(config, held_tickers)
+    order_executor = OrderExecutor(config, held_tickers, shorted_tickers)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(config, llm_advisor, order_executor)
     position_monitor = PositionMonitor(config, order_executor)
