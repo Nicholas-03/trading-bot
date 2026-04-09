@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from alpaca.data.live import NewsDataStream
 from llm_advisor import LLMAdvisor
@@ -22,33 +23,39 @@ class NewsHandler:
                 )
                 stream.subscribe_news(self._handle_news, "*")
                 logger.info("News WebSocket connected — listening for news")
+                # alpaca-py's public stream.run() calls asyncio.run() internally,
+                # which conflicts with our event loop. We call _run_forever() directly
+                # so the stream runs inside the same asyncio.gather loop as the
+                # position monitor. Revisit if alpaca-py adds an async-native entry point.
                 await stream._run_forever()
-            except Exception as e:
-                logger.error("News stream error: %s — reconnecting in 5s", e)
-                import asyncio
+            except Exception:
+                logger.exception("News stream error — reconnecting in 5s")
                 await asyncio.sleep(5)
 
     async def _handle_news(self, news) -> None:
-        headline = getattr(news, "headline", "")
-        summary = getattr(news, "summary", "")
-        symbols: list[str] = getattr(news, "symbols", [])
+        try:
+            headline = getattr(news, "headline", "")
+            summary = getattr(news, "summary", "")
+            symbols: list[str] = getattr(news, "symbols", [])
 
-        logger.info("News received: %s | tickers: %s", headline, symbols)
+            logger.info("News received: %s | tickers: %s", headline, symbols)
 
-        if not symbols:
-            logger.debug("No tickers in news event — skipping")
-            return
+            if not symbols:
+                logger.debug("No tickers in news event — skipping")
+                return
 
-        decision = self._advisor.analyze(
-            headline=headline,
-            summary=summary,
-            symbols=symbols,
-            held_tickers=self._executor._held_tickers,
-        )
+            decision = self._advisor.analyze(
+                headline=headline,
+                summary=summary,
+                symbols=symbols,
+                held_tickers=self._executor.held_tickers,
+            )
 
-        logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
+            logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
-        if decision.action == "buy" and decision.ticker:
-            self._executor.buy(decision.ticker)
-        elif decision.action == "sell" and decision.ticker:
-            self._executor.sell(decision.ticker)
+            if decision.action == "buy" and decision.ticker:
+                self._executor.buy(decision.ticker)
+            elif decision.action == "sell" and decision.ticker:
+                self._executor.sell(decision.ticker)
+        except Exception:
+            logger.exception("Unhandled error processing news event")

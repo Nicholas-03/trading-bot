@@ -18,6 +18,10 @@ class OrderExecutor:
         self._notional_usd = config.trade_amount_usd
         self._held_tickers = held_tickers
 
+    @property
+    def held_tickers(self) -> frozenset[str]:
+        return frozenset(self._held_tickers)
+
     def buy(self, ticker: str) -> None:
         if ticker in self._held_tickers:
             logger.info("Skipping buy for %s — already held", ticker)
