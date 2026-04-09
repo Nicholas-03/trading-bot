@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from config import load_config
+from config import load_config, Config
 from order_executor import OrderExecutor
 from llm_advisor import LLMAdvisor
 from news_handler import NewsHandler
@@ -14,7 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_held_tickers(config) -> set[str]:
+def _load_held_tickers(config: Config) -> set[str]:
     client = TradingClient(
         api_key=config.alpaca_api_key,
         secret_key=config.alpaca_secret_key,
@@ -40,10 +40,13 @@ async def main() -> None:
                 config.paper, config.trade_amount_usd,
                 config.stop_loss_pct * 100, config.take_profit_pct * 100)
 
-    await asyncio.gather(
-        news_handler.run(),
-        position_monitor.run(),
-    )
+    try:
+        await asyncio.gather(
+            news_handler.run(),
+            position_monitor.run(),
+        )
+    except asyncio.CancelledError:
+        logger.info("Bot shutting down")
 
 
 if __name__ == "__main__":
