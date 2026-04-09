@@ -5,11 +5,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 import anthropic
+from google import genai
 from config import Config
 
 logger = logging.getLogger(__name__)
-
-_MODEL = "claude-opus-4-6"
 
 _PROMPT_TEMPLATE = """\
 You are a stock trading assistant. Based on the news below, decide whether to buy, sell, or hold.
@@ -72,7 +71,13 @@ def _parse_response(text: str) -> Decision:
 
 class LLMAdvisor:
     def __init__(self, config: Config) -> None:
-        self._client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+        self._provider = config.llm_provider
+        if self._provider == "claude":
+            self._claude = anthropic.Anthropic(api_key=config.anthropic_api_key)
+            self._claude_model = config.anthropic_model
+        else:
+            self._gemini = genai.Client(api_key=config.google_api_key)
+            self._gemini_model = config.gemini_model
 
     async def analyze(self, headline: str, summary: str, symbols: list[str], held_tickers: set[str]) -> Decision:
         prompt = _PROMPT_TEMPLATE.format(
@@ -82,14 +87,10 @@ class LLMAdvisor:
             held_tickers=", ".join(held_tickers) if held_tickers else "none",
         )
         try:
-            # Run the blocking Anthropic SDK call in a thread so it doesn't freeze the event loop
-            message = await asyncio.to_thread(
-                self._client.messages.create,
-                model=_MODEL,
-                max_tokens=512,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = message.content[0].text
+            if self._provider == "claude":
+                text = await self._call_claude(prompt)
+            else:
+                text = await self._call_gemini(prompt)
             return _parse_response(text)
         except ValueError as e:
             logger.error("LLM parse error: %s", e)
@@ -97,3 +98,20 @@ class LLMAdvisor:
         except Exception as e:
             logger.error("LLM API error: %s", e)
             return Decision(action="hold", ticker=None, reasoning=f"api error: {e}")
+
+    async def _call_claude(self, prompt: str) -> str:
+        # Run the blocking Anthropic SDK call in a thread so it doesn't freeze the event loop
+        message = await asyncio.to_thread(
+            self._claude.messages.create,
+            model=self._claude_model,
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return message.content[0].text
+
+    async def _call_gemini(self, prompt: str) -> str:
+        response = await self._gemini.aio.models.generate_content(
+            model=self._gemini_model,
+            contents=prompt,
+        )
+        return response.text

@@ -9,6 +9,10 @@ class Config:
     alpaca_secret_key: str
     alpaca_base_url: str
     anthropic_api_key: str
+    anthropic_model: str
+    google_api_key: str
+    gemini_model: str
+    llm_provider: str
     trade_amount_usd: float
     stop_loss_pct: float
     take_profit_pct: float
@@ -28,7 +32,18 @@ def _parse_float(key: str, default: str) -> float:
 
 def load_config() -> Config:
     load_dotenv()
-    missing = [k for k in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "ANTHROPIC_API_KEY") if not os.getenv(k)]
+
+    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    if provider not in ("claude", "gemini"):
+        raise ValueError(f"LLM_PROVIDER must be 'claude' or 'gemini', got {provider!r}")
+
+    required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]
+    if provider == "claude":
+        required.append("ANTHROPIC_API_KEY")
+    else:
+        required.append("GOOGLE_API_KEY")
+
+    missing = [k for k in required if not os.getenv(k)]
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
@@ -36,7 +51,11 @@ def load_config() -> Config:
         alpaca_api_key=os.environ["ALPACA_API_KEY"],
         alpaca_secret_key=os.environ["ALPACA_SECRET_KEY"],
         alpaca_base_url=os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
-        anthropic_api_key=os.environ["ANTHROPIC_API_KEY"],
+        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
+        google_api_key=os.getenv("GOOGLE_API_KEY", ""),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         stop_loss_pct=_parse_float("STOP_LOSS_PCT", "0.05"),
         take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "0.10"),
