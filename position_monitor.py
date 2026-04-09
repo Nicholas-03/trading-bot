@@ -27,20 +27,26 @@ class PositionMonitor:
             await asyncio.sleep(30)
             try:
                 self._check_positions()
-            except Exception as e:
-                logger.error("Position monitor poll failed: %s", e)
+            except Exception:
+                logger.exception("Position monitor poll failed")
 
     def _check_positions(self) -> None:
         positions = self._client.get_all_positions()
         for pos in positions:
-            ticker = pos.symbol
-            entry = float(pos.avg_entry_price)
-            current = float(pos.current_price)
-            pnl = compute_pnl_pct(entry, current)
+            try:
+                ticker = pos.symbol
+                entry = float(pos.avg_entry_price)
+                if entry == 0.0:
+                    logger.warning("Skipping %s — avg_entry_price is zero", ticker)
+                    continue
+                current = float(pos.current_price)
+                pnl = compute_pnl_pct(entry, current)
 
-            if pnl <= -self._stop_loss:
-                logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                self._executor.sell(ticker)
-            elif pnl >= self._take_profit:
-                logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                self._executor.sell(ticker)
+                if pnl <= -self._stop_loss:
+                    logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                    self._executor.sell(ticker)
+                elif pnl >= self._take_profit:
+                    logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                    self._executor.sell(ticker)
+            except Exception:
+                logger.exception("Error processing position %s", pos.symbol)
