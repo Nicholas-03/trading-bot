@@ -4,13 +4,13 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.common.exceptions import APIError
 from config import Config
-from notifications.telegram_notifier import TelegramNotifier
+from notifications.telegram_notifier import Notifier
 
 logger = logging.getLogger(__name__)
 
 
 class OrderExecutor:
-    def __init__(self, config: Config, held_tickers: set[str], shorted_tickers: set[str], notifier: TelegramNotifier) -> None:
+    def __init__(self, config: Config, held_tickers: set[str], shorted_tickers: set[str], notifier: Notifier) -> None:
         self._client = TradingClient(
             api_key=config.alpaca_api_key,
             secret_key=config.alpaca_secret_key,

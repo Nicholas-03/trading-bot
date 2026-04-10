@@ -1,7 +1,17 @@
 import logging
 import httpx
+from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class Notifier(Protocol):
+    async def notify_buy(self, ticker: str, notional: float, order_id: str) -> None: ...
+    async def notify_sell(self, ticker: str) -> None: ...
+    async def notify_short(self, ticker: str, qty: int, order_id: str) -> None: ...
+    async def notify_error(self, action: str, detail: str) -> None: ...
+    async def aclose(self) -> None: ...
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
