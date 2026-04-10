@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from rich.logging import RichHandler
 from config import load_config, Config
 from order_executor import OrderExecutor
 from llm_advisor import LLMAdvisor
@@ -9,7 +10,9 @@ from alpaca.trading.client import TradingClient
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    format="%(name)s — %(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
 )
 logger = logging.getLogger(__name__)
 
