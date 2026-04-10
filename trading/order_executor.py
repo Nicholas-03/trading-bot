@@ -4,12 +4,13 @@ from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.common.exceptions import APIError
 from config import Config
+from notifications.telegram_notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
 
 class OrderExecutor:
-    def __init__(self, config: Config, held_tickers: set[str], shorted_tickers: set[str]) -> None:
+    def __init__(self, config: Config, held_tickers: set[str], shorted_tickers: set[str], notifier: TelegramNotifier) -> None:
         self._client = TradingClient(
             api_key=config.alpaca_api_key,
             secret_key=config.alpaca_secret_key,
@@ -19,6 +20,7 @@ class OrderExecutor:
         self._short_qty = config.short_qty
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
+        self._notifier = notifier
 
     @property
     def held_tickers(self) -> frozenset[str]:
@@ -28,7 +30,7 @@ class OrderExecutor:
     def shorted_tickers(self) -> frozenset[str]:
         return frozenset(self._shorted_tickers)
 
-    def buy(self, ticker: str) -> None:
+    async def buy(self, ticker: str) -> None:
         if ticker in self._held_tickers:
             logger.info("Skipping buy for %s — already held", ticker)
             return
@@ -49,10 +51,12 @@ class OrderExecutor:
                 "BUY order accepted for %s $%.2f — order %s (pending fill)",
                 ticker, self._notional_usd, getattr(order, "id", "unknown"),
             )
+            await self._notifier.notify_buy(ticker, self._notional_usd, str(getattr(order, "id", "unknown")))
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
+            await self._notifier.notify_error(f"buy {ticker}", str(e))
 
-    def short(self, ticker: str) -> None:
+    async def short(self, ticker: str) -> None:
         if ticker in self._shorted_tickers:
             logger.info("Skipping short for %s — already shorted", ticker)
             return
@@ -73,10 +77,12 @@ class OrderExecutor:
                 "SHORT order accepted for %s qty=%d — order %s (pending fill)",
                 ticker, self._short_qty, getattr(order, "id", "unknown"),
             )
+            await self._notifier.notify_short(ticker, self._short_qty, str(getattr(order, "id", "unknown")))
         except Exception as e:
             logger.error("Failed to short %s: %s", ticker, e)
+            await self._notifier.notify_error(f"short {ticker}", str(e))
 
-    def sell(self, ticker: str) -> None:
+    async def sell(self, ticker: str) -> None:
         """Close a position — works for both long (sell) and short (cover)."""
         if ticker not in self._held_tickers and ticker not in self._shorted_tickers:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
@@ -86,6 +92,7 @@ class OrderExecutor:
             self._held_tickers.discard(ticker)
             self._shorted_tickers.discard(ticker)
             logger.info("CLOSED position for %s", ticker)
+            await self._notifier.notify_sell(ticker)
         except APIError as e:
             status = getattr(e, "status_code", None)
             if status in (404, 422):
@@ -94,5 +101,7 @@ class OrderExecutor:
                 logger.warning("Close %s — position not found (status %s), removing from tracking", ticker, status)
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)
+                await self._notifier.notify_error(f"sell {ticker}", str(e))
         except Exception as e:
             logger.error("Failed to close position for %s: %s", ticker, e)
+            await self._notifier.notify_error(f"sell {ticker}", str(e))
