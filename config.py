@@ -70,8 +70,8 @@ def load_config() -> Config:
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
         allow_short=os.getenv("ALLOW_SHORT", "true").lower() in ("true", "1", "yes"),
-        stop_loss_pct=_parse_float("STOP_LOSS_PCT", "0.05"),
-        take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "0.10"),
+        stop_loss_pct=_parse_float("STOP_LOSS_PCT", "2.0") / 100,
+        take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "3.0") / 100,
         telegram_enabled=telegram_enabled,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -82,8 +82,8 @@ def load_config() -> Config:
     if cfg.short_qty <= 0:
         raise ValueError("SHORT_QTY must be a positive integer")
     if not (0 < cfg.stop_loss_pct < 1):
-        raise ValueError("STOP_LOSS_PCT must be between 0 and 1 exclusive")
+        raise ValueError("STOP_LOSS_PCT must be between 0 and 100 exclusive (e.g. 2 = 2%)")
     if not (0 < cfg.take_profit_pct < 1):
-        raise ValueError("TAKE_PROFIT_PCT must be between 0 and 1 exclusive")
+        raise ValueError("TAKE_PROFIT_PCT must be between 0 and 100 exclusive (e.g. 3 = 3%)")
 
     return cfg
