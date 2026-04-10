@@ -26,11 +26,11 @@ class PositionMonitor:
         while True:
             await asyncio.sleep(30)
             try:
-                self._check_positions()
+                await self._check_positions()
             except Exception:
                 logger.exception("Position monitor poll failed")
 
-    def _check_positions(self) -> None:
+    async def _check_positions(self) -> None:
         positions = self._client.get_all_positions()
         for pos in positions:
             try:
@@ -44,9 +44,9 @@ class PositionMonitor:
 
                 if pnl <= -self._stop_loss:
                     logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    self._executor.sell(ticker)
+                    await self._executor.sell(ticker)
                 elif pnl >= self._take_profit:
                     logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    self._executor.sell(ticker)
+                    await self._executor.sell(ticker)
             except Exception:
                 logger.exception("Error processing position %s", pos.symbol)

@@ -55,13 +55,13 @@ class NewsHandler:
             logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
             if decision.action == "buy" and decision.ticker:
-                self._executor.buy(decision.ticker)
+                await self._executor.buy(decision.ticker)
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
-                    self._executor.short(decision.ticker)
+                    await self._executor.short(decision.ticker)
                 else:
                     logger.info("Short selling disabled — skipping short for %s", decision.ticker)
             elif decision.action == "sell" and decision.ticker:
-                self._executor.sell(decision.ticker)
+                await self._executor.sell(decision.ticker)
         except Exception:
             logger.exception("Unhandled error processing news event")
