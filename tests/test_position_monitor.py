@@ -1,5 +1,5 @@
 import pytest
-from position_monitor import compute_pnl_pct
+from trading.position_monitor import compute_pnl_pct
 
 
 def test_pnl_at_stop_loss_boundary():

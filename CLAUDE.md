@@ -36,10 +36,10 @@ Single async Python process. Two coroutines run concurrently via `asyncio.gather
 | File | Responsibility |
 |------|---------------|
 | `config.py` | Load/validate `.env` into frozen `Config` dataclass |
-| `order_executor.py` | Buy/sell via alpaca-py; manage `held_tickers` |
-| `llm_advisor.py` | Call Claude API; parse `Decision(action, ticker, reasoning)` |
-| `position_monitor.py` | SL/TP loop; `compute_pnl_pct()` is pure and tested |
-| `news_handler.py` | WebSocket subscriber; routes LLM decisions to executor |
+| `trading/order_executor.py` | Buy/sell via alpaca-py; manage `held_tickers` |
+| `llm/llm_advisor.py` | Call Claude API; parse `Decision(action, ticker, reasoning)` |
+| `trading/position_monitor.py` | SL/TP loop; `compute_pnl_pct()` is pure and tested |
+| `news/news_handler.py` | WebSocket subscriber; routes LLM decisions to executor |
 | `main.py` | Entry point; wires all components |
 
 ## Testing

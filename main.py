@@ -2,10 +2,10 @@ import asyncio
 import logging
 from rich.logging import RichHandler
 from config import load_config, Config
-from order_executor import OrderExecutor
-from llm_advisor import LLMAdvisor
-from news_handler import NewsHandler
-from position_monitor import PositionMonitor
+from trading.order_executor import OrderExecutor
+from llm.llm_advisor import LLMAdvisor
+from news.news_handler import NewsHandler
+from trading.position_monitor import PositionMonitor
 from alpaca.trading.client import TradingClient
 
 logging.basicConfig(

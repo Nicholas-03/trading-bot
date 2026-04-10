@@ -1,5 +1,5 @@
 import pytest
-from llm_advisor import Decision, _parse_response
+from llm.llm_advisor import Decision, _parse_response
 
 
 def test_parse_buy_decision():
