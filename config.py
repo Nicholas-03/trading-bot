@@ -18,6 +18,9 @@ class Config:
     allow_short: bool
     stop_loss_pct: float
     take_profit_pct: float
+    telegram_enabled: bool
+    telegram_bot_token: str
+    telegram_chat_id: str
 
     @property
     def paper(self) -> bool:
@@ -49,6 +52,12 @@ def load_config() -> Config:
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
+    telegram_enabled = os.getenv("TELEGRAM_ENABLED", "false").lower() in ("true", "1", "yes")
+    if telegram_enabled:
+        telegram_missing = [k for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") if not os.getenv(k)]
+        if telegram_missing:
+            raise ValueError(f"TELEGRAM_ENABLED=true but missing: {', '.join(telegram_missing)}")
+
     cfg = Config(
         alpaca_api_key=os.environ["ALPACA_API_KEY"],
         alpaca_secret_key=os.environ["ALPACA_SECRET_KEY"],
@@ -63,6 +72,9 @@ def load_config() -> Config:
         allow_short=os.getenv("ALLOW_SHORT", "true").lower() in ("true", "1", "yes"),
         stop_loss_pct=_parse_float("STOP_LOSS_PCT", "0.05"),
         take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "0.10"),
+        telegram_enabled=telegram_enabled,
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
 
     if cfg.trade_amount_usd <= 0:
