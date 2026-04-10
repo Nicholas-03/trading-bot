@@ -1,5 +1,6 @@
 services:
   trading-bot:
     build: .
+    container_name: trading-bot
     env_file: .env
     restart: unless-stopped
