@@ -11,3 +11,6 @@ __pycache__
 tests/
 docs/
 README.md
+CLAUDE.md
+.env.example
+.claude/
