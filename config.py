@@ -15,6 +15,7 @@ class Config:
     llm_provider: str
     trade_amount_usd: float
     short_qty: int
+    allow_short: bool
     stop_loss_pct: float
     take_profit_pct: float
 
@@ -59,6 +60,7 @@ def load_config() -> Config:
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
+        allow_short=os.getenv("ALLOW_SHORT", "true").lower() in ("true", "1", "yes"),
         stop_loss_pct=_parse_float("STOP_LOSS_PCT", "0.05"),
         take_profit_pct=_parse_float("TAKE_PROFIT_PCT", "0.10"),
     )

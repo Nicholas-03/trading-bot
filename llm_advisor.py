@@ -6,6 +6,7 @@ from typing import Literal
 
 import anthropic
 from google import genai
+from google.genai import errors as genai_errors
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -126,8 +127,21 @@ class LLMAdvisor:
         return message.content[0].text
 
     async def _call_gemini(self, prompt: str) -> str:
-        response = await self._gemini.aio.models.generate_content(
-            model=self._gemini_model,
-            contents=prompt,
-        )
-        return response.text
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._gemini.aio.models.generate_content(
+                    model=self._gemini_model,
+                    contents=prompt,
+                )
+                return response.text
+            except genai_errors.ServerError as e:
+                if attempt < max_retries:
+                    wait = 2 ** attempt  # 1s, 2s, 4s
+                    logger.warning(
+                        "Gemini 503 (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, max_retries, wait, e,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise

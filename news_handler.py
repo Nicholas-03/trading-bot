@@ -57,7 +57,10 @@ class NewsHandler:
             if decision.action == "buy" and decision.ticker:
                 self._executor.buy(decision.ticker)
             elif decision.action == "short" and decision.ticker:
-                self._executor.short(decision.ticker)
+                if self._config.allow_short:
+                    self._executor.short(decision.ticker)
+                else:
+                    logger.info("Short selling disabled — skipping short for %s", decision.ticker)
             elif decision.action == "sell" and decision.ticker:
                 self._executor.sell(decision.ticker)
         except Exception:
