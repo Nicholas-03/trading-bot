@@ -55,7 +55,7 @@ class TelegramNotifier:
 
     def _format_error(self, action: str, detail: str) -> str:
         return (
-            f"❌ ERROR in OrderExecutor\n"
+            f"❌ ERROR\n"
             f"📌 Action: {action}\n"
             f"⚠️ Detail: {detail}"
         )
@@ -64,10 +64,11 @@ class TelegramNotifier:
 
     async def _send(self, message: str) -> None:
         try:
-            await self._client.post(
+            response = await self._client.post(
                 _API_URL.format(token=self._token),
                 json={"chat_id": self._chat_id, "text": message},
             )
+            response.raise_for_status()
         except Exception as e:
             logger.warning("Telegram notification failed: %s", e)
 
@@ -88,6 +89,9 @@ class NoOpNotifier(TelegramNotifier):
         pass
 
     async def notify_error(self, action: str, detail: str) -> None:
+        pass
+
+    async def _send(self, message: str) -> None:
         pass
 
     async def aclose(self) -> None:

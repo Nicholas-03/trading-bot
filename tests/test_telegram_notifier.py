@@ -69,6 +69,26 @@ def test_notify_sell_calls_send_with_formatted_message():
     assert "MSFT" in message
 
 
+def test_notify_short_calls_send_with_formatted_message():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    n._send = AsyncMock()
+    asyncio.run(n.notify_short("TSLA", 2, "xyz789"))
+    n._send.assert_called_once()
+    message = n._send.call_args[0][0]
+    assert "TSLA" in message
+    assert "2" in message
+
+
+def test_notify_error_calls_send_with_formatted_message():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    n._send = AsyncMock()
+    asyncio.run(n.notify_error("buy AAPL", "Connection refused"))
+    n._send.assert_called_once()
+    message = n._send.call_args[0][0]
+    assert "buy AAPL" in message
+    assert "Connection refused" in message
+
+
 def test_send_failure_does_not_raise():
     """A Telegram API failure must never propagate to the caller."""
     import httpx
