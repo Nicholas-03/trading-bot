@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 import httpx
 from typing import Protocol, runtime_checkable
 
@@ -14,6 +16,7 @@ class Notifier(Protocol):
     async def aclose(self) -> None: ...
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
+_UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
 
 
 class TelegramNotifier:
@@ -81,6 +84,79 @@ class TelegramNotifier:
             response.raise_for_status()
         except Exception as e:
             logger.warning("Telegram notification failed: %s", e)
+
+
+class TelegramCommandListener:
+    """Polls Telegram for incoming commands and handles /status."""
+
+    def __init__(self, token: str, chat_id: str, order_executor: object) -> None:
+        self._token = token
+        self._chat_id = chat_id
+        self._order_executor = order_executor
+        self._client = httpx.AsyncClient(timeout=35.0)
+        self._offset = 0
+        self._started_at = time.monotonic()
+
+    async def run(self) -> None:
+        logger.info("Telegram command listener started")
+        while True:
+            try:
+                await self._poll()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Telegram poll error: %s", e)
+                await asyncio.sleep(5)
+
+    async def _poll(self) -> None:
+        response = await self._client.get(
+            _UPDATES_URL.format(token=self._token),
+            params={"offset": self._offset, "timeout": 30, "allowed_updates": ["message"]},
+        )
+        response.raise_for_status()
+        data = response.json()
+        for update in data.get("result", []):
+            self._offset = update["update_id"] + 1
+            await self._handle_update(update)
+
+    async def _handle_update(self, update: dict) -> None:
+        message = update.get("message", {})
+        text = message.get("text", "").strip()
+        if text == "/status":
+            await self._send_status()
+
+    async def _send_status(self) -> None:
+        uptime_secs = int(time.monotonic() - self._started_at)
+        hours, remainder = divmod(uptime_secs, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{hours}h {minutes}m {seconds}s"
+
+        held = sorted(self._order_executor.held_tickers)
+        shorted = sorted(self._order_executor.shorted_tickers)
+        positions_str = ""
+        if held:
+            positions_str += f"\n📈 Long: {', '.join(held)}"
+        if shorted:
+            positions_str += f"\n📉 Short: {', '.join(shorted)}"
+        if not held and not shorted:
+            positions_str = "\n📭 No open positions"
+
+        message = (
+            f"✅ Service is online\n"
+            f"⏱ Uptime: {uptime_str}"
+            f"{positions_str}"
+        )
+        try:
+            response = await self._client.post(
+                _API_URL.format(token=self._token),
+                json={"chat_id": self._chat_id, "text": message},
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.warning("Failed to send status reply: %s", e)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
 
 
 class NoOpNotifier(TelegramNotifier):
