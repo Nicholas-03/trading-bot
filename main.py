@@ -7,6 +7,7 @@ from llm.llm_advisor import LLMAdvisor
 from news.news_handler import NewsHandler
 from trading.position_monitor import PositionMonitor
 from alpaca.trading.client import TradingClient
+from notifications.telegram_notifier import TelegramNotifier, NoOpNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +38,12 @@ async def main() -> None:
     config = load_config()
     held_tickers, shorted_tickers = _load_open_positions(config)
 
-    order_executor = OrderExecutor(config, held_tickers, shorted_tickers)
+    if config.telegram_enabled:
+        notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+    else:
+        notifier = NoOpNotifier()
+
+    order_executor = OrderExecutor(config, held_tickers, shorted_tickers, notifier)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(config, llm_advisor, order_executor)
     position_monitor = PositionMonitor(config, order_executor)
@@ -53,6 +59,8 @@ async def main() -> None:
         )
     except asyncio.CancelledError:
         logger.info("Bot shutting down")
+    finally:
+        await notifier.aclose()
 
 
 if __name__ == "__main__":
