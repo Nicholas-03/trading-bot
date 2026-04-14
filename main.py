@@ -1,12 +1,16 @@
 import asyncio
 import logging
+from datetime import date, datetime
 from rich.logging import RichHandler
+import pytz
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import GetOrdersRequest
+from alpaca.trading.enums import QueryOrderStatus, OrderStatus
 from config import load_config, Config
 from trading.order_executor import OrderExecutor
 from llm.llm_advisor import LLMAdvisor
 from news.news_handler import NewsHandler
 from trading.position_monitor import PositionMonitor
-from alpaca.trading.client import TradingClient
 from notifications.telegram_notifier import TelegramNotifier, TelegramCommandListener, NoOpNotifier
 
 logging.basicConfig(
@@ -18,12 +22,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_open_positions(config: Config) -> tuple[TradingClient, set[str], set[str]]:
-    client = TradingClient(
+def _make_trading_client(config: Config) -> TradingClient:
+    return TradingClient(
         api_key=config.alpaca_api_key,
         secret_key=config.alpaca_secret_key,
         paper=config.paper,
     )
+
+
+def _load_open_positions(
+    client: TradingClient,
+) -> tuple[set[str], set[str], dict[str, date]]:
     positions = client.get_all_positions()
     held = {p.symbol for p in positions if p.side.value == "long"}
     shorted = {p.symbol for p in positions if p.side.value == "short"}
@@ -31,19 +40,37 @@ def _load_open_positions(config: Config) -> tuple[TradingClient, set[str], set[s
         logger.info("Resuming with existing long positions: %s", held)
     if shorted:
         logger.info("Resuming with existing short positions: %s", shorted)
-    return client, held, shorted
+
+    # Seed _open_dates for positions opened today so the PDT guard
+    # is not bypassed after a mid-day restart.
+    et = pytz.timezone("America/New_York")
+    today_start_et = et.localize(datetime.combine(date.today(), datetime.min.time()))
+    orders = client.get_orders(
+        GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=today_start_et)
+    )
+    open_today = {
+        o.symbol
+        for o in orders
+        if o.status == OrderStatus.FILLED and o.symbol in (held | shorted)
+    }
+    open_dates: dict[str, date] = {symbol: date.today() for symbol in open_today}
+    if open_dates:
+        logger.info("Seeding PDT open_dates from today's fills: %s", set(open_dates))
+
+    return held, shorted, open_dates
 
 
 async def main() -> None:
     config = load_config()
-    client, held_tickers, shorted_tickers = _load_open_positions(config)
+    client = _make_trading_client(config)
+    held_tickers, shorted_tickers, open_dates = _load_open_positions(client)
 
     if config.telegram_enabled:
         notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
     else:
         notifier = NoOpNotifier()
 
-    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
+    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, open_dates=open_dates)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(client, config, llm_advisor, order_executor)
     position_monitor = PositionMonitor(client, config, order_executor)
