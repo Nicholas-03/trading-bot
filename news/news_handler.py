@@ -40,7 +40,7 @@ class NewsHandler:
 
     async def _handle_news(self, news) -> None:
         try:
-            clock = self._trading_client.get_clock()
+            clock = await asyncio.to_thread(self._trading_client.get_clock)
             if not clock.is_open:
                 logger.debug("Market closed — skipping news event")
                 return
