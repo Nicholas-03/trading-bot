@@ -10,15 +10,11 @@ logger = logging.getLogger(__name__)
 
 
 class NewsHandler:
-    def __init__(self, config: Config, llm_advisor: LLMAdvisor, order_executor: OrderExecutor) -> None:
+    def __init__(self, client: TradingClient, config: Config, llm_advisor: LLMAdvisor, order_executor: OrderExecutor) -> None:
+        self._client = client
         self._config = config
         self._advisor = llm_advisor
         self._executor = order_executor
-        self._trading_client = TradingClient(
-            api_key=config.alpaca_api_key,
-            secret_key=config.alpaca_secret_key,
-            paper=config.paper,
-        )
 
     async def run(self) -> None:
         while True:
@@ -40,7 +36,7 @@ class NewsHandler:
 
     async def _handle_news(self, news) -> None:
         try:
-            clock = await asyncio.to_thread(self._trading_client.get_clock)
+            clock = await asyncio.to_thread(self._client.get_clock)
             if not clock.is_open:
                 logger.debug("Market closed — skipping news event")
                 return
