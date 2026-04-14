@@ -44,16 +44,19 @@ def _load_open_positions(
     # Seed _open_dates for positions opened today so the PDT guard
     # is not bypassed after a mid-day restart.
     et = pytz.timezone("America/New_York")
-    today_start_et = et.localize(datetime.combine(date.today(), datetime.min.time()))
+    today = date.today()
+    today_start_et = et.localize(datetime.combine(today, datetime.min.time()))
+    # QueryOrderStatus only has OPEN/CLOSED/ALL; CLOSED covers filled+cancelled+expired.
+    # We filter to OrderStatus.FILLED below to exclude non-fills for currently-held symbols.
     orders = client.get_orders(
-        GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=today_start_et)
+        GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=today_start_et, limit=500)
     )
     open_today = {
         o.symbol
         for o in orders
         if o.status == OrderStatus.FILLED and o.symbol in (held | shorted)
     }
-    open_dates: dict[str, date] = {symbol: date.today() for symbol in open_today}
+    open_dates: dict[str, date] = {symbol: today for symbol in open_today}
     if open_dates:
         logger.info("Seeding PDT open_dates from today's fills: %s", set(open_dates))
 
