@@ -6,7 +6,7 @@ from trading.order_executor import OrderExecutor
 from config import Config
 
 
-def _make_executor(open_dates: dict | None = None) -> OrderExecutor:
+def _make_executor(open_dates: dict[str, date] | None = None) -> OrderExecutor:
     config = MagicMock(spec=Config)
     config.trade_amount_usd = 5.0
     config.short_qty = 1
@@ -63,3 +63,19 @@ def test_open_date_cleared_on_404_sell():
 
     assert "AAPL" not in ex._open_dates
     assert "AAPL" not in ex._held_tickers
+
+
+def test_open_dates_seeded_from_constructor():
+    seeded = {"AAPL": date.today(), "TSLA": date.today() - timedelta(days=1)}
+    ex = _make_executor(open_dates=seeded)
+    assert ex.is_opened_today("AAPL") is True
+    assert ex.is_opened_today("TSLA") is False  # yesterday
+    assert ex.is_opened_today("MSFT") is False  # not seeded
+
+
+def test_open_dates_constructor_copy_is_isolated():
+    """Mutating the original dict must not affect the executor's tracking."""
+    seeded = {"AAPL": date.today()}
+    ex = _make_executor(open_dates=seeded)
+    seeded["AAPL"] = date.today() - timedelta(days=1)  # mutate original
+    assert ex.is_opened_today("AAPL") is True  # executor unaffected
