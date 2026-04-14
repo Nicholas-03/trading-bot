@@ -1,16 +1,13 @@
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, AsyncMock
 import pytest
 from alpaca.common.exceptions import APIError
 from trading.order_executor import OrderExecutor
 from config import Config
 
 
-def _make_executor() -> OrderExecutor:
+def _make_executor(open_dates: dict | None = None) -> OrderExecutor:
     config = MagicMock(spec=Config)
-    config.alpaca_api_key = "key"
-    config.alpaca_secret_key = "secret"
-    config.paper = True
     config.trade_amount_usd = 5.0
     config.short_qty = 1
     notifier = MagicMock()
@@ -18,8 +15,8 @@ def _make_executor() -> OrderExecutor:
     notifier.notify_short = AsyncMock()
     notifier.notify_sell = AsyncMock()
     notifier.notify_error = AsyncMock()
-    with patch("trading.order_executor.TradingClient"):
-        return OrderExecutor(config, set(), set(), notifier)
+    client = MagicMock()
+    return OrderExecutor(client, config, set(), set(), notifier, open_dates=open_dates)
 
 
 def test_is_opened_today_false_when_not_tracked():

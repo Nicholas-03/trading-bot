@@ -18,7 +18,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _load_open_positions(config: Config) -> tuple[set[str], set[str]]:
+def _load_open_positions(config: Config) -> tuple[TradingClient, set[str], set[str]]:
     client = TradingClient(
         api_key=config.alpaca_api_key,
         secret_key=config.alpaca_secret_key,
@@ -31,19 +31,19 @@ def _load_open_positions(config: Config) -> tuple[set[str], set[str]]:
         logger.info("Resuming with existing long positions: %s", held)
     if shorted:
         logger.info("Resuming with existing short positions: %s", shorted)
-    return held, shorted
+    return client, held, shorted
 
 
 async def main() -> None:
     config = load_config()
-    held_tickers, shorted_tickers = _load_open_positions(config)
+    client, held_tickers, shorted_tickers = _load_open_positions(config)
 
     if config.telegram_enabled:
         notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
     else:
         notifier = NoOpNotifier()
 
-    order_executor = OrderExecutor(config, held_tickers, shorted_tickers, notifier)
+    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(config, llm_advisor, order_executor)
     position_monitor = PositionMonitor(config, order_executor)

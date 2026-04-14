@@ -11,18 +11,22 @@ logger = logging.getLogger(__name__)
 
 
 class OrderExecutor:
-    def __init__(self, config: Config, held_tickers: set[str], shorted_tickers: set[str], notifier: Notifier) -> None:
-        self._client = TradingClient(
-            api_key=config.alpaca_api_key,
-            secret_key=config.alpaca_secret_key,
-            paper=config.paper,
-        )
+    def __init__(
+        self,
+        client: TradingClient,
+        config: Config,
+        held_tickers: set[str],
+        shorted_tickers: set[str],
+        notifier: Notifier,
+        open_dates: dict[str, date] | None = None,
+    ) -> None:
+        self._client = client
         self._notional_usd = config.trade_amount_usd
         self._short_qty = config.short_qty
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
-        self._open_dates: dict[str, date] = {}
+        self._open_dates: dict[str, date] = dict(open_dates) if open_dates else {}
 
     @property
     def held_tickers(self) -> frozenset[str]:
