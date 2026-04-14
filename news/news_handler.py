@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from alpaca.data.live import NewsDataStream
+from alpaca.trading.client import TradingClient
 from llm.llm_advisor import LLMAdvisor
 from trading.order_executor import OrderExecutor
 from config import Config
@@ -13,6 +14,11 @@ class NewsHandler:
         self._config = config
         self._advisor = llm_advisor
         self._executor = order_executor
+        self._trading_client = TradingClient(
+            api_key=config.alpaca_api_key,
+            secret_key=config.alpaca_secret_key,
+            paper=config.paper,
+        )
 
     async def run(self) -> None:
         while True:
@@ -34,6 +40,10 @@ class NewsHandler:
 
     async def _handle_news(self, news) -> None:
         try:
+            clock = self._trading_client.get_clock()
+            if not clock.is_open:
+                logger.debug("Market closed — skipping news event")
+                return
             headline = getattr(news, "headline", "")
             summary = getattr(news, "summary", "")
             symbols: list[str] = getattr(news, "symbols", [])
