@@ -41,8 +41,8 @@ def _make_monitor(stop_loss=0.02, take_profit=0.03):
     executor = MagicMock()
     executor.sell = AsyncMock()
 
-    with patch("trading.position_monitor.TradingClient"):
-        monitor = PositionMonitor(config, executor)
+    client = MagicMock()
+    monitor = PositionMonitor(client, config, executor)
 
     return monitor, executor
 

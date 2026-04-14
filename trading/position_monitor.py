@@ -1,8 +1,8 @@
 import asyncio
 import logging
+from alpaca.trading.client import TradingClient
 from trading.order_executor import OrderExecutor
 from config import Config
-from alpaca.trading.client import TradingClient
 
 logger = logging.getLogger(__name__)
 
@@ -12,12 +12,8 @@ def compute_pnl_pct(avg_entry_price: float, current_price: float) -> float:
 
 
 class PositionMonitor:
-    def __init__(self, config: Config, order_executor: OrderExecutor) -> None:
-        self._client = TradingClient(
-            api_key=config.alpaca_api_key,
-            secret_key=config.alpaca_secret_key,
-            paper=config.paper,
-        )
+    def __init__(self, client: TradingClient, config: Config, order_executor: OrderExecutor) -> None:
+        self._client = client
         self._stop_loss = config.stop_loss_pct
         self._take_profit = config.take_profit_pct
         self._executor = order_executor
