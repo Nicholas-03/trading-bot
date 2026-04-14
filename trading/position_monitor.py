@@ -43,10 +43,16 @@ class PositionMonitor:
                 pnl = compute_pnl_pct(entry, current)
 
                 if pnl <= -self._stop_loss:
-                    logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    await self._executor.sell(ticker)
+                    if self._executor.is_opened_today(ticker):
+                        logger.info("PDT guard — skipping stop-loss close for %s (opened today)", ticker)
+                    else:
+                        logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                        await self._executor.sell(ticker)
                 elif pnl >= self._take_profit:
-                    logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    await self._executor.sell(ticker)
+                    if self._executor.is_opened_today(ticker):
+                        logger.info("PDT guard — skipping take-profit close for %s (opened today)", ticker)
+                    else:
+                        logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                        await self._executor.sell(ticker)
             except Exception:
                 logger.exception("Error processing position %s", pos.symbol)
