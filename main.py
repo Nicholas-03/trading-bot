@@ -44,7 +44,7 @@ def _load_open_positions(
     # Seed _open_dates for positions opened today so the PDT guard
     # is not bypassed after a mid-day restart.
     et = pytz.timezone("America/New_York")
-    today = date.today()
+    today = datetime.now(et).date()
     today_start_et = et.localize(datetime.combine(today, datetime.min.time()))
     # QueryOrderStatus only has OPEN/CLOSED/ALL; CLOSED covers filled+cancelled+expired.
     # We filter to OrderStatus.FILLED below to exclude non-fills for currently-held symbols.
