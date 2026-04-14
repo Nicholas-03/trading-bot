@@ -1,4 +1,5 @@
 import logging
+from datetime import date
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import MarketOrderRequest
 from alpaca.trading.enums import OrderSide, TimeInForce
@@ -21,6 +22,7 @@ class OrderExecutor:
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
+        self._open_dates: dict[str, date] = {}
 
     @property
     def held_tickers(self) -> frozenset[str]:
@@ -29,6 +31,9 @@ class OrderExecutor:
     @property
     def shorted_tickers(self) -> frozenset[str]:
         return frozenset(self._shorted_tickers)
+
+    def is_opened_today(self, ticker: str) -> bool:
+        return self._open_dates.get(ticker) == date.today()
 
     async def buy(self, ticker: str) -> None:
         if ticker in self._held_tickers:
@@ -47,6 +52,7 @@ class OrderExecutor:
                 )
             )
             self._held_tickers.add(ticker)
+            self._open_dates[ticker] = date.today()
             logger.info(
                 "BUY order accepted for %s $%.2f — order %s (pending fill)",
                 ticker, self._notional_usd, getattr(order, "id", "unknown"),
@@ -73,6 +79,7 @@ class OrderExecutor:
                 )
             )
             self._shorted_tickers.add(ticker)
+            self._open_dates[ticker] = date.today()
             logger.info(
                 "SHORT order accepted for %s qty=%d — order %s (pending fill)",
                 ticker, self._short_qty, getattr(order, "id", "unknown"),
@@ -91,6 +98,7 @@ class OrderExecutor:
             self._client.close_position(ticker)
             self._held_tickers.discard(ticker)
             self._shorted_tickers.discard(ticker)
+            self._open_dates.pop(ticker, None)
             logger.info("CLOSED position for %s", ticker)
             await self._notifier.notify_sell(ticker)
         except APIError as e:
@@ -98,6 +106,7 @@ class OrderExecutor:
             if status in (404, 422):
                 self._held_tickers.discard(ticker)
                 self._shorted_tickers.discard(ticker)
+                self._open_dates.pop(ticker, None)
                 logger.warning("Close %s — position not found (status %s), removing from tracking", ticker, status)
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)
