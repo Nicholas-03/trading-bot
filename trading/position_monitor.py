@@ -18,6 +18,8 @@ def _should_fire_report(now_et: datetime, last_report_date: date | None) -> bool
 
     Fires during the 16:00:00–16:00:59 ET window, at most once per calendar day.
     """
+    if now_et.tzinfo is None:
+        raise ValueError("now_et must be timezone-aware (ET)")
     if now_et.hour != 16 or now_et.minute != 0:
         return False
     return last_report_date != now_et.date()

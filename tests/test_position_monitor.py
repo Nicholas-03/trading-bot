@@ -134,3 +134,9 @@ def test_should_not_fire_after_close_minute():
 def test_should_fire_new_day_after_previous_report():
     now = _ET.localize(datetime(2026, 4, 15, 16, 0, 0))
     assert _should_fire_report(now, date(2026, 4, 14)) is True
+
+
+def test_should_fire_report_raises_on_naive_datetime():
+    naive = datetime(2026, 4, 14, 16, 0, 0)  # no tzinfo
+    with pytest.raises(ValueError, match="timezone-aware"):
+        _should_fire_report(naive, None)
