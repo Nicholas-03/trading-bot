@@ -76,7 +76,7 @@ async def main() -> None:
     order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, open_dates=open_dates)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(client, config, llm_advisor, order_executor)
-    position_monitor = PositionMonitor(client, config, order_executor)
+    position_monitor = PositionMonitor(client, config, order_executor, notifier)
 
     coroutines = [news_handler.run(), position_monitor.run()]
     command_listener = None

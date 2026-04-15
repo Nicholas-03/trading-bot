@@ -43,8 +43,12 @@ def _make_monitor(stop_loss=0.02, take_profit=0.03):
     executor = MagicMock()
     executor.sell = AsyncMock()
 
+    notifier = MagicMock()
+    notifier.notify_eod_report = AsyncMock()
+    notifier.notify_weekly_report = AsyncMock()
+
     client = MagicMock()
-    monitor = PositionMonitor(client, config, executor)
+    monitor = PositionMonitor(client, config, executor, notifier)
 
     return monitor, executor
 
