@@ -178,6 +178,13 @@ class OrderExecutor:
                 self._shorted_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
                 self._pending_close.add(ticker)
+                self._maybe_reset_day()
+                self._maybe_reset_week()
+                self._daily_sells += 1
+                self._weekly_sells += 1
+                if pnl_usd is not None:
+                    self._daily_realized_pnl += pnl_usd
+                    self._weekly_realized_pnl += pnl_usd
                 logger.warning(
                     "Close %s — position already gone or closing (HTTP %s), removing from tracking",
                     ticker, e.response.status_code,
@@ -191,6 +198,13 @@ class OrderExecutor:
                 self._shorted_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
                 self._pending_close.add(ticker)
+                self._maybe_reset_day()
+                self._maybe_reset_week()
+                self._daily_sells += 1
+                self._weekly_sells += 1
+                if pnl_usd is not None:
+                    self._daily_realized_pnl += pnl_usd
+                    self._weekly_realized_pnl += pnl_usd
                 logger.warning(
                     "Close %s — position not found in broker, removing from tracking", ticker
                 )
