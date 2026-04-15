@@ -41,41 +41,43 @@ def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
 async def main() -> None:
     config = load_config()
     client = _make_tradier_client(config)
-    held_tickers, shorted_tickers = _load_open_positions(client)
-
-    if config.telegram_enabled:
-        notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
-    else:
-        notifier = NoOpNotifier()
-
-    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
-    llm_advisor = LLMAdvisor(config)
-    news_handler = NewsHandler(client, config, llm_advisor, order_executor)
-    position_monitor = PositionMonitor(client, config, order_executor, notifier)
-
-    coroutines = [news_handler.run(), position_monitor.run()]
-    command_listener = None
-    if config.telegram_enabled:
-        command_listener = TelegramCommandListener(
-            config.telegram_bot_token, config.telegram_chat_id, order_executor
-        )
-        coroutines.append(command_listener.run())
-
-    logger.info(
-        "Bot starting — paper=%s, trade_amount=$%.2f, SL=%.0f%%, TP=%.0f%%",
-        config.tradier_paper, config.trade_amount_usd,
-        config.stop_loss_pct * 100, config.take_profit_pct * 100,
-    )
-
     try:
-        await asyncio.gather(*coroutines)
-    except asyncio.CancelledError:
-        logger.info("Bot shutting down")
+        held_tickers, shorted_tickers = _load_open_positions(client)
+
+        if config.telegram_enabled:
+            notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+        else:
+            notifier = NoOpNotifier()
+
+        order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
+        llm_advisor = LLMAdvisor(config)
+        news_handler = NewsHandler(client, config, llm_advisor, order_executor)
+        position_monitor = PositionMonitor(client, config, order_executor, notifier)
+
+        coroutines = [news_handler.run(), position_monitor.run()]
+        command_listener = None
+        if config.telegram_enabled:
+            command_listener = TelegramCommandListener(
+                config.telegram_bot_token, config.telegram_chat_id, order_executor
+            )
+            coroutines.append(command_listener.run())
+
+        logger.info(
+            "Bot starting — paper=%s, trade_amount=$%.2f, SL=%.0f%%, TP=%.0f%%",
+            config.tradier_paper, config.trade_amount_usd,
+            config.stop_loss_pct * 100, config.take_profit_pct * 100,
+        )
+
+        try:
+            await asyncio.gather(*coroutines)
+        except asyncio.CancelledError:
+            logger.info("Bot shutting down")
+        finally:
+            await notifier.aclose()
+            if command_listener:
+                await command_listener.aclose()
     finally:
         client.close()
-        await notifier.aclose()
-        if command_listener:
-            await command_listener.aclose()
 
 
 if __name__ == "__main__":

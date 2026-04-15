@@ -41,6 +41,7 @@ def load_config() -> Config:
     if provider not in ("claude", "gemini"):
         raise ValueError(f"LLM_PROVIDER must be 'claude' or 'gemini', got {provider!r}")
 
+    # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
     required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
     if provider == "claude":
         required.append("ANTHROPIC_API_KEY")
