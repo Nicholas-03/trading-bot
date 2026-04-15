@@ -1,20 +1,33 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from alpaca.data.live import NewsDataStream
 from trading.tradier_client import TradierClient
 from llm.llm_advisor import LLMAdvisor
 from trading.order_executor import OrderExecutor
 from config import Config
 
+if TYPE_CHECKING:
+    from analytics.db import TradeDB
+
 logger = logging.getLogger(__name__)
 
 
 class NewsHandler:
-    def __init__(self, client: TradierClient, config: Config, llm_advisor: LLMAdvisor, order_executor: OrderExecutor) -> None:
+    def __init__(
+        self,
+        client: TradierClient,
+        config: Config,
+        llm_advisor: LLMAdvisor,
+        order_executor: OrderExecutor,
+        db: "TradeDB | None" = None,
+    ) -> None:
         self._client = client
         self._config = config
         self._advisor = llm_advisor
         self._executor = order_executor
+        self._db = db
 
     async def run(self) -> None:
         while True:
@@ -50,6 +63,16 @@ class NewsHandler:
                 logger.debug("No tickers in news event — skipping")
                 return
 
+            news_event_id: int | None = None
+            if self._db is not None:
+                try:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    news_event_id = await asyncio.to_thread(
+                        self._db.record_news, ts, headline, summary, symbols
+                    )
+                except Exception as db_err:
+                    logger.warning("Failed to record news event in analytics DB: %s", db_err)
+
             decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
@@ -60,11 +83,22 @@ class NewsHandler:
 
             logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
+            decision_id: int | None = None
+            if self._db is not None and news_event_id is not None:
+                try:
+                    ts = datetime.now(timezone.utc).isoformat()
+                    decision_id = await asyncio.to_thread(
+                        self._db.record_decision,
+                        news_event_id, ts, decision.action, decision.ticker, decision.reasoning,
+                    )
+                except Exception as db_err:
+                    logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
+
             if decision.action == "buy" and decision.ticker:
-                await self._executor.buy(decision.ticker)
+                await self._executor.buy(decision.ticker, decision_id=decision_id)
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
-                    await self._executor.short(decision.ticker)
+                    await self._executor.short(decision.ticker, decision_id=decision_id)
                 else:
                     logger.info("Short selling disabled — skipping short for %s", decision.ticker)
             elif decision.action == "sell" and decision.ticker:
