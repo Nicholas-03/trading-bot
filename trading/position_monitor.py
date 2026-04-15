@@ -94,7 +94,8 @@ class PositionMonitor:
         history = self._client.get_portfolio_history(
             GetPortfolioHistoryRequest(period="1D")
         )
-        pnl = sum(v for v in (history.profit_loss or []) if v is not None)
+        profit_loss = history.profit_loss or []
+        pnl = profit_loss[-1] if profit_loss else 0.0
 
         return buys, sells, pnl
 
@@ -114,7 +115,8 @@ class PositionMonitor:
         history = self._client.get_portfolio_history(
             GetPortfolioHistoryRequest(period="1W")
         )
-        pnl = sum(v for v in (history.profit_loss or []) if v is not None)
+        profit_loss = history.profit_loss or []
+        pnl = profit_loss[-1] if profit_loss else 0.0
 
         return buys, sells, pnl
 
