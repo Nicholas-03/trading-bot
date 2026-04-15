@@ -27,6 +27,7 @@ class OrderExecutor:
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
         self._open_dates: dict[str, date] = dict(open_dates) if open_dates else {}
+        self._pending_close: set[str] = set()
 
     @property
     def held_tickers(self) -> frozenset[str]:
@@ -38,6 +39,14 @@ class OrderExecutor:
 
     def is_opened_today(self, ticker: str) -> bool:
         return self._open_dates.get(ticker) == date.today()
+
+    @property
+    def pending_close(self) -> frozenset[str]:
+        return frozenset(self._pending_close)
+
+    def confirm_closed(self, ticker: str) -> None:
+        """Call once Alpaca no longer returns the position, to remove the pending-close guard."""
+        self._pending_close.discard(ticker)
 
     async def buy(self, ticker: str) -> None:
         if ticker in self._held_tickers:
@@ -93,7 +102,7 @@ class OrderExecutor:
             logger.error("Failed to short %s: %s", ticker, e)
             await self._notifier.notify_error(f"short {ticker}", str(e))
 
-    async def sell(self, ticker: str) -> None:
+    async def sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
         """Close a position — works for both long (sell) and short (cover)."""
         if ticker not in self._held_tickers and ticker not in self._shorted_tickers:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
@@ -103,8 +112,9 @@ class OrderExecutor:
             self._held_tickers.discard(ticker)
             self._shorted_tickers.discard(ticker)
             self._open_dates.pop(ticker, None)
+            self._pending_close.add(ticker)
             logger.info("CLOSED position for %s", ticker)
-            await self._notifier.notify_sell(ticker)
+            await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
         except APIError as e:
             status = getattr(e, "status_code", None)
             if status in (404, 422):

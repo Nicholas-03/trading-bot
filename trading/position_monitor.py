@@ -124,9 +124,21 @@ class PositionMonitor:
 
     async def _check_positions(self) -> None:
         positions = self._client.get_all_positions()
+        live_symbols = {pos.symbol for pos in positions}
+
+        # Confirm any pending-close tickers that Alpaca no longer returns
+        for ticker in self._executor.pending_close - live_symbols:
+            self._executor.confirm_closed(ticker)
+            logger.info("Confirmed closed: %s no longer in Alpaca positions", ticker)
+
         for pos in positions:
             try:
                 ticker = pos.symbol
+
+                # Skip until Alpaca settles the close order
+                if ticker in self._executor.pending_close:
+                    continue
+
                 entry = float(pos.avg_entry_price)
                 if entry == 0.0:
                     logger.warning("Skipping %s — avg_entry_price is zero", ticker)
