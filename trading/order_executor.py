@@ -108,19 +108,25 @@ class OrderExecutor:
             qty = max(1, math.floor(self._notional_usd / price))
             order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
 
-            trade_id: int | None = None
-            if self._db is not None:
-                opened_at = datetime.now(timezone.utc).isoformat()
-                trade_id = await asyncio.to_thread(
-                    self._db.record_trade_open, decision_id, ticker, "buy", qty, price, opened_at
-                )
-
+            # Update in-memory state first — broker accepted the order
             self._held_tickers.add(ticker)
-            self._position_book[ticker] = (price, qty, trade_id)
+            self._position_book[ticker] = (price, qty, None)
             self._maybe_reset_day()
             self._maybe_reset_week()
             self._daily_buys += 1
             self._weekly_buys += 1
+
+            # DB write is best-effort — a failure here is recoverable, a missing held_ticker is not
+            if self._db is not None:
+                try:
+                    opened_at = datetime.now(timezone.utc).isoformat()
+                    trade_id = await asyncio.to_thread(
+                        self._db.record_trade_open, decision_id, ticker, "buy", qty, price, opened_at
+                    )
+                    self._position_book[ticker] = (price, qty, trade_id)
+                except Exception as db_err:
+                    logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
+
             logger.info(
                 "BUY order accepted for %s qty=%d @ $%.2f — order %s (pending fill)",
                 ticker, qty, price, order_id,
@@ -142,20 +148,26 @@ class OrderExecutor:
                 self._client.submit_order, ticker, "sell_short", self._short_qty
             )
 
-            trade_id = None
-            if self._db is not None:
-                opened_at = datetime.now(timezone.utc).isoformat()
-                trade_id = await asyncio.to_thread(
-                    self._db.record_trade_open,
-                    decision_id, ticker, "short", self._short_qty, None, opened_at,
-                )
-
+            # Update in-memory state first
             self._shorted_tickers.add(ticker)
-            self._position_book[ticker] = (0.0, self._short_qty, trade_id)
+            self._position_book[ticker] = (0.0, self._short_qty, None)
             self._maybe_reset_day()
             self._maybe_reset_week()
             self._daily_buys += 1
             self._weekly_buys += 1
+
+            # DB write is best-effort
+            if self._db is not None:
+                try:
+                    opened_at = datetime.now(timezone.utc).isoformat()
+                    trade_id = await asyncio.to_thread(
+                        self._db.record_trade_open,
+                        decision_id, ticker, "short", self._short_qty, None, opened_at,
+                    )
+                    self._position_book[ticker] = (0.0, self._short_qty, trade_id)
+                except Exception as db_err:
+                    logger.warning("Failed to record short for %s in analytics DB: %s", ticker, db_err)
+
             logger.info(
                 "SHORT order accepted for %s qty=%d — order %s (pending fill)",
                 ticker, self._short_qty, order_id,
