@@ -24,6 +24,7 @@ class Config:
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
+    analytics_db_path: str
 
 
 def _parse_float(key: str, default: str) -> float:
@@ -77,6 +78,7 @@ def load_config() -> Config:
         telegram_enabled=telegram_enabled,
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
     )
 
     if cfg.trade_amount_usd <= 0:
