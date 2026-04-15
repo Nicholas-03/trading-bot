@@ -1,3 +1,4 @@
+# config.py
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -7,7 +8,9 @@ from dotenv import load_dotenv
 class Config:
     alpaca_api_key: str
     alpaca_secret_key: str
-    alpaca_base_url: str
+    tradier_access_token: str
+    tradier_account_id: str
+    tradier_paper: bool
     anthropic_api_key: str
     anthropic_model: str
     google_api_key: str
@@ -21,10 +24,6 @@ class Config:
     telegram_enabled: bool
     telegram_bot_token: str
     telegram_chat_id: str
-
-    @property
-    def paper(self) -> bool:
-        return "paper" in self.alpaca_base_url.lower()
 
 
 def _parse_float(key: str, default: str) -> float:
@@ -42,7 +41,7 @@ def load_config() -> Config:
     if provider not in ("claude", "gemini"):
         raise ValueError(f"LLM_PROVIDER must be 'claude' or 'gemini', got {provider!r}")
 
-    required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]
+    required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
     if provider == "claude":
         required.append("ANTHROPIC_API_KEY")
     else:
@@ -61,7 +60,9 @@ def load_config() -> Config:
     cfg = Config(
         alpaca_api_key=os.environ["ALPACA_API_KEY"],
         alpaca_secret_key=os.environ["ALPACA_SECRET_KEY"],
-        alpaca_base_url=os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets"),
+        tradier_access_token=os.environ["TRADIER_ACCESS_TOKEN"],
+        tradier_account_id=os.environ["TRADIER_ACCOUNT_ID"],
+        tradier_paper=os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
