@@ -33,13 +33,13 @@ class TradierClient:
 
     def get_clock(self) -> TradierClock:
         resp = self._http.get("/markets/clock")
-        resp.raise_for_status()
+        _raise_for_status(resp)
         state = resp.json()["clock"]["state"]
         return TradierClock(is_open=(state == "open"))
 
     def get_all_positions(self) -> list[TradierPosition]:
         resp = self._http.get(f"/accounts/{self._account_id}/positions")
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return _parse_positions(resp.json())
 
     def get_quotes(self, symbols: list[str]) -> dict[str, float]:
@@ -49,7 +49,7 @@ class TradierClient:
             "/markets/quotes",
             params={"symbols": ",".join(symbols)},
         )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return _parse_quotes(resp.json())
 
     def submit_order(self, symbol: str, side: str, qty: int) -> str:
@@ -65,7 +65,7 @@ class TradierClient:
                 "duration": "day",
             },
         )
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return str(resp.json()["order"]["id"])
 
     def close_position(self, symbol: str) -> str:
@@ -75,11 +75,22 @@ class TradierClient:
         if pos is None:
             raise ValueError(f"No open position for {symbol}")
         side = "sell" if pos.qty > 0 else "buy_to_cover"
-        qty = max(1, abs(int(pos.qty)))
+        qty = max(1, abs(round(pos.qty)))
         return self.submit_order(symbol, side, qty)
 
     def close(self) -> None:
         self._http.close()
+
+
+def _raise_for_status(resp: httpx.Response) -> None:
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        raise httpx.HTTPStatusError(
+            f"{exc.response.status_code} {exc.response.text}",
+            request=exc.request,
+            response=exc.response,
+        ) from exc
 
 
 def _parse_positions(data: dict) -> list[TradierPosition]:
