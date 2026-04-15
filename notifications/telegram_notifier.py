@@ -2,6 +2,8 @@ import asyncio
 import logging
 import time
 import httpx
+import pytz
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
@@ -10,9 +12,11 @@ logger = logging.getLogger(__name__)
 @runtime_checkable
 class Notifier(Protocol):
     async def notify_buy(self, ticker: str, notional: float, order_id: str) -> None: ...
-    async def notify_sell(self, ticker: str) -> None: ...
+    async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None: ...
     async def notify_short(self, ticker: str, qty: int, order_id: str) -> None: ...
     async def notify_error(self, action: str, detail: str) -> None: ...
+    async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None: ...
+    async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None: ...
     async def aclose(self) -> None: ...
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
@@ -30,14 +34,20 @@ class TelegramNotifier:
     async def notify_buy(self, ticker: str, notional: float, order_id: str) -> None:
         await self._send(self._format_buy(ticker, notional, order_id))
 
-    async def notify_sell(self, ticker: str) -> None:
-        await self._send(self._format_sell(ticker))
+    async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
+        await self._send(self._format_sell(ticker, pnl_pct, pnl_usd))
 
     async def notify_short(self, ticker: str, qty: int, order_id: str) -> None:
         await self._send(self._format_short(ticker, qty, order_id))
 
     async def notify_error(self, action: str, detail: str) -> None:
         await self._send(self._format_error(action, detail))
+
+    async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None:
+        await self._send(self._format_eod_report(buys, sells, pnl))
+
+    async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None:
+        await self._send(self._format_weekly_report(buys, sells, pnl))
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -52,11 +62,12 @@ class TelegramNotifier:
             f"🔖 Order ID: {order_id}"
         )
 
-    def _format_sell(self, ticker: str) -> str:
-        return (
-            f"🔴 SELL executed\n"
-            f"📌 Ticker: {ticker}"
-        )
+    def _format_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> str:
+        msg = f"🔴 SELL executed\n📌 Ticker: {ticker}"
+        if pnl_pct is not None and pnl_usd is not None:
+            sign = "+" if pnl_usd >= 0 else ""
+            msg += f"\n📊 P&L: {sign}{pnl_pct * 100:.2f}% ({sign}${pnl_usd:.2f})"
+        return msg
 
     def _format_short(self, ticker: str, qty: int, order_id: str) -> str:
         return (
@@ -71,6 +82,30 @@ class TelegramNotifier:
             f"❌ ERROR\n"
             f"📌 Action: {action}\n"
             f"⚠️ Detail: {detail}"
+        )
+
+    def _format_eod_report(self, buys: int, sells: int, pnl: float) -> str:
+        et = pytz.timezone("America/New_York")
+        today = datetime.now(et)
+        day_str = f"{today.strftime('%a %b')} {today.day}"
+        sign = "+" if pnl >= 0 else ""
+        return (
+            f"📊 End of Day Report — {day_str}\n"
+            f"🟢 Buys: {buys}\n"
+            f"🔴 Sells: {sells}\n"
+            f"💰 Realized P&L: {sign}${pnl:.2f}"
+        )
+
+    def _format_weekly_report(self, buys: int, sells: int, pnl: float) -> str:
+        et = pytz.timezone("America/New_York")
+        today = datetime.now(et)
+        day_str = f"{today.strftime('%b')} {today.day}"
+        sign = "+" if pnl >= 0 else ""
+        return (
+            f"📅 Weekly Report — Week of {day_str}\n"
+            f"🟢 Buys: {buys}\n"
+            f"🔴 Sells: {sells}\n"
+            f"💰 Realized P&L: {sign}${pnl:.2f}"
         )
 
     # --- HTTP transport ---
@@ -168,13 +203,19 @@ class NoOpNotifier(TelegramNotifier):
     async def notify_buy(self, ticker: str, notional: float, order_id: str) -> None:
         pass
 
-    async def notify_sell(self, ticker: str) -> None:
+    async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
         pass
 
     async def notify_short(self, ticker: str, qty: int, order_id: str) -> None:
         pass
 
     async def notify_error(self, action: str, detail: str) -> None:
+        pass
+
+    async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None:
+        pass
+
+    async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None:
         pass
 
     async def _send(self, message: str) -> None:
