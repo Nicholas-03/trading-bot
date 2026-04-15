@@ -221,11 +221,14 @@ class OrderExecutor:
                 self._weekly_realized_pnl += pnl_usd
 
             if self._db is not None and trade_id is not None:
-                closed_at = datetime.now(timezone.utc).isoformat()
-                await asyncio.to_thread(
-                    self._db.record_trade_close,
-                    trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
-                )
+                try:
+                    closed_at = datetime.now(timezone.utc).isoformat()
+                    await asyncio.to_thread(
+                        self._db.record_trade_close,
+                        trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                    )
+                except Exception as db_err:
+                    logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
 
             logger.info("CLOSED position for %s", ticker)
             await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
@@ -243,11 +246,14 @@ class OrderExecutor:
                     self._daily_realized_pnl += pnl_usd
                     self._weekly_realized_pnl += pnl_usd
                 if self._db is not None and trade_id is not None:
-                    closed_at = datetime.now(timezone.utc).isoformat()
-                    await asyncio.to_thread(
-                        self._db.record_trade_close,
-                        trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
-                    )
+                    try:
+                        closed_at = datetime.now(timezone.utc).isoformat()
+                        await asyncio.to_thread(
+                            self._db.record_trade_close,
+                            trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                        )
+                    except Exception as db_err:
+                        logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
                 logger.warning(
                     "Close %s — position already gone or closing (HTTP %s), removing from tracking",
                     ticker, e.response.status_code,
@@ -269,11 +275,14 @@ class OrderExecutor:
                     self._daily_realized_pnl += pnl_usd
                     self._weekly_realized_pnl += pnl_usd
                 if self._db is not None and trade_id is not None:
-                    closed_at = datetime.now(timezone.utc).isoformat()
-                    await asyncio.to_thread(
-                        self._db.record_trade_close,
-                        trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
-                    )
+                    try:
+                        closed_at = datetime.now(timezone.utc).isoformat()
+                        await asyncio.to_thread(
+                            self._db.record_trade_close,
+                            trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                        )
+                    except Exception as db_err:
+                        logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
                 logger.warning(
                     "Close %s — position not found in broker, removing from tracking", ticker
                 )

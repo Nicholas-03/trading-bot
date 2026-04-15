@@ -1,3 +1,4 @@
+# news/news_handler.py
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -66,12 +67,15 @@ class NewsHandler:
             news_event_id: int | None = None
             if self._db is not None:
                 try:
-                    ts = datetime.now(timezone.utc).isoformat()
+                    news_ts = datetime.now(timezone.utc).isoformat()
                     news_event_id = await asyncio.to_thread(
-                        self._db.record_news, ts, headline, summary, symbols
+                        self._db.record_news, news_ts, headline, summary, symbols
                     )
                 except Exception as db_err:
-                    logger.warning("Failed to record news event in analytics DB: %s", db_err)
+                    logger.warning(
+                        "Failed to record news event in analytics DB: %s — decision and trade will be unlinked",
+                        db_err,
+                    )
 
             decision = await self._advisor.analyze(
                 headline=headline,
@@ -86,10 +90,10 @@ class NewsHandler:
             decision_id: int | None = None
             if self._db is not None and news_event_id is not None:
                 try:
-                    ts = datetime.now(timezone.utc).isoformat()
+                    decision_ts = datetime.now(timezone.utc).isoformat()
                     decision_id = await asyncio.to_thread(
                         self._db.record_decision,
-                        news_event_id, ts, decision.action, decision.ticker, decision.reasoning,
+                        news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
                     )
                 except Exception as db_err:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
