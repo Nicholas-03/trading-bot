@@ -27,5 +27,6 @@ COPY main.py config.py ./
 COPY trading/ trading/
 COPY llm/ llm/
 COPY news/ news/
+COPY notifications/ notifications/
 
 CMD ["python", "main.py"]
