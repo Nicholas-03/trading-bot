@@ -1,9 +1,15 @@
+# analytics/db.py
+
+import logging
 import sqlite3
+
+logger = logging.getLogger(__name__)
 
 
 class TradeDB:
     def __init__(self, path: str) -> None:
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
 
     def _create_tables(self) -> None:
@@ -38,7 +44,6 @@ class TradeDB:
                 closed_at    TEXT
             );
         """)
-        self._conn.commit()
 
     def record_news(self, ts: str, headline: str, summary: str | None, symbols: list[str]) -> int:
         cur = self._conn.execute(
@@ -49,7 +54,7 @@ class TradeDB:
         return cur.lastrowid  # type: ignore[return-value]
 
     def record_decision(
-        self, news_event_id: int, ts: str, action: str, ticker: str | None, reasoning: str
+        self, news_event_id: int | None, ts: str, action: str, ticker: str | None, reasoning: str
     ) -> int:
         cur = self._conn.execute(
             "INSERT INTO llm_decisions (news_event_id, ts, action, ticker, reasoning) VALUES (?, ?, ?, ?, ?)",
@@ -84,8 +89,13 @@ class TradeDB:
         exit_reason: str,
         closed_at: str,
     ) -> None:
-        self._conn.execute(
+        cur = self._conn.execute(
             "UPDATE trades SET exit_price=?, pnl_usd=?, pnl_pct=?, exit_reason=?, closed_at=? WHERE id=?",
             (exit_price, pnl_usd, pnl_pct, exit_reason, closed_at, trade_id),
         )
         self._conn.commit()
+        if cur.rowcount == 0:
+            logger.warning("record_trade_close: no trade row found for id=%s", trade_id)
+
+    def close(self) -> None:
+        self._conn.close()
