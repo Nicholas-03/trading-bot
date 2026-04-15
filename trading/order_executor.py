@@ -1,24 +1,27 @@
+# trading/order_executor.py
+import asyncio
 import logging
-from datetime import date
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.common.exceptions import APIError
+import math
+from datetime import date, timedelta
+from trading.tradier_client import TradierClient
 from config import Config
 from notifications.telegram_notifier import Notifier
 
 logger = logging.getLogger(__name__)
 
 
+def _monday_of(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
 class OrderExecutor:
     def __init__(
         self,
-        client: TradingClient,
+        client: TradierClient,
         config: Config,
         held_tickers: set[str],
         shorted_tickers: set[str],
         notifier: Notifier,
-        open_dates: dict[str, date] | None = None,
     ) -> None:
         self._client = client
         self._notional_usd = config.trade_amount_usd
@@ -26,8 +29,19 @@ class OrderExecutor:
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
-        self._open_dates: dict[str, date] = dict(open_dates) if open_dates else {}
         self._pending_close: set[str] = set()
+        # ticker -> (avg_entry_price, qty); used to compute realized P&L
+        self._position_book: dict[str, tuple[float, int]] = {}
+        # daily P&L counters — reset lazily at start of each new calendar day
+        self._last_day: date = date.today()
+        self._daily_buys: int = 0
+        self._daily_sells: int = 0
+        self._daily_realized_pnl: float = 0.0
+        # weekly P&L counters — reset lazily at start of each new ISO week (Monday)
+        self._last_week_monday: date = _monday_of(date.today())
+        self._weekly_buys: int = 0
+        self._weekly_sells: int = 0
+        self._weekly_realized_pnl: float = 0.0
 
     @property
     def held_tickers(self) -> frozenset[str]:
@@ -37,16 +51,39 @@ class OrderExecutor:
     def shorted_tickers(self) -> frozenset[str]:
         return frozenset(self._shorted_tickers)
 
-    def is_opened_today(self, ticker: str) -> bool:
-        return self._open_dates.get(ticker) == date.today()
-
     @property
     def pending_close(self) -> frozenset[str]:
         return frozenset(self._pending_close)
 
     def confirm_closed(self, ticker: str) -> None:
-        """Call once Alpaca no longer returns the position, to remove the pending-close guard."""
+        """Remove the pending-close guard once Tradier no longer returns the position."""
         self._pending_close.discard(ticker)
+
+    def daily_summary(self) -> tuple[int, int, float]:
+        """Return (buys, sells, realized_pnl) for today. Resets counters on day boundary."""
+        self._maybe_reset_day()
+        return self._daily_buys, self._daily_sells, self._daily_realized_pnl
+
+    def weekly_summary(self) -> tuple[int, int, float]:
+        """Return (buys, sells, realized_pnl) for the current ISO week."""
+        self._maybe_reset_week()
+        return self._weekly_buys, self._weekly_sells, self._weekly_realized_pnl
+
+    def _maybe_reset_day(self) -> None:
+        today = date.today()
+        if today != self._last_day:
+            self._daily_buys = 0
+            self._daily_sells = 0
+            self._daily_realized_pnl = 0.0
+            self._last_day = today
+
+    def _maybe_reset_week(self) -> None:
+        monday = _monday_of(date.today())
+        if monday != self._last_week_monday:
+            self._weekly_buys = 0
+            self._weekly_sells = 0
+            self._weekly_realized_pnl = 0.0
+            self._last_week_monday = monday
 
     async def buy(self, ticker: str) -> None:
         if ticker in self._held_tickers:
@@ -56,21 +93,24 @@ class OrderExecutor:
             logger.info("Skipping buy for %s — currently shorted, cover first", ticker)
             return
         try:
-            order = self._client.submit_order(
-                MarketOrderRequest(
-                    symbol=ticker,
-                    notional=self._notional_usd,
-                    side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                )
-            )
+            quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
+            price = quotes.get(ticker)
+            if not price:
+                logger.error("No quote available for %s — skipping buy", ticker)
+                return
+            qty = max(1, math.floor(self._notional_usd / price))
+            order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
             self._held_tickers.add(ticker)
-            self._open_dates[ticker] = date.today()
+            self._position_book[ticker] = (price, qty)
+            self._maybe_reset_day()
+            self._maybe_reset_week()
+            self._daily_buys += 1
+            self._weekly_buys += 1
             logger.info(
-                "BUY order accepted for %s $%.2f — order %s (pending fill)",
-                ticker, self._notional_usd, getattr(order, "id", "unknown"),
+                "BUY order accepted for %s qty=%d @ $%.2f — order %s (pending fill)",
+                ticker, qty, price, order_id,
             )
-            await self._notifier.notify_buy(ticker, self._notional_usd, str(getattr(order, "id", "unknown")))
+            await self._notifier.notify_buy(ticker, self._notional_usd, order_id)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
@@ -83,21 +123,20 @@ class OrderExecutor:
             logger.info("Skipping short for %s — currently held long, sell first", ticker)
             return
         try:
-            order = self._client.submit_order(
-                MarketOrderRequest(
-                    symbol=ticker,
-                    qty=self._short_qty,
-                    side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY,
-                )
+            order_id = await asyncio.to_thread(
+                self._client.submit_order, ticker, "sell_short", self._short_qty
             )
             self._shorted_tickers.add(ticker)
-            self._open_dates[ticker] = date.today()
+            self._position_book[ticker] = (0.0, self._short_qty)  # entry unknown; P&L skipped on cover
+            self._maybe_reset_day()
+            self._maybe_reset_week()
+            self._daily_buys += 1
+            self._weekly_buys += 1
             logger.info(
                 "SHORT order accepted for %s qty=%d — order %s (pending fill)",
-                ticker, self._short_qty, getattr(order, "id", "unknown"),
+                ticker, self._short_qty, order_id,
             )
-            await self._notifier.notify_short(ticker, self._short_qty, str(getattr(order, "id", "unknown")))
+            await self._notifier.notify_short(ticker, self._short_qty, order_id)
         except Exception as e:
             logger.error("Failed to short %s: %s", ticker, e)
             await self._notifier.notify_error(f"short {ticker}", str(e))
@@ -108,29 +147,40 @@ class OrderExecutor:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
             return
         try:
-            self._client.close_position(ticker)
+            # Compute realized P&L for long positions when not already provided by caller
+            if pnl_usd is None and ticker in self._held_tickers and ticker in self._position_book:
+                entry_price, qty = self._position_book[ticker]
+                if entry_price > 0:
+                    quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
+                    current = quotes.get(ticker, 0.0)
+                    if current:
+                        pnl_usd = (current - entry_price) * qty
+                        pnl_pct = (current - entry_price) / entry_price
+
+            await asyncio.to_thread(self._client.close_position, ticker)
             self._held_tickers.discard(ticker)
             self._shorted_tickers.discard(ticker)
-            self._open_dates.pop(ticker, None)
+            self._position_book.pop(ticker, None)
             self._pending_close.add(ticker)
+            self._maybe_reset_day()
+            self._maybe_reset_week()
+            self._daily_sells += 1
+            self._weekly_sells += 1
+            if pnl_usd is not None:
+                self._daily_realized_pnl += pnl_usd
+                self._weekly_realized_pnl += pnl_usd
             logger.info("CLOSED position for %s", ticker)
             await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
-        except APIError as e:
-            status = getattr(e, "status_code", None)
-            err_str = str(e)
-            # 404/422: position gone; 40310000: qty held_for_orders (close already pending)
-            if status in (404, 422) or "held_for_orders" in err_str:
+        except Exception as e:
+            body = str(e).lower()
+            if "404" in body or "400" in body or "no open position" in body:
                 self._held_tickers.discard(ticker)
                 self._shorted_tickers.discard(ticker)
-                self._open_dates.pop(ticker, None)
+                self._position_book.pop(ticker, None)
                 self._pending_close.add(ticker)
                 logger.warning(
-                    "Close %s — position already closing or gone (status %s), removing from tracking",
-                    ticker, status,
+                    "Close %s — position already gone or closing, removing from tracking", ticker
                 )
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)
                 await self._notifier.notify_error(f"sell {ticker}", str(e))
-        except Exception as e:
-            logger.error("Failed to close position for %s: %s", ticker, e)
-            await self._notifier.notify_error(f"sell {ticker}", str(e))
