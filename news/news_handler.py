@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from alpaca.data.live import NewsDataStream
-from alpaca.trading.client import TradingClient
+from trading.tradier_client import TradierClient
 from llm.llm_advisor import LLMAdvisor
 from trading.order_executor import OrderExecutor
 from config import Config
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 class NewsHandler:
-    def __init__(self, client: TradingClient, config: Config, llm_advisor: LLMAdvisor, order_executor: OrderExecutor) -> None:
+    def __init__(self, client: TradierClient, config: Config, llm_advisor: LLMAdvisor, order_executor: OrderExecutor) -> None:
         self._client = client
         self._config = config
         self._advisor = llm_advisor

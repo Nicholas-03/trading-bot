@@ -1,11 +1,8 @@
+# main.py
 import asyncio
 import logging
-from datetime import date, datetime
 from rich.logging import RichHandler
-import pytz
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOrdersRequest
-from alpaca.trading.enums import QueryOrderStatus, OrderStatus
+from trading.tradier_client import TradierClient
 from config import load_config, Config
 from trading.order_executor import OrderExecutor
 from llm.llm_advisor import LLMAdvisor
@@ -22,58 +19,36 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def _make_trading_client(config: Config) -> TradingClient:
-    return TradingClient(
-        api_key=config.alpaca_api_key,
-        secret_key=config.alpaca_secret_key,
-        paper=config.paper,
+def _make_tradier_client(config: Config) -> TradierClient:
+    return TradierClient(
+        access_token=config.tradier_access_token,
+        account_id=config.tradier_account_id,
+        paper=config.tradier_paper,
     )
 
 
-def _load_open_positions(
-    client: TradingClient,
-) -> tuple[set[str], set[str], dict[str, date]]:
+def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
     positions = client.get_all_positions()
-    held = {p.symbol for p in positions if p.side.value == "long"}
-    shorted = {p.symbol for p in positions if p.side.value == "short"}
+    held = {p.symbol for p in positions if p.qty > 0}
+    shorted = {p.symbol for p in positions if p.qty < 0}
     if held:
         logger.info("Resuming with existing long positions: %s", held)
     if shorted:
         logger.info("Resuming with existing short positions: %s", shorted)
-
-    # Seed _open_dates for positions opened today so the PDT guard
-    # is not bypassed after a mid-day restart.
-    et = pytz.timezone("America/New_York")
-    today = datetime.now(et).date()
-    today_start_et = et.localize(datetime.combine(today, datetime.min.time()))
-    # QueryOrderStatus only has OPEN/CLOSED/ALL; CLOSED covers filled+cancelled+expired.
-    # We filter to OrderStatus.FILLED below to exclude non-fills for currently-held symbols.
-    orders = client.get_orders(
-        GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=today_start_et, limit=500)
-    )
-    open_today = {
-        o.symbol
-        for o in orders
-        if o.status == OrderStatus.FILLED and o.symbol in (held | shorted)
-    }
-    open_dates: dict[str, date] = {symbol: today for symbol in open_today}
-    if open_dates:
-        logger.info("Seeding PDT open_dates from today's fills: %s", set(open_dates))
-
-    return held, shorted, open_dates
+    return held, shorted
 
 
 async def main() -> None:
     config = load_config()
-    client = _make_trading_client(config)
-    held_tickers, shorted_tickers, open_dates = _load_open_positions(client)
+    client = _make_tradier_client(config)
+    held_tickers, shorted_tickers = _load_open_positions(client)
 
     if config.telegram_enabled:
         notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
     else:
         notifier = NoOpNotifier()
 
-    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, open_dates=open_dates)
+    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
     llm_advisor = LLMAdvisor(config)
     news_handler = NewsHandler(client, config, llm_advisor, order_executor)
     position_monitor = PositionMonitor(client, config, order_executor, notifier)
@@ -86,15 +61,18 @@ async def main() -> None:
         )
         coroutines.append(command_listener.run())
 
-    logger.info("Bot starting — paper=%s, trade_amount=$%.2f, SL=%.0f%%, TP=%.0f%%",
-                config.paper, config.trade_amount_usd,
-                config.stop_loss_pct * 100, config.take_profit_pct * 100)
+    logger.info(
+        "Bot starting — paper=%s, trade_amount=$%.2f, SL=%.0f%%, TP=%.0f%%",
+        config.tradier_paper, config.trade_amount_usd,
+        config.stop_loss_pct * 100, config.take_profit_pct * 100,
+    )
 
     try:
         await asyncio.gather(*coroutines)
     except asyncio.CancelledError:
         logger.info("Bot shutting down")
     finally:
+        client.close()
         await notifier.aclose()
         if command_listener:
             await command_listener.aclose()
