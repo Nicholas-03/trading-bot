@@ -126,7 +126,7 @@ def test_sell_increments_daily_sells():
     # Stub close_position to succeed, get_quotes to return a price
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 155.0})
-    ex._position_book["AAPL"] = (150.0, 1)
+    ex._position_book["AAPL"] = (150.0, 1, None)
 
     import asyncio
     asyncio.run(ex.sell("AAPL"))
@@ -141,7 +141,7 @@ def test_sell_accumulates_realized_pnl():
     ex._held_tickers.add("AAPL")
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 160.0})
-    ex._position_book["AAPL"] = (150.0, 2)  # 2 shares, entry $150, exit $160 → $20 P&L
+    ex._position_book["AAPL"] = (150.0, 2, None)  # 2 shares, entry $150, exit $160 → $20 P&L
 
     import asyncio
     asyncio.run(ex.sell("AAPL"))
@@ -156,7 +156,7 @@ def test_sell_skips_pnl_when_already_provided():
     ex._held_tickers.add("AAPL")
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 999.0})  # should NOT be used
-    ex._position_book["AAPL"] = (150.0, 1)
+    ex._position_book["AAPL"] = (150.0, 1, None)
 
     import asyncio
     asyncio.run(ex.sell("AAPL", pnl_pct=0.05, pnl_usd=7.50))

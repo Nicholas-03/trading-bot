@@ -2,11 +2,15 @@
 import asyncio
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 import httpx
 from trading.tradier_client import TradierClient
 from config import Config
 from notifications.telegram_notifier import Notifier
+
+if TYPE_CHECKING:
+    from analytics.db import TradeDB
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ class OrderExecutor:
         held_tickers: set[str],
         shorted_tickers: set[str],
         notifier: Notifier,
+        db: "TradeDB | None" = None,
     ) -> None:
         self._client = client
         self._notional_usd = config.trade_amount_usd
@@ -30,9 +35,10 @@ class OrderExecutor:
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
+        self._db = db
         self._pending_close: set[str] = set()
-        # ticker -> (avg_entry_price, qty); used to compute realized P&L
-        self._position_book: dict[str, tuple[float, int]] = {}
+        # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
+        self._position_book: dict[str, tuple[float, int, int | None]] = {}
         # daily P&L counters — reset lazily at start of each new calendar day
         self._last_day: date = date.today()
         self._daily_buys: int = 0
@@ -86,7 +92,7 @@ class OrderExecutor:
             self._weekly_realized_pnl = 0.0
             self._last_week_monday = monday
 
-    async def buy(self, ticker: str) -> None:
+    async def buy(self, ticker: str, decision_id: int | None = None) -> None:
         if ticker in self._held_tickers:
             logger.info("Skipping buy for %s — already held", ticker)
             return
@@ -101,8 +107,16 @@ class OrderExecutor:
                 return
             qty = max(1, math.floor(self._notional_usd / price))
             order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
+
+            trade_id: int | None = None
+            if self._db is not None:
+                opened_at = datetime.now(timezone.utc).isoformat()
+                trade_id = await asyncio.to_thread(
+                    self._db.record_trade_open, decision_id, ticker, "buy", qty, price, opened_at
+                )
+
             self._held_tickers.add(ticker)
-            self._position_book[ticker] = (price, qty)
+            self._position_book[ticker] = (price, qty, trade_id)
             self._maybe_reset_day()
             self._maybe_reset_week()
             self._daily_buys += 1
@@ -116,7 +130,7 @@ class OrderExecutor:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
-    async def short(self, ticker: str) -> None:
+    async def short(self, ticker: str, decision_id: int | None = None) -> None:
         if ticker in self._shorted_tickers:
             logger.info("Skipping short for %s — already shorted", ticker)
             return
@@ -127,8 +141,17 @@ class OrderExecutor:
             order_id = await asyncio.to_thread(
                 self._client.submit_order, ticker, "sell_short", self._short_qty
             )
+
+            trade_id = None
+            if self._db is not None:
+                opened_at = datetime.now(timezone.utc).isoformat()
+                trade_id = await asyncio.to_thread(
+                    self._db.record_trade_open,
+                    decision_id, ticker, "short", self._short_qty, None, opened_at,
+                )
+
             self._shorted_tickers.add(ticker)
-            self._position_book[ticker] = (0.0, self._short_qty)  # entry unknown; P&L skipped on cover
+            self._position_book[ticker] = (0.0, self._short_qty, trade_id)
             self._maybe_reset_day()
             self._maybe_reset_week()
             self._daily_buys += 1
@@ -142,19 +165,33 @@ class OrderExecutor:
             logger.error("Failed to short %s: %s", ticker, e)
             await self._notifier.notify_error(f"short {ticker}", str(e))
 
-    async def sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
+    async def sell(
+        self,
+        ticker: str,
+        pnl_pct: float | None = None,
+        pnl_usd: float | None = None,
+        exit_reason: str = "llm",
+    ) -> None:
         """Close a position — works for both long (sell) and short (cover)."""
         if ticker not in self._held_tickers and ticker not in self._shorted_tickers:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
             return
+
+        # Extract trade_id before modifying _position_book
+        trade_id: int | None = None
+        if ticker in self._position_book:
+            _, _, trade_id = self._position_book[ticker]
+
+        exit_price: float | None = None
         try:
             # Compute realized P&L for long positions when not already provided by caller
             if pnl_usd is None and ticker in self._held_tickers and ticker in self._position_book:
-                entry_price, qty = self._position_book[ticker]
+                entry_price, qty, _ = self._position_book[ticker]
                 if entry_price > 0:
                     quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
                     current = quotes.get(ticker, 0.0)
                     if current:
+                        exit_price = current
                         pnl_usd = (current - entry_price) * qty
                         pnl_pct = (current - entry_price) / entry_price
 
@@ -170,6 +207,14 @@ class OrderExecutor:
             if pnl_usd is not None:
                 self._daily_realized_pnl += pnl_usd
                 self._weekly_realized_pnl += pnl_usd
+
+            if self._db is not None and trade_id is not None:
+                closed_at = datetime.now(timezone.utc).isoformat()
+                await asyncio.to_thread(
+                    self._db.record_trade_close,
+                    trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                )
+
             logger.info("CLOSED position for %s", ticker)
             await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
         except httpx.HTTPStatusError as e:
@@ -185,6 +230,12 @@ class OrderExecutor:
                 if pnl_usd is not None:
                     self._daily_realized_pnl += pnl_usd
                     self._weekly_realized_pnl += pnl_usd
+                if self._db is not None and trade_id is not None:
+                    closed_at = datetime.now(timezone.utc).isoformat()
+                    await asyncio.to_thread(
+                        self._db.record_trade_close,
+                        trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                    )
                 logger.warning(
                     "Close %s — position already gone or closing (HTTP %s), removing from tracking",
                     ticker, e.response.status_code,
@@ -205,6 +256,12 @@ class OrderExecutor:
                 if pnl_usd is not None:
                     self._daily_realized_pnl += pnl_usd
                     self._weekly_realized_pnl += pnl_usd
+                if self._db is not None and trade_id is not None:
+                    closed_at = datetime.now(timezone.utc).isoformat()
+                    await asyncio.to_thread(
+                        self._db.record_trade_close,
+                        trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                    )
                 logger.warning(
                     "Close %s — position not found in broker, removing from tracking", ticker
                 )
