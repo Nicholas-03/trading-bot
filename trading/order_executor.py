@@ -3,6 +3,7 @@ import asyncio
 import logging
 import math
 from datetime import date, timedelta
+import httpx
 from trading.tradier_client import TradierClient
 from config import Config
 from notifications.telegram_notifier import Notifier
@@ -171,16 +172,31 @@ class OrderExecutor:
                 self._weekly_realized_pnl += pnl_usd
             logger.info("CLOSED position for %s", ticker)
             await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
-        except Exception as e:
-            body = str(e).lower()
-            if "404" in body or "400" in body or "no open position" in body:
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (400, 404):
                 self._held_tickers.discard(ticker)
                 self._shorted_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
                 self._pending_close.add(ticker)
                 logger.warning(
-                    "Close %s — position already gone or closing, removing from tracking", ticker
+                    "Close %s — position already gone or closing (HTTP %s), removing from tracking",
+                    ticker, e.response.status_code,
                 )
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)
                 await self._notifier.notify_error(f"sell {ticker}", str(e))
+        except ValueError as e:
+            if "no open position" in str(e).lower():
+                self._held_tickers.discard(ticker)
+                self._shorted_tickers.discard(ticker)
+                self._position_book.pop(ticker, None)
+                self._pending_close.add(ticker)
+                logger.warning(
+                    "Close %s — position not found in broker, removing from tracking", ticker
+                )
+            else:
+                logger.error("Failed to close position for %s: %s", ticker, e)
+                await self._notifier.notify_error(f"sell {ticker}", str(e))
+        except Exception as e:
+            logger.error("Failed to close position for %s: %s", ticker, e)
+            await self._notifier.notify_error(f"sell {ticker}", str(e))

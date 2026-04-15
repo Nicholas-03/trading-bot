@@ -115,3 +115,53 @@ def test_confirm_closed_noop_for_unknown_ticker():
     ex = _make_executor()
     ex.confirm_closed("AAPL")  # should not raise
     assert "AAPL" not in ex.pending_close
+
+
+# --- sell path counter / P&L accumulation (synchronous state only) ---
+
+def test_sell_increments_daily_sells():
+    """Verify _daily_sells increments when sell() successfully closes."""
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    # Stub close_position to succeed, get_quotes to return a price
+    ex._client.close_position = MagicMock(return_value="order-1")
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 155.0})
+    ex._position_book["AAPL"] = (150.0, 1)
+
+    import asyncio
+    asyncio.run(ex.sell("AAPL"))
+
+    _, sells, _ = ex.daily_summary()
+    assert sells == 1
+
+
+def test_sell_accumulates_realized_pnl():
+    """Verify realized P&L is computed and accumulated when entry price is known."""
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._client.close_position = MagicMock(return_value="order-1")
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 160.0})
+    ex._position_book["AAPL"] = (150.0, 2)  # 2 shares, entry $150, exit $160 → $20 P&L
+
+    import asyncio
+    asyncio.run(ex.sell("AAPL"))
+
+    _, _, pnl = ex.daily_summary()
+    assert abs(pnl - 20.0) < 0.01
+
+
+def test_sell_skips_pnl_when_already_provided():
+    """When pnl_usd is provided by caller (e.g. PositionMonitor), use it directly."""
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._client.close_position = MagicMock(return_value="order-1")
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 999.0})  # should NOT be used
+    ex._position_book["AAPL"] = (150.0, 1)
+
+    import asyncio
+    asyncio.run(ex.sell("AAPL", pnl_pct=0.05, pnl_usd=7.50))
+
+    _, _, pnl = ex.daily_summary()
+    assert abs(pnl - 7.50) < 0.01
+    # get_quotes should not have been called since pnl_usd was provided
+    ex._client.get_quotes.assert_not_called()
