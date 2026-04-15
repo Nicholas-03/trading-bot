@@ -1,7 +1,9 @@
 import asyncio
 import pytest
+import pytz
+from datetime import date, datetime
 from unittest.mock import MagicMock, AsyncMock, patch
-from trading.position_monitor import compute_pnl_pct, PositionMonitor
+from trading.position_monitor import compute_pnl_pct, PositionMonitor, _should_fire_report
 
 
 def test_pnl_at_stop_loss_boundary():
@@ -52,6 +54,7 @@ def _make_position(symbol, avg_entry_price, current_price):
     pos.symbol = symbol
     pos.avg_entry_price = str(avg_entry_price)
     pos.current_price = str(current_price)
+    pos.unrealized_pl = str(current_price - avg_entry_price)
     return pos
 
 
@@ -75,7 +78,7 @@ def test_stop_loss_no_pdt_guard_calls_sell():
 
     asyncio.run(monitor._check_positions())
 
-    executor.sell.assert_called_once_with("AAPL")
+    executor.sell.assert_called_once_with("AAPL", pnl_pct=pytest.approx(-0.03), pnl_usd=pytest.approx(-3.0))
 
 
 def test_take_profit_pdt_guard_skips_sell():
@@ -98,4 +101,36 @@ def test_take_profit_no_pdt_guard_calls_sell():
 
     asyncio.run(monitor._check_positions())
 
-    executor.sell.assert_called_once_with("TSLA")
+    executor.sell.assert_called_once_with("TSLA", pnl_pct=pytest.approx(0.05), pnl_usd=pytest.approx(5.0))
+
+
+# ---------------------------------------------------------------------------
+# _should_fire_report tests
+# ---------------------------------------------------------------------------
+
+_ET = pytz.timezone("America/New_York")
+
+
+def test_should_fire_at_market_close_no_prior_report():
+    now = _ET.localize(datetime(2026, 4, 14, 16, 0, 30))
+    assert _should_fire_report(now, None) is True
+
+
+def test_should_not_fire_already_fired_today():
+    now = _ET.localize(datetime(2026, 4, 14, 16, 0, 30))
+    assert _should_fire_report(now, date(2026, 4, 14)) is False
+
+
+def test_should_not_fire_before_close():
+    now = _ET.localize(datetime(2026, 4, 14, 15, 59, 59))
+    assert _should_fire_report(now, None) is False
+
+
+def test_should_not_fire_after_close_minute():
+    now = _ET.localize(datetime(2026, 4, 14, 16, 1, 0))
+    assert _should_fire_report(now, None) is False
+
+
+def test_should_fire_new_day_after_previous_report():
+    now = _ET.localize(datetime(2026, 4, 15, 16, 0, 0))
+    assert _should_fire_report(now, date(2026, 4, 14)) is True
