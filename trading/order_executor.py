@@ -117,11 +117,17 @@ class OrderExecutor:
             await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
         except APIError as e:
             status = getattr(e, "status_code", None)
-            if status in (404, 422):
+            err_str = str(e)
+            # 404/422: position gone; 40310000: qty held_for_orders (close already pending)
+            if status in (404, 422) or "held_for_orders" in err_str:
                 self._held_tickers.discard(ticker)
                 self._shorted_tickers.discard(ticker)
                 self._open_dates.pop(ticker, None)
-                logger.warning("Close %s — position not found (status %s), removing from tracking", ticker, status)
+                self._pending_close.add(ticker)
+                logger.warning(
+                    "Close %s — position already closing or gone (status %s), removing from tracking",
+                    ticker, status,
+                )
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)
                 await self._notifier.notify_error(f"sell {ticker}", str(e))
