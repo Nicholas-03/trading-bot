@@ -107,6 +107,9 @@ class PositionMonitor:
         for pos in open_positions:
             try:
                 ticker = pos.symbol
+                if pos.qty < 0:
+                    logger.debug("Skipping short position %s — P&L monitoring not supported for shorts", ticker)
+                    continue
                 qty = abs(pos.qty)
                 if qty == 0:
                     continue

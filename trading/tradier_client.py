@@ -121,4 +121,8 @@ def _parse_quotes(data: dict) -> dict[str, float]:
         return {}
     if isinstance(quote_data, dict):
         quote_data = [quote_data]
-    return {q["symbol"]: float(q["last"]) for q in quote_data}
+    return {
+        q["symbol"]: float(q["last"])
+        for q in quote_data
+        if q.get("last") is not None
+    }
