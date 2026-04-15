@@ -1,10 +1,9 @@
+# trading/position_monitor.py
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import pytz
-from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
-from alpaca.trading.enums import QueryOrderStatus, OrderStatus, OrderSide
+from trading.tradier_client import TradierClient
 from trading.order_executor import OrderExecutor
 from notifications.telegram_notifier import Notifier
 from config import Config
@@ -33,7 +32,7 @@ def _should_fire_report(now_et: datetime, last_report_date: date | None) -> bool
 class PositionMonitor:
     def __init__(
         self,
-        client: TradingClient,
+        client: TradierClient,
         config: Config,
         order_executor: OrderExecutor,
         notifier: Notifier,
@@ -71,93 +70,65 @@ class PositionMonitor:
             return
 
         today = now.date()
-        buys, sells, pnl = await asyncio.to_thread(self._fetch_eod_data)
+        buys, sells, pnl = self._fetch_eod_data()
         await self._notifier.notify_eod_report(buys, sells, pnl)
         self._last_report_date = today
         logger.info("EOD report sent: buys=%d sells=%d pnl=%.2f", buys, sells, pnl)
 
         if today.weekday() == 4:  # Friday
-            w_buys, w_sells, w_pnl = await asyncio.to_thread(self._fetch_weekly_data)
+            w_buys, w_sells, w_pnl = self._fetch_weekly_data()
             await self._notifier.notify_weekly_report(w_buys, w_sells, w_pnl)
             logger.info("Weekly report sent: buys=%d sells=%d pnl=%.2f", w_buys, w_sells, w_pnl)
 
     def _fetch_eod_data(self) -> tuple[int, int, float]:
-        et = pytz.timezone("America/New_York")
-        today = datetime.now(et).date()
-        today_start = et.localize(datetime.combine(today, datetime.min.time()))
-
-        orders = self._client.get_orders(
-            GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=today_start, limit=500)
-        )
-        filled = [o for o in orders if o.status == OrderStatus.FILLED]
-        buys = sum(1 for o in filled if o.side == OrderSide.BUY)
-        sells = sum(1 for o in filled if o.side == OrderSide.SELL)
-
-        history = self._client.get_portfolio_history(
-            GetPortfolioHistoryRequest(period="1D")
-        )
-        profit_loss = history.profit_loss or []
-        pnl = profit_loss[-1] if profit_loss else 0.0
-
-        return buys, sells, pnl
+        return self._executor.daily_summary()
 
     def _fetch_weekly_data(self) -> tuple[int, int, float]:
-        et = pytz.timezone("America/New_York")
-        today = datetime.now(et).date()
-        week_start = today - timedelta(days=today.weekday())  # Monday
-        week_start_dt = et.localize(datetime.combine(week_start, datetime.min.time()))
-
-        orders = self._client.get_orders(
-            GetOrdersRequest(status=QueryOrderStatus.CLOSED, after=week_start_dt, limit=500)
-        )
-        filled = [o for o in orders if o.status == OrderStatus.FILLED]
-        buys = sum(1 for o in filled if o.side == OrderSide.BUY)
-        sells = sum(1 for o in filled if o.side == OrderSide.SELL)
-
-        history = self._client.get_portfolio_history(
-            GetPortfolioHistoryRequest(period="1W")
-        )
-        profit_loss = history.profit_loss or []
-        pnl = profit_loss[-1] if profit_loss else 0.0
-
-        return buys, sells, pnl
+        return self._executor.weekly_summary()
 
     async def _check_positions(self) -> None:
-        positions = self._client.get_all_positions()
+        positions = await asyncio.to_thread(self._client.get_all_positions)
         live_symbols = {pos.symbol for pos in positions}
 
-        # Confirm any pending-close tickers that Alpaca no longer returns
+        # Confirm tickers that Tradier no longer returns
         for ticker in self._executor.pending_close - live_symbols:
             self._executor.confirm_closed(ticker)
-            logger.info("Confirmed closed: %s no longer in Alpaca positions", ticker)
+            logger.info("Confirmed closed: %s no longer in Tradier positions", ticker)
 
-        for pos in positions:
+        open_positions = [
+            pos for pos in positions if pos.symbol not in self._executor.pending_close
+        ]
+        if not open_positions:
+            return
+
+        symbols = [pos.symbol for pos in open_positions]
+        quotes = await asyncio.to_thread(self._client.get_quotes, symbols)
+
+        for pos in open_positions:
             try:
                 ticker = pos.symbol
-
-                # Skip until Alpaca settles the close order
-                if ticker in self._executor.pending_close:
+                qty = abs(pos.qty)
+                if qty == 0:
                     continue
-
-                entry = float(pos.avg_entry_price)
+                # cost_basis is the total cost (e.g. $300 for 2 shares at $150 avg)
+                entry = pos.cost_basis / qty
                 if entry == 0.0:
-                    logger.warning("Skipping %s — avg_entry_price is zero", ticker)
+                    logger.warning("Skipping %s — entry price is zero", ticker)
                     continue
-                current = float(pos.current_price)
-                pnl = compute_pnl_pct(entry, current)
 
-                pnl_usd = float(pos.unrealized_pl)
+                current = quotes.get(ticker)
+                if current is None:
+                    logger.warning("No quote for %s — skipping", ticker)
+                    continue
+
+                pnl = compute_pnl_pct(entry, current)
+                pnl_usd = (current - entry) * qty
+
                 if pnl <= -self._stop_loss:
-                    if self._executor.is_opened_today(ticker):
-                        logger.info("PDT guard — skipping stop-loss close for %s (opened today)", ticker)
-                    else:
-                        logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                        await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd)
+                    logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                    await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd)
                 elif pnl >= self._take_profit:
-                    if self._executor.is_opened_today(ticker):
-                        logger.info("PDT guard — skipping take-profit close for %s (opened today)", ticker)
-                    else:
-                        logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                        await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd)
+                    logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
+                    await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd)
             except Exception:
                 logger.exception("Error processing position %s", pos.symbol)
