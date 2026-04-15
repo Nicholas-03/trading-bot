@@ -21,6 +21,7 @@ class Notifier(Protocol):
 
 _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _UPDATES_URL = "https://api.telegram.org/bot{token}/getUpdates"
+_ET = pytz.timezone("America/New_York")
 
 
 class TelegramNotifier:
@@ -44,10 +45,10 @@ class TelegramNotifier:
         await self._send(self._format_error(action, detail))
 
     async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None:
-        await self._send(self._format_eod_report(buys, sells, pnl))
+        await self._send(self._format_eod_report(buys, sells, pnl, datetime.now(_ET)))
 
     async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None:
-        await self._send(self._format_weekly_report(buys, sells, pnl))
+        await self._send(self._format_weekly_report(buys, sells, pnl, datetime.now(_ET)))
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -84,10 +85,8 @@ class TelegramNotifier:
             f"⚠️ Detail: {detail}"
         )
 
-    def _format_eod_report(self, buys: int, sells: int, pnl: float) -> str:
-        et = pytz.timezone("America/New_York")
-        today = datetime.now(et)
-        day_str = f"{today.strftime('%a %b')} {today.day}"
+    def _format_eod_report(self, buys: int, sells: int, pnl: float, now_et: datetime) -> str:
+        day_str = f"{now_et.strftime('%a %b')} {now_et.day}"
         sign = "+" if pnl >= 0 else ""
         return (
             f"📊 End of Day Report — {day_str}\n"
@@ -96,10 +95,8 @@ class TelegramNotifier:
             f"💰 Realized P&L: {sign}${pnl:.2f}"
         )
 
-    def _format_weekly_report(self, buys: int, sells: int, pnl: float) -> str:
-        et = pytz.timezone("America/New_York")
-        today = datetime.now(et)
-        day_str = f"{today.strftime('%b')} {today.day}"
+    def _format_weekly_report(self, buys: int, sells: int, pnl: float, now_et: datetime) -> str:
+        day_str = f"{now_et.strftime('%b')} {now_et.day}"
         sign = "+" if pnl >= 0 else ""
         return (
             f"📅 Weekly Report — Week of {day_str}\n"
