@@ -19,11 +19,13 @@ def compute_pnl_pct(avg_entry_price: float, current_price: float) -> float:
 def _should_fire_report(now_et: datetime, last_report_date: date | None) -> bool:
     """Return True if the EOD/weekly report should fire now.
 
-    Fires during the 16:00:00–16:00:59 ET window, at most once per calendar day.
+    Fires during the 16:00–16:01 ET window on weekdays, at most once per calendar day.
     """
     if now_et.tzinfo is None:
         raise ValueError("now_et must be timezone-aware (ET)")
-    if now_et.hour != 16 or now_et.minute != 0:
+    if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
+    if now_et.hour != 16 or now_et.minute > 1:
         return False
     return last_report_date != now_et.date()
 

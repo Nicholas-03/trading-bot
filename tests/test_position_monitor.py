@@ -131,7 +131,7 @@ def test_should_not_fire_before_close():
 
 
 def test_should_not_fire_after_close_minute():
-    now = _ET.localize(datetime(2026, 4, 14, 16, 1, 0))
+    now = _ET.localize(datetime(2026, 4, 14, 16, 2, 0))
     assert _should_fire_report(now, None) is False
 
 
@@ -144,3 +144,14 @@ def test_should_fire_report_raises_on_naive_datetime():
     naive = datetime(2026, 4, 14, 16, 0, 0)  # no tzinfo
     with pytest.raises(ValueError, match="timezone-aware"):
         _should_fire_report(naive, None)
+
+
+def test_should_fire_at_16_01():
+    now = _ET.localize(datetime(2026, 4, 14, 16, 1, 30))
+    assert _should_fire_report(now, None) is True
+
+
+def test_should_not_fire_on_weekend():
+    # April 18, 2026 is a Saturday
+    now = _ET.localize(datetime(2026, 4, 18, 16, 0, 0))
+    assert _should_fire_report(now, None) is False
