@@ -52,6 +52,12 @@ class TradierClient:
         _raise_for_status(resp)
         return _parse_quotes(resp.json())
 
+    def get_buying_power(self) -> float:
+        """Return available buying power for the account."""
+        resp = self._http.get(f"/accounts/{self._account_id}/balances")
+        _raise_for_status(resp)
+        return _parse_buying_power(resp.json())
+
     def submit_order(self, symbol: str, side: str, qty: int) -> str:
         """Side: buy | sell | sell_short | buy_to_cover"""
         resp = self._http.post(
