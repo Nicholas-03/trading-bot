@@ -1,6 +1,7 @@
 # main.py
 import asyncio
 import logging
+import os
 from rich.logging import RichHandler
 from trading.tradier_client import TradierClient
 from config import load_config, Config
@@ -49,9 +50,16 @@ async def main() -> None:
         else:
             notifier = NoOpNotifier()
 
-        order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier)
+        db = None
+        if config.analytics_db_path:
+            from analytics.db import TradeDB
+            os.makedirs(os.path.dirname(config.analytics_db_path) or ".", exist_ok=True)
+            db = TradeDB(config.analytics_db_path)
+            logger.info("Analytics DB: %s", config.analytics_db_path)
+
+        order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, db)
         llm_advisor = LLMAdvisor(config)
-        news_handler = NewsHandler(client, config, llm_advisor, order_executor)
+        news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
         position_monitor = PositionMonitor(client, config, order_executor, notifier)
 
         coroutines = [news_handler.run(), position_monitor.run()]
@@ -77,6 +85,8 @@ async def main() -> None:
             if command_listener:
                 await command_listener.aclose()
     finally:
+        if db is not None:
+            db.close()
         client.close()
 
 
