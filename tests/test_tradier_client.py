@@ -1,5 +1,6 @@
 # tests/test_tradier_client.py
-from trading.tradier_client import _parse_positions, _parse_quotes, TradierPosition
+import pytest
+from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, TradierPosition
 
 
 def test_parse_positions_null_string():
@@ -72,3 +73,28 @@ def test_parse_quotes_empty_quotes():
 
 def test_parse_quotes_missing_key():
     assert _parse_quotes({}) == {}
+
+
+def test_parse_buying_power_margin():
+    data = {"balances": {"margin": {"buying_power": 5000.0}}}
+    assert _parse_buying_power(data) == 5000.0
+
+
+def test_parse_buying_power_pdt():
+    data = {"balances": {"pdt": {"buying_power": 3000.0}}}
+    assert _parse_buying_power(data) == 3000.0
+
+
+def test_parse_buying_power_cash():
+    data = {"balances": {"cash": {"cash_available": 1500.0}}}
+    assert _parse_buying_power(data) == 1500.0
+
+
+def test_parse_buying_power_missing_balances_key():
+    with pytest.raises(ValueError, match="buying power"):
+        _parse_buying_power({})
+
+
+def test_parse_buying_power_unrecognised_structure():
+    with pytest.raises(ValueError, match="buying power"):
+        _parse_buying_power({"balances": {"something_else": {}}})

@@ -126,3 +126,15 @@ def _parse_quotes(data: dict) -> dict[str, float]:
         for q in quote_data
         if q.get("last") is not None
     }
+
+
+def _parse_buying_power(data: dict) -> float:
+    """Parse Tradier balances response. Supports margin, PDT, and cash accounts."""
+    balances = data.get("balances", {})
+    if "margin" in balances:
+        return float(balances["margin"]["buying_power"])
+    if "pdt" in balances:
+        return float(balances["pdt"]["buying_power"])
+    if "cash" in balances:
+        return float(balances["cash"]["cash_available"])
+    raise ValueError("Cannot determine buying power from balances response")
