@@ -100,6 +100,13 @@ class OrderExecutor:
             logger.info("Skipping buy for %s — currently shorted, cover first", ticker)
             return
         try:
+            buying_power = await asyncio.to_thread(self._client.get_buying_power)
+            if buying_power < self._notional_usd:
+                logger.info(
+                    "Skipping buy for %s — insufficient funds (have $%.2f, need $%.2f)",
+                    ticker, buying_power, self._notional_usd,
+                )
+                return
             quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
             price = quotes.get(ticker)
             if not price:
