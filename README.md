@@ -1,21 +1,22 @@
-# Alpaca News Trading Bot
+# News Trading Bot
 
-Listens to real-time news from Alpaca's WebSocket feed, uses Claude (Anthropic) to decide whether to buy or sell a stock based on the news, and executes trades on Alpaca.
+Listens to real-time news from Alpaca's WebSocket feed, uses Claude or Gemini to decide whether to buy or sell a stock based on the news, and executes trades via Tradier.
 
 ## How it works
 
 1. Connects to Alpaca's news WebSocket and receives live news events.
-2. Sends each news headline, summary, and mentioned tickers to Claude.
-3. Claude returns a `buy`, `sell`, or `hold` decision.
-4. On `buy`: places a $5 notional market order for the ticker.
+2. Sends each news headline, summary, and mentioned tickers to the LLM.
+3. The LLM returns a `buy`, `sell`, or `hold` decision.
+4. On `buy`: places a market order for `TRADE_AMOUNT_USD` worth of the ticker (only during market hours and when sufficient buying power exists).
 5. On `sell`: closes the full position for the ticker.
 6. Every 30 seconds, checks all open positions and automatically sells if:
-   - P&L drops to **-5%** (stop-loss)
-   - P&L reaches **+10%** (take-profit)
+   - P&L drops to **-2%** (stop-loss)
+   - P&L reaches **+3%** (take-profit)
 
 ## Prerequisites
 
-- [Alpaca](https://alpaca.markets) account (paper trading is free)
+- [Alpaca](https://alpaca.markets) account — used for the real-time news feed only (not for trading); a free account works
+- [Tradier](https://developer.tradier.com) account — used for all trading; sandbox is free
 - An LLM API key — either [Anthropic](https://console.anthropic.com) or [Google AI](https://aistudio.google.com)
 
 ## Local development
@@ -46,9 +47,11 @@ Edit `.env` with your API keys and settings:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ALPACA_API_KEY` | Alpaca API key ID | required |
-| `ALPACA_SECRET_KEY` | Alpaca secret key | required |
-| `ALPACA_BASE_URL` | Alpaca base URL | `https://paper-api.alpaca.markets` |
+| `ALPACA_API_KEY` | Alpaca API key ID (news feed only) | required |
+| `ALPACA_SECRET_KEY` | Alpaca secret key (news feed only) | required |
+| `TRADIER_ACCESS_TOKEN` | Tradier access token | required |
+| `TRADIER_ACCOUNT_ID` | Tradier account ID | required |
+| `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
 | `LLM_PROVIDER` | LLM to use: `claude` or `gemini` | required |
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude) | conditional |
 | `ANTHROPIC_MODEL` | Claude model ID | `claude-opus-4-6` |
@@ -57,8 +60,11 @@ Edit `.env` with your API keys and settings:
 | `TRADE_AMOUNT_USD` | Dollar amount per buy order | `5.0` |
 | `ALLOW_SHORT` | Enable short selling | `false` |
 | `SHORT_QTY` | Shares per short sell order | `1` |
-| `STOP_LOSS_PCT` | Stop-loss threshold (decimal) | `0.05` (5%) |
-| `TAKE_PROFIT_PCT` | Take-profit threshold (decimal) | `0.10` (10%) |
+| `STOP_LOSS_PCT` | Stop-loss threshold (percentage, e.g. `2` = 2%) | `2` |
+| `TAKE_PROFIT_PCT` | Take-profit threshold (percentage, e.g. `3` = 3%) | `3` |
+| `TELEGRAM_ENABLED` | Send trade notifications via Telegram | `false` |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (if enabled) | conditional |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID (if enabled) | conditional |
 
 ### 4. Run the bot
 
@@ -99,17 +105,17 @@ docker compose down
 
 ## Testing
 
-All testing is done against Alpaca's paper trading environment. After starting the bot, monitor the [paper trading dashboard](https://app.alpaca.markets/paper/dashboard/overview) to see orders placed in response to news.
-
-To run the unit tests for pure logic (no external calls):
+Unit tests cover pure logic with no external API calls:
 
 ```bash
 pytest tests/ -v
 ```
 
+End-to-end testing is done against Tradier's sandbox. Set `TRADIER_PAPER=true` and use sandbox credentials from the [Tradier Developer portal](https://developer.tradier.com).
+
 ## Limitations
 
-- The bot runs only while the process is active — there is no scheduling or market-hours gating.
 - Only stocks with tickers mentioned in the news are eligible for trades.
 - One position per ticker at a time (duplicate buy signals are skipped).
-- For live trading, change `ALPACA_BASE_URL` to `https://api.alpaca.markets` and use live API keys.
+- Buys are skipped outside market hours or when buying power is below `TRADE_AMOUNT_USD`.
+- For live trading, set `TRADIER_PAPER=false` and use live Tradier credentials.
