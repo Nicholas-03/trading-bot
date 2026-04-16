@@ -27,7 +27,13 @@ def _fig_json(fig: go.Figure) -> dict:
 
 def _build_charts() -> tuple[dict, list[dict]]:
     con = _conn()
+    try:
+        return _query_charts(con)
+    finally:
+        con.close()
 
+
+def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     # 1 & 2: Cumulative and daily P&L
     rows = con.execute(
         "SELECT date(closed_at) as day, SUM(pnl_usd) as dpnl "
@@ -94,8 +100,6 @@ def _build_charts() -> tuple[dict, list[dict]]:
         "LEFT JOIN trades t ON t.decision_id = d.id "
         "ORDER BY n.ts DESC LIMIT 20"
     ).fetchall()
-
-    con.close()
 
     charts = {
         "cumulative": _fig_json(fig_cum),
