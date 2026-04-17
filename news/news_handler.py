@@ -50,6 +50,15 @@ class NewsHandler:
                 logger.debug("No tickers in news event — skipping")
                 return
 
+            account = await asyncio.to_thread(self._client.get_account)
+            buying_power = float(account.buying_power)
+            if buying_power < self._config.trade_amount_usd:
+                logger.info(
+                    "Insufficient buying power ($%.2f < $%.2f) — skipping LLM call",
+                    buying_power, self._config.trade_amount_usd,
+                )
+                return
+
             decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
