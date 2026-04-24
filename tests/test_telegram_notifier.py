@@ -20,7 +20,7 @@ def test_noop_notifier_does_nothing():
 def test_format_buy():
     n = TelegramNotifier.__new__(TelegramNotifier)
     msg = n._format_buy("AAPL", 5.0, "abc123")
-    assert "✅ BUY executed" in msg
+    assert "✅ BUY filled" in msg
     assert "AAPL" in msg
     assert "$5.00" in msg
     assert "abc123" in msg
@@ -36,7 +36,7 @@ def test_format_sell():
 def test_format_short():
     n = TelegramNotifier.__new__(TelegramNotifier)
     msg = n._format_short("TSLA", 2, "xyz789")
-    assert "🩳 SHORT executed" in msg
+    assert "🩳 SHORT filled" in msg
     assert "TSLA" in msg
     assert "2" in msg
     assert "xyz789" in msg

@@ -28,5 +28,6 @@ COPY trading/ trading/
 COPY llm/ llm/
 COPY news/ news/
 COPY notifications/ notifications/
+COPY analytics/ analytics/
 
 CMD ["python", "main.py"]

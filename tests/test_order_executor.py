@@ -123,9 +123,9 @@ def test_sell_increments_daily_sells():
     """Verify _daily_sells increments when sell() successfully closes."""
     ex = _make_executor()
     ex._held_tickers.add("AAPL")
-    # Stub close_position to succeed, get_quotes to return a price
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 155.0})
+    ex._client.get_order = MagicMock(return_value=("filled", 155.0))
     ex._position_book["AAPL"] = (150.0, 1, None)
 
     import asyncio
@@ -141,6 +141,7 @@ def test_sell_accumulates_realized_pnl():
     ex._held_tickers.add("AAPL")
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 160.0})
+    ex._client.get_order = MagicMock(return_value=("filled", 160.0))
     ex._position_book["AAPL"] = (150.0, 2, None)  # 2 shares, entry $150, exit $160 → $20 P&L
 
     import asyncio
@@ -156,6 +157,7 @@ def test_sell_skips_pnl_when_already_provided():
     ex._held_tickers.add("AAPL")
     ex._client.close_position = MagicMock(return_value="order-1")
     ex._client.get_quotes = MagicMock(return_value={"AAPL": 999.0})  # should NOT be used
+    ex._client.get_order = MagicMock(return_value=("filled", None))
     ex._position_book["AAPL"] = (150.0, 1, None)
 
     import asyncio
@@ -165,3 +167,35 @@ def test_sell_skips_pnl_when_already_provided():
     assert abs(pnl - 7.50) < 0.01
     # get_quotes should not have been called since pnl_usd was provided
     ex._client.get_quotes.assert_not_called()
+
+
+# --- _wait_for_fill ---
+
+def test_wait_for_fill_returns_true_on_filled():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("filled", 175.5))
+
+    import asyncio
+    filled, price = asyncio.run(ex._wait_for_fill("order-1"))
+    assert filled is True
+    assert price == 175.5
+
+
+def test_wait_for_fill_returns_false_on_rejected():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("rejected", None))
+
+    import asyncio
+    filled, price = asyncio.run(ex._wait_for_fill("order-1"))
+    assert filled is False
+    assert price is None
+
+
+def test_wait_for_fill_returns_false_on_timeout():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("open", None))
+
+    import asyncio
+    filled, price = asyncio.run(ex._wait_for_fill("order-1", timeout_sec=0.1, poll_interval=0.05))
+    assert filled is False
+    assert price is None

@@ -84,6 +84,12 @@ class TradierClient:
         qty = max(1, abs(round(pos.qty)))
         return self.submit_order(symbol, side, qty)
 
+    def get_order(self, order_id: str) -> tuple[str, float | None]:
+        """Return (status, avg_fill_price) for an order."""
+        resp = self._http.get(f"/accounts/{self._account_id}/orders/{order_id}")
+        _raise_for_status(resp)
+        return _parse_order_status(resp.json())
+
     def close(self) -> None:
         self._http.close()
 
@@ -132,6 +138,15 @@ def _parse_quotes(data: dict) -> dict[str, float]:
         for q in quote_data
         if q.get("last") is not None
     }
+
+
+def _parse_order_status(data: dict) -> tuple[str, float | None]:
+    """Parse Tradier order response. Returns (status, avg_fill_price)."""
+    order = data.get("order", {})
+    status = str(order.get("status", "unknown"))
+    avg_fill = order.get("avg_fill_price")
+    fill_price = float(avg_fill) if avg_fill else None
+    return status, fill_price
 
 
 def _parse_buying_power(data: dict) -> float:

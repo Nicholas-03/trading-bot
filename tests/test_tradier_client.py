@@ -1,6 +1,6 @@
 # tests/test_tradier_client.py
 import pytest
-from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, TradierPosition
+from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, _parse_order_status, TradierPosition
 
 
 def test_parse_positions_null_string():
@@ -109,3 +109,32 @@ def test_parse_buying_power_pdt_stock_buying_power():
 def test_parse_buying_power_unrecognised_structure():
     with pytest.raises(ValueError, match="buying power"):
         _parse_buying_power({"balances": {"something_else": {}}})
+
+
+# --- _parse_order_status ---
+
+def test_parse_order_status_filled_with_price():
+    data = {"order": {"status": "filled", "avg_fill_price": 175.5}}
+    status, price = _parse_order_status(data)
+    assert status == "filled"
+    assert price == 175.5
+
+
+def test_parse_order_status_pending_no_price():
+    data = {"order": {"status": "pending", "avg_fill_price": None}}
+    status, price = _parse_order_status(data)
+    assert status == "pending"
+    assert price is None
+
+
+def test_parse_order_status_rejected():
+    data = {"order": {"status": "rejected"}}
+    status, price = _parse_order_status(data)
+    assert status == "rejected"
+    assert price is None
+
+
+def test_parse_order_status_missing_order_key():
+    status, price = _parse_order_status({})
+    assert status == "unknown"
+    assert price is None

@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_FILL_TIMEOUT = 60.0
+_FILL_POLL = 3.0
+
 
 def _monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
@@ -66,6 +69,31 @@ class OrderExecutor:
         """Remove the pending-close guard once Tradier no longer returns the position."""
         self._pending_close.discard(ticker)
 
+    async def _wait_for_fill(
+        self,
+        order_id: str,
+        timeout_sec: float = _FILL_TIMEOUT,
+        poll_interval: float = _FILL_POLL,
+    ) -> tuple[bool, float | None]:
+        """Poll until the order is filled, hits a terminal state, or times out.
+
+        Returns (filled, avg_fill_price).
+        """
+        max_polls = max(1, int(timeout_sec / poll_interval))
+        for _ in range(max_polls):
+            try:
+                status, fill_price = await asyncio.to_thread(self._client.get_order, order_id)
+                if status == "filled":
+                    return True, fill_price
+                if status in ("canceled", "expired", "rejected", "error"):
+                    logger.warning("Order %s reached terminal state: %s", order_id, status)
+                    return False, None
+            except Exception as e:
+                logger.warning("Error polling order %s status: %s", order_id, e)
+            await asyncio.sleep(poll_interval)
+        logger.warning("Order %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
+        return False, None
+
     def daily_summary(self) -> tuple[int, int, float]:
         """Return (buys, sells, realized_pnl) for today. Resets counters on day boundary."""
         self._maybe_reset_day()
@@ -115,7 +143,7 @@ class OrderExecutor:
             qty = max(1, math.floor(self._notional_usd / price))
             order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
 
-            # Update in-memory state first — broker accepted the order
+            # Guard against duplicate buys immediately — broker accepted the order
             self._held_tickers.add(ticker)
             self._position_book[ticker] = (price, qty, None)
             self._maybe_reset_day()
@@ -123,22 +151,28 @@ class OrderExecutor:
             self._daily_buys += 1
             self._weekly_buys += 1
 
-            # DB write is best-effort — a failure here is recoverable, a missing held_ticker is not
+            # Wait for fill confirmation before recording or notifying
+            filled, fill_price = await self._wait_for_fill(order_id)
+            if not filled:
+                logger.warning("BUY order %s for %s fill unconfirmed", order_id, ticker)
+                await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
+                return
+
+            actual_price = fill_price if fill_price else price
+            self._position_book[ticker] = (actual_price, qty, None)
+
             if self._db is not None:
                 try:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
-                        self._db.record_trade_open, decision_id, ticker, "buy", qty, price, opened_at
+                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at
                     )
-                    self._position_book[ticker] = (price, qty, trade_id)
+                    self._position_book[ticker] = (actual_price, qty, trade_id)
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
 
-            logger.info(
-                "BUY order accepted for %s qty=%d @ $%.2f — order %s (pending fill)",
-                ticker, qty, price, order_id,
-            )
-            await self._notifier.notify_buy(ticker, self._notional_usd, order_id)
+            logger.info("BUY filled for %s qty=%d @ $%.2f — order %s", ticker, qty, actual_price, order_id)
+            await self._notifier.notify_buy(ticker, self._notional_usd, order_id, fill_price=actual_price)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
@@ -155,7 +189,7 @@ class OrderExecutor:
                 self._client.submit_order, ticker, "sell_short", self._short_qty
             )
 
-            # Update in-memory state first
+            # Guard immediately — broker accepted the order
             self._shorted_tickers.add(ticker)
             self._position_book[ticker] = (0.0, self._short_qty, None)
             self._maybe_reset_day()
@@ -163,23 +197,29 @@ class OrderExecutor:
             self._daily_buys += 1
             self._weekly_buys += 1
 
-            # DB write is best-effort
+            # Wait for fill confirmation before recording or notifying
+            filled, fill_price = await self._wait_for_fill(order_id)
+            if not filled:
+                logger.warning("SHORT order %s for %s fill unconfirmed", order_id, ticker)
+                await self._notifier.notify_error(f"short {ticker}", f"order {order_id} fill unconfirmed")
+                return
+
+            actual_price = fill_price or 0.0
+            self._position_book[ticker] = (actual_price, self._short_qty, None)
+
             if self._db is not None:
                 try:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
                         self._db.record_trade_open,
-                        decision_id, ticker, "short", self._short_qty, None, opened_at,
+                        decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at,
                     )
-                    self._position_book[ticker] = (0.0, self._short_qty, trade_id)
+                    self._position_book[ticker] = (actual_price, self._short_qty, trade_id)
                 except Exception as db_err:
                     logger.warning("Failed to record short for %s in analytics DB: %s", ticker, db_err)
 
-            logger.info(
-                "SHORT order accepted for %s qty=%d — order %s (pending fill)",
-                ticker, self._short_qty, order_id,
-            )
-            await self._notifier.notify_short(ticker, self._short_qty, order_id)
+            logger.info("SHORT filled for %s qty=%d @ $%.2f — order %s", ticker, self._short_qty, actual_price, order_id)
+            await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price)
         except Exception as e:
             logger.error("Failed to short %s: %s", ticker, e)
             await self._notifier.notify_error(f"short {ticker}", str(e))
@@ -196,25 +236,30 @@ class OrderExecutor:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
             return
 
-        # Extract trade_id before modifying _position_book
+        # Snapshot position book before any mutation so we can refine P&L post-fill
+        entry_price: float = 0.0
+        qty_held: int = 0
         trade_id: int | None = None
         if ticker in self._position_book:
-            _, _, trade_id = self._position_book[ticker]
+            entry_price, qty_held, trade_id = self._position_book[ticker]
 
         exit_price: float | None = None
-        try:
-            # Compute realized P&L for long positions when not already provided by caller
-            if pnl_usd is None and ticker in self._held_tickers and ticker in self._position_book:
-                entry_price, qty, _ = self._position_book[ticker]
-                if entry_price > 0:
-                    quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
-                    current = quotes.get(ticker, 0.0)
-                    if current:
-                        exit_price = current
-                        pnl_usd = (current - entry_price) * qty
-                        pnl_pct = (current - entry_price) / entry_price
+        pnl_was_computed = False
 
-            await asyncio.to_thread(self._client.close_position, ticker)
+        try:
+            # Compute estimated P&L for long positions when not provided by caller
+            if pnl_usd is None and ticker in self._held_tickers and entry_price > 0 and qty_held > 0:
+                quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
+                current = quotes.get(ticker, 0.0)
+                if current:
+                    exit_price = current
+                    pnl_usd = (current - entry_price) * qty_held
+                    pnl_pct = (current - entry_price) / entry_price
+                    pnl_was_computed = True
+
+            order_id = await asyncio.to_thread(self._client.close_position, ticker)
+
+            # Update state immediately — prevents re-sell attempts while we wait for fill
             self._held_tickers.discard(ticker)
             self._shorted_tickers.discard(ticker)
             self._position_book.pop(ticker, None)
@@ -226,6 +271,24 @@ class OrderExecutor:
             if pnl_usd is not None:
                 self._daily_realized_pnl += pnl_usd
                 self._weekly_realized_pnl += pnl_usd
+
+            # Wait for fill to get actual exit price; proceed with estimated P&L on timeout
+            # (market order was submitted — it will fill; we just may not have the exact price)
+            filled, fill_price = await self._wait_for_fill(order_id)
+            if not filled:
+                logger.warning(
+                    "SELL order %s for %s fill unconfirmed — reporting with estimated P&L", order_id, ticker
+                )
+
+            # Refine P&L with actual fill price when available
+            if fill_price and pnl_was_computed and entry_price > 0 and qty_held > 0:
+                actual_pnl_usd = (fill_price - entry_price) * qty_held
+                pnl_delta = actual_pnl_usd - (pnl_usd or 0.0)
+                self._daily_realized_pnl += pnl_delta
+                self._weekly_realized_pnl += pnl_delta
+                pnl_usd = actual_pnl_usd
+                pnl_pct = (fill_price - entry_price) / entry_price
+                exit_price = fill_price
 
             if self._db is not None and trade_id is not None:
                 try:
