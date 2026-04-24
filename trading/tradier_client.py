@@ -138,9 +138,11 @@ def _parse_buying_power(data: dict) -> float:
     """Parse Tradier balances response. Supports margin, PDT, and cash accounts."""
     balances = data.get("balances", {})
     if "margin" in balances:
-        return float(balances["margin"]["buying_power"])
+        m = balances["margin"]
+        return float(m.get("buying_power") or m["stock_buying_power"])
     if "pdt" in balances:
-        return float(balances["pdt"]["buying_power"])
+        p = balances["pdt"]
+        return float(p.get("buying_power") or p["stock_buying_power"])
     if "cash" in balances:
         return float(balances["cash"]["cash_available"])
     raise ValueError("Cannot determine buying power from balances response")

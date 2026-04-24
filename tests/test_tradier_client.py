@@ -95,6 +95,17 @@ def test_parse_buying_power_missing_balances_key():
         _parse_buying_power({})
 
 
+def test_parse_buying_power_margin_stock_buying_power():
+    # Tradier sandbox omits "buying_power" and uses "stock_buying_power" instead
+    data = {"balances": {"margin": {"stock_buying_power": 200000.0, "option_buying_power": 100000.0}}}
+    assert _parse_buying_power(data) == 200000.0
+
+
+def test_parse_buying_power_pdt_stock_buying_power():
+    data = {"balances": {"pdt": {"stock_buying_power": 75000.0}}}
+    assert _parse_buying_power(data) == 75000.0
+
+
 def test_parse_buying_power_unrecognised_structure():
     with pytest.raises(ValueError, match="buying power"):
         _parse_buying_power({"balances": {"something_else": {}}})
