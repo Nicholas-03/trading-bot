@@ -1,13 +1,11 @@
-import asyncio
 import json
 import logging
 from dataclasses import dataclass
 from typing import Literal
 
-import anthropic
-from google import genai
-from google.genai import errors as genai_errors
 from config import Config
+from llm.providers import ClaudeProvider, DeepSeekProvider, GeminiProvider
+from llm.providers.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -80,13 +78,13 @@ def _parse_response(text: str) -> Decision:
 
 class LLMAdvisor:
     def __init__(self, config: Config) -> None:
-        self._provider = config.llm_provider
-        if self._provider == "claude":
-            self._claude = anthropic.Anthropic(api_key=config.anthropic_api_key)
-            self._claude_model = config.anthropic_model
+        provider = config.llm_provider
+        if provider == "claude":
+            self._provider: LLMProvider = ClaudeProvider(config.anthropic_api_key, config.anthropic_model)
+        elif provider == "gemini":
+            self._provider = GeminiProvider(config.google_api_key, config.gemini_model)
         else:
-            self._gemini = genai.Client(api_key=config.google_api_key)
-            self._gemini_model = config.gemini_model
+            self._provider = DeepSeekProvider(config.deepseek_api_key, config.deepseek_model)
 
     async def analyze(
         self,
@@ -104,10 +102,7 @@ class LLMAdvisor:
             shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
         )
         try:
-            if self._provider == "claude":
-                text = await self._call_claude(prompt)
-            else:
-                text = await self._call_gemini(prompt)
+            text = await self._provider.complete(prompt)
             return _parse_response(text)
         except ValueError as e:
             logger.error("LLM parse error: %s", e)
@@ -115,33 +110,3 @@ class LLMAdvisor:
         except Exception as e:
             logger.error("LLM API error: %s", e)
             return Decision(action="hold", ticker=None, reasoning=f"api error: {e}")
-
-    async def _call_claude(self, prompt: str) -> str:
-        # Run the blocking Anthropic SDK call in a thread so it doesn't freeze the event loop
-        message = await asyncio.to_thread(
-            self._claude.messages.create,
-            model=self._claude_model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return message.content[0].text
-
-    async def _call_gemini(self, prompt: str) -> str:
-        max_retries = 3
-        for attempt in range(max_retries + 1):
-            try:
-                response = await self._gemini.aio.models.generate_content(
-                    model=self._gemini_model,
-                    contents=prompt,
-                )
-                return response.text
-            except genai_errors.ServerError as e:
-                if attempt < max_retries:
-                    wait = 2 ** attempt  # 1s, 2s, 4s
-                    logger.warning(
-                        "Gemini 503 (attempt %d/%d), retrying in %ds: %s",
-                        attempt + 1, max_retries, wait, e,
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    raise
