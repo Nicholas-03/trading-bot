@@ -15,6 +15,8 @@ class Config:
     anthropic_model: str
     google_api_key: str
     gemini_model: str
+    deepseek_api_key: str
+    deepseek_model: str
     llm_provider: str
     trade_amount_usd: float
     short_qty: int
@@ -39,15 +41,17 @@ def load_config() -> Config:
     load_dotenv()
 
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    if provider not in ("claude", "gemini"):
-        raise ValueError(f"LLM_PROVIDER must be 'claude' or 'gemini', got {provider!r}")
+    if provider not in ("claude", "gemini", "deepseek"):
+        raise ValueError(f"LLM_PROVIDER must be 'claude', 'gemini', or 'deepseek', got {provider!r}")
 
     # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
     required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
     if provider == "claude":
         required.append("ANTHROPIC_API_KEY")
-    else:
+    elif provider == "gemini":
         required.append("GOOGLE_API_KEY")
+    else:
+        required.append("DEEPSEEK_API_KEY")
 
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -69,6 +73,8 @@ def load_config() -> Config:
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
+        deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
