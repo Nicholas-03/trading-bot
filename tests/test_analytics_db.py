@@ -37,9 +37,9 @@ def test_record_decision_links_to_news(db):
 def test_record_trade_open_with_decision(db):
     nid = db.record_news("2026-04-15T10:00:00Z", "headline", None, [])
     did = db.record_decision(nid, "2026-04-15T10:00:01Z", "buy", "AAPL", "reason")
-    tid = db.record_trade_open(did, "AAPL", "buy", 3, 150.0, "2026-04-15T10:00:02Z")
+    tid = db.record_trade_open(did, "AAPL", "buy", 3, 150.0, "2026-04-15T10:00:02Z", fill_latency_sec=4.2)
     row = db._conn.execute(
-        "SELECT decision_id, ticker, side, qty, entry_price, closed_at FROM trades WHERE id=?", (tid,)
+        "SELECT decision_id, ticker, side, qty, entry_price, closed_at, fill_latency_sec FROM trades WHERE id=?", (tid,)
     ).fetchone()
     assert row[0] == did
     assert row[1] == "AAPL"
@@ -47,13 +47,15 @@ def test_record_trade_open_with_decision(db):
     assert row[3] == 3
     assert abs(row[4] - 150.0) < 0.001
     assert row[5] is None
+    assert abs(row[6] - 4.2) < 0.001
 
 
 def test_record_trade_open_without_decision(db):
     tid = db.record_trade_open(None, "TSLA", "short", 1, None, "2026-04-15T10:00:00Z")
-    row = db._conn.execute("SELECT decision_id, entry_price FROM trades WHERE id=?", (tid,)).fetchone()
+    row = db._conn.execute("SELECT decision_id, entry_price, fill_latency_sec FROM trades WHERE id=?", (tid,)).fetchone()
     assert row[0] is None
     assert row[1] is None
+    assert row[2] is None
 
 
 def test_record_trade_close_updates_row(db):

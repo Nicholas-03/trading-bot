@@ -186,7 +186,7 @@ class OrderExecutor:
                 try:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
-                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at
+                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at, fill_latency_sec
                     )
                     self._position_book[ticker] = (actual_price, qty, trade_id)
                 except Exception as db_err:
@@ -238,7 +238,7 @@ class OrderExecutor:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
                         self._db.record_trade_open,
-                        decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at,
+                        decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at, fill_latency_sec,
                     )
                     self._position_book[ticker] = (actual_price, self._short_qty, trade_id)
                 except Exception as db_err:

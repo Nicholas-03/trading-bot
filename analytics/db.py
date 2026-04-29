@@ -30,20 +30,27 @@ class TradeDB:
                 reasoning     TEXT
             );
             CREATE TABLE IF NOT EXISTS trades (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                decision_id  INTEGER REFERENCES llm_decisions(id),
-                ticker       TEXT NOT NULL,
-                side         TEXT NOT NULL,
-                qty          INTEGER NOT NULL,
-                entry_price  REAL,
-                exit_price   REAL,
-                pnl_usd      REAL,
-                pnl_pct      REAL,
-                exit_reason  TEXT,
-                opened_at    TEXT NOT NULL,
-                closed_at    TEXT
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id       INTEGER REFERENCES llm_decisions(id),
+                ticker            TEXT NOT NULL,
+                side              TEXT NOT NULL,
+                qty               INTEGER NOT NULL,
+                entry_price       REAL,
+                exit_price        REAL,
+                pnl_usd           REAL,
+                pnl_pct           REAL,
+                exit_reason       TEXT,
+                fill_latency_sec  REAL,
+                opened_at         TEXT NOT NULL,
+                closed_at         TEXT
             );
         """)
+        # Migration: add fill_latency_sec to existing databases that predate this column
+        try:
+            self._conn.execute("ALTER TABLE trades ADD COLUMN fill_latency_sec REAL")
+            self._conn.commit()
+        except Exception:
+            pass  # column already exists
 
     def record_news(self, ts: str, headline: str, summary: str | None, symbols: list[str]) -> int:
         cur = self._conn.execute(
@@ -71,11 +78,12 @@ class TradeDB:
         qty: int,
         entry_price: float | None,
         opened_at: str,
+        fill_latency_sec: float | None = None,
     ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO trades (decision_id, ticker, side, qty, entry_price, opened_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (decision_id, ticker, side, qty, entry_price, opened_at),
+            "INSERT INTO trades (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
