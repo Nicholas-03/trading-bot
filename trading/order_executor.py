@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import math
+import time
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 import httpx
@@ -148,6 +149,7 @@ class OrderExecutor:
                 )
                 return
             order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
+            _submitted_at = time.monotonic()
 
             # Guard against duplicate buys immediately — broker accepted the order
             self._held_tickers.add(ticker)
@@ -159,6 +161,7 @@ class OrderExecutor:
 
             # Wait for fill confirmation before recording or notifying
             filled, fill_price = await self._wait_for_fill(order_id)
+            fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
                 logger.warning("BUY order %s for %s fill unconfirmed", order_id, ticker)
                 await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
@@ -177,8 +180,8 @@ class OrderExecutor:
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
 
-            logger.info("BUY filled for %s qty=%d @ $%.2f — order %s", ticker, qty, actual_price, order_id)
-            await self._notifier.notify_buy(ticker, self._notional_usd, order_id, fill_price=actual_price)
+            logger.info("BUY filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, qty, actual_price, fill_latency_sec, order_id)
+            await self._notifier.notify_buy(ticker, self._notional_usd, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
@@ -194,6 +197,7 @@ class OrderExecutor:
             order_id = await asyncio.to_thread(
                 self._client.submit_order, ticker, "sell_short", self._short_qty
             )
+            _submitted_at = time.monotonic()
 
             # Guard immediately — broker accepted the order
             self._shorted_tickers.add(ticker)
@@ -205,6 +209,7 @@ class OrderExecutor:
 
             # Wait for fill confirmation before recording or notifying
             filled, fill_price = await self._wait_for_fill(order_id)
+            fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
                 logger.warning("SHORT order %s for %s fill unconfirmed", order_id, ticker)
                 await self._notifier.notify_error(f"short {ticker}", f"order {order_id} fill unconfirmed")
@@ -224,8 +229,8 @@ class OrderExecutor:
                 except Exception as db_err:
                     logger.warning("Failed to record short for %s in analytics DB: %s", ticker, db_err)
 
-            logger.info("SHORT filled for %s qty=%d @ $%.2f — order %s", ticker, self._short_qty, actual_price, order_id)
-            await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price)
+            logger.info("SHORT filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, self._short_qty, actual_price, fill_latency_sec, order_id)
+            await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to short %s: %s", ticker, e)
             await self._notifier.notify_error(f"short {ticker}", str(e))

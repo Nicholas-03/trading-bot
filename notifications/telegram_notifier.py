@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 
 @runtime_checkable
 class Notifier(Protocol):
-    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None) -> None: ...
+    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None: ...
     async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None: ...
-    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None) -> None: ...
+    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None: ...
     async def notify_error(self, action: str, detail: str) -> None: ...
     async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None: ...
     async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None: ...
@@ -32,14 +32,14 @@ class TelegramNotifier:
 
     # --- Public notify methods ---
 
-    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None) -> None:
-        await self._send(self._format_buy(ticker, notional, order_id, fill_price))
+    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
+        await self._send(self._format_buy(ticker, notional, order_id, fill_price, fill_latency_sec))
 
     async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
         await self._send(self._format_sell(ticker, pnl_pct, pnl_usd))
 
-    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None) -> None:
-        await self._send(self._format_short(ticker, qty, order_id, fill_price))
+    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
+        await self._send(self._format_short(ticker, qty, order_id, fill_price, fill_latency_sec))
 
     async def notify_error(self, action: str, detail: str) -> None:
         await self._send(self._format_error(action, detail))
@@ -55,7 +55,7 @@ class TelegramNotifier:
 
     # --- Message formatters ---
 
-    def _format_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None) -> str:
+    def _format_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> str:
         msg = (
             f"✅ BUY filled\n"
             f"📌 Ticker: {ticker}\n"
@@ -63,6 +63,8 @@ class TelegramNotifier:
         )
         if fill_price:
             msg += f"💲 Fill: ${fill_price:.2f}/share\n"
+        if fill_latency_sec is not None:
+            msg += f"⏱ Fill time: {fill_latency_sec:.1f}s\n"
         msg += f"🔖 Order ID: {order_id}"
         return msg
 
@@ -73,7 +75,7 @@ class TelegramNotifier:
             msg += f"\n📊 P&L: {sign}{pnl_pct * 100:.2f}% ({sign}${pnl_usd:.2f})"
         return msg
 
-    def _format_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None) -> str:
+    def _format_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> str:
         msg = (
             f"🩳 SHORT filled\n"
             f"📌 Ticker: {ticker}\n"
@@ -81,6 +83,8 @@ class TelegramNotifier:
         )
         if fill_price:
             msg += f"💲 Fill: ${fill_price:.2f}/share\n"
+        if fill_latency_sec is not None:
+            msg += f"⏱ Fill time: {fill_latency_sec:.1f}s\n"
         msg += f"🔖 Order ID: {order_id}"
         return msg
 
@@ -203,13 +207,13 @@ class NoOpNotifier(TelegramNotifier):
     def __init__(self) -> None:
         pass  # No HTTP client needed
 
-    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None) -> None:
+    async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
         pass
 
     async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
         pass
 
-    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None) -> None:
+    async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
         pass
 
     async def notify_error(self, action: str, detail: str) -> None:
