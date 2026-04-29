@@ -1,5 +1,6 @@
 # analytics/server.py
 
+import html
 import json
 import os
 import sqlite3
@@ -128,16 +129,20 @@ def index() -> HTMLResponse:
     for r in recent:
         pnl_usd = f"{r['pnl_usd']:+.2f}" if r["pnl_usd"] is not None else "—"
         pnl_pct = f"{r['pnl_pct'] * 100:+.1f}%" if r["pnl_pct"] is not None else "—"
-        headline = (r["headline"] or "")[:60]
+        headline = html.escape((r["headline"] or "")[:60])
+        ts = html.escape((r["ts"] or "")[:16])
+        action = html.escape(r["action"] or "")
+        ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
+        exit_reason = html.escape(r["exit_reason"]) if r["exit_reason"] else "—"
         table_rows += (
             f"<tr>"
-            f"<td>{(r['ts'] or '')[:16]}</td>"
+            f"<td>{ts}</td>"
             f"<td>{headline}</td>"
-            f"<td>{r['action']}</td>"
-            f"<td>{r['ticker'] or '—'}</td>"
+            f"<td>{action}</td>"
+            f"<td>{ticker}</td>"
             f"<td>{pnl_usd}</td>"
             f"<td>{pnl_pct}</td>"
-            f"<td>{r['exit_reason'] or '—'}</td>"
+            f"<td>{exit_reason}</td>"
             f"</tr>\n"
         )
 

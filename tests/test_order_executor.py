@@ -199,3 +199,41 @@ def test_wait_for_fill_returns_false_on_timeout():
     filled, price = asyncio.run(ex._wait_for_fill("order-1", timeout_sec=0.1, poll_interval=0.05))
     assert filled is False
     assert price is None
+
+
+# --- buy rollback on unconfirmed fill ---
+
+def test_buy_rolls_back_state_on_unconfirmed_fill():
+    """If a buy order fails to confirm, the ticker must be removed from held_tickers
+    and the buy counter must not be left inflated."""
+    ex = _make_executor()
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 100.0})
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("rejected", None))
+
+    import asyncio
+    asyncio.run(ex.buy("AAPL"))
+
+    assert "AAPL" not in ex.held_tickers
+    assert "AAPL" not in ex._position_book
+    buys, _, _ = ex.daily_summary()
+    assert buys == 0
+
+
+# --- short rollback on unconfirmed fill ---
+
+def test_short_rolls_back_state_on_unconfirmed_fill():
+    """If a short order fails to confirm, the ticker must be removed from shorted_tickers
+    and the buy counter must not be left inflated."""
+    ex = _make_executor()
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("rejected", None))
+
+    import asyncio
+    asyncio.run(ex.short("AAPL"))
+
+    assert "AAPL" not in ex.shorted_tickers
+    assert "AAPL" not in ex._position_book
+    buys, _, _ = ex.daily_summary()
+    assert buys == 0

@@ -6,7 +6,10 @@ import time
 import httpx
 import pytz
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from trading.order_executor import OrderExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +136,7 @@ class TelegramNotifier:
 class TelegramCommandListener:
     """Polls Telegram for incoming commands and handles /status."""
 
-    def __init__(self, token: str, chat_id: str, order_executor: object) -> None:
+    def __init__(self, token: str, chat_id: str, order_executor: "OrderExecutor") -> None:
         self._token = token
         self._chat_id = chat_id
         self._order_executor = order_executor
@@ -228,11 +231,8 @@ class TelegramCommandListener:
         await self._client.aclose()
 
 
-class NoOpNotifier(TelegramNotifier):
+class NoOpNotifier:
     """Drop-in stub used when TELEGRAM_ENABLED=false."""
-
-    def __init__(self) -> None:
-        pass  # No HTTP client needed
 
     async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
         pass
@@ -250,9 +250,6 @@ class NoOpNotifier(TelegramNotifier):
         pass
 
     async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None:
-        pass
-
-    async def _send(self, message: str) -> None:
         pass
 
     async def aclose(self) -> None:

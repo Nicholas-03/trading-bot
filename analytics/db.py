@@ -49,7 +49,7 @@ class TradeDB:
         try:
             self._conn.execute("ALTER TABLE trades ADD COLUMN fill_latency_sec REAL")
             self._conn.commit()
-        except Exception:
+        except sqlite3.OperationalError:
             pass  # column already exists
 
     def record_news(self, ts: str, headline: str, summary: str | None, symbols: list[str]) -> int:
