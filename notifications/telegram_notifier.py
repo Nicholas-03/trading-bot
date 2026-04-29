@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import sys
 import time
 import httpx
 import pytz
@@ -161,11 +163,41 @@ class TelegramCommandListener:
             self._offset = update["update_id"] + 1
             await self._handle_update(update)
 
+    _HELP_TEXT = (
+        "Available commands:\n"
+        "/status — show uptime and open positions\n"
+        "/off — pause trading (no new buys or shorts)\n"
+        "/on — resume trading\n"
+        "/restart — restart the bot process\n"
+        "/help — show this message"
+    )
+
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message", {})
         text = message.get("text", "").strip()
         if text == "/status":
             await self._send_status()
+        elif text == "/off":
+            self._order_executor.trading_paused = True
+            await self._reply("⏸ Trading paused — no new buys or shorts will be placed.")
+        elif text == "/on":
+            self._order_executor.trading_paused = False
+            await self._reply("▶️ Trading resumed.")
+        elif text == "/restart":
+            await self._reply("🔄 Restarting bot...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        elif text == "/help":
+            await self._reply(self._HELP_TEXT)
+
+    async def _reply(self, message: str) -> None:
+        try:
+            response = await self._client.post(
+                _API_URL.format(token=self._token),
+                json={"chat_id": self._chat_id, "text": message},
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.warning("Failed to send reply: %s", e)
 
     async def _send_status(self) -> None:
         uptime_secs = int(time.monotonic() - self._started_at)
@@ -175,6 +207,7 @@ class TelegramCommandListener:
 
         held = sorted(self._order_executor.held_tickers)
         shorted = sorted(self._order_executor.shorted_tickers)
+        paused = self._order_executor.trading_paused
         positions_str = ""
         if held:
             positions_str += f"\n📈 Long: {', '.join(held)}"
@@ -183,19 +216,13 @@ class TelegramCommandListener:
         if not held and not shorted:
             positions_str = "\n📭 No open positions"
 
+        status_str = "⏸ PAUSED" if paused else "✅ Active"
         message = (
-            f"✅ Service is online\n"
+            f"🤖 Bot status: {status_str}\n"
             f"⏱ Uptime: {uptime_str}"
             f"{positions_str}"
         )
-        try:
-            response = await self._client.post(
-                _API_URL.format(token=self._token),
-                json={"chat_id": self._chat_id, "text": message},
-            )
-            response.raise_for_status()
-        except Exception as e:
-            logger.warning("Failed to send status reply: %s", e)
+        await self._reply(message)
 
     async def aclose(self) -> None:
         await self._client.aclose()

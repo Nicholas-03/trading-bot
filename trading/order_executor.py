@@ -41,6 +41,7 @@ class OrderExecutor:
         self._notifier = notifier
         self._db = db
         self._pending_close: set[str] = set()
+        self._trading_paused: bool = False
         # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
         # daily P&L counters — reset lazily at start of each new calendar day
@@ -65,6 +66,14 @@ class OrderExecutor:
     @property
     def pending_close(self) -> frozenset[str]:
         return frozenset(self._pending_close)
+
+    @property
+    def trading_paused(self) -> bool:
+        return self._trading_paused
+
+    @trading_paused.setter
+    def trading_paused(self, value: bool) -> None:
+        self._trading_paused = value
 
     def confirm_closed(self, ticker: str) -> None:
         """Remove the pending-close guard once Tradier no longer returns the position."""
@@ -122,6 +131,9 @@ class OrderExecutor:
             self._last_week_monday = monday
 
     async def buy(self, ticker: str, decision_id: int | None = None) -> None:
+        if self._trading_paused:
+            logger.info("Trading paused — skipping buy for %s", ticker)
+            return
         if ticker in self._held_tickers:
             logger.info("Skipping buy for %s — already held", ticker)
             return
@@ -187,6 +199,9 @@ class OrderExecutor:
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
     async def short(self, ticker: str, decision_id: int | None = None) -> None:
+        if self._trading_paused:
+            logger.info("Trading paused — skipping short for %s", ticker)
+            return
         if ticker in self._shorted_tickers:
             logger.info("Skipping short for %s — already shorted", ticker)
             return
