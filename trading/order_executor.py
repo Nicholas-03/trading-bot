@@ -140,7 +140,13 @@ class OrderExecutor:
             if not price:
                 logger.error("No quote available for %s — skipping buy", ticker)
                 return
-            qty = max(1, math.floor(self._notional_usd / price))
+            qty = math.floor(self._notional_usd / price)
+            if qty == 0:
+                logger.info(
+                    "Skipping buy for %s — price $%.2f exceeds budget $%.2f",
+                    ticker, price, self._notional_usd,
+                )
+                return
             order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
 
             # Guard against duplicate buys immediately — broker accepted the order
