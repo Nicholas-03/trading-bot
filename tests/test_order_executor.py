@@ -1,6 +1,7 @@
 # tests/test_order_executor.py
 from datetime import date, timedelta
 from unittest.mock import MagicMock, AsyncMock
+import time
 import pytest
 from trading.order_executor import OrderExecutor, _monday_of
 from config import Config
@@ -237,3 +238,103 @@ def test_short_rolls_back_state_on_unconfirmed_fill():
     assert "AAPL" not in ex._position_book
     buys, _, _ = ex.daily_summary()
     assert buys == 0
+
+
+# --- decision_monotonic / fill_latency_sec ---
+
+def test_buy_with_decision_monotonic_calculates_correct_latency():
+    """Verify fill_latency_sec is calculated from decision_monotonic, not just submission time."""
+    ex = _make_executor()
+
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 50.0})  # Lower price so qty=2
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+
+    import asyncio
+
+    # Capture decision time, then run buy with a slight delay to simulate decision processing
+    decision_time = time.monotonic()
+    time.sleep(0.05)  # Simulate 50ms of decision processing
+
+    asyncio.run(ex.buy("AAPL", decision_id=1, decision_monotonic=decision_time))
+
+    # Check that notify_buy was called
+    assert ex._notifier.notify_buy.called, "notify_buy was not called"
+    
+    # notify_buy is called with keyword args
+    call_kwargs = ex._notifier.notify_buy.call_args.kwargs
+    fill_latency_sec = call_kwargs.get('fill_latency_sec')
+
+    # Should be at least 50ms (the sleep time)
+    assert fill_latency_sec is not None, "fill_latency_sec was not passed to notify_buy"
+    assert fill_latency_sec >= 0.045, f"Expected >= 0.045, got {fill_latency_sec}"
+
+
+def test_buy_without_decision_monotonic_uses_submission_time():
+    """When decision_monotonic is None, fallback to measuring from submission time."""
+    ex = _make_executor()
+
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 50.0})
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+
+    import asyncio
+
+    # Call buy without decision_monotonic
+    asyncio.run(ex.buy("AAPL", decision_id=1))
+
+    assert ex._notifier.notify_buy.called
+    call_kwargs = ex._notifier.notify_buy.call_args.kwargs
+    fill_latency_sec = call_kwargs.get('fill_latency_sec')
+
+    # Should be close to zero (no delay between submission and fill in this mock)
+    assert fill_latency_sec is not None
+    assert fill_latency_sec < 0.1
+
+
+def test_short_with_decision_monotonic_calculates_correct_latency():
+    """Verify short() also correctly calculates fill_latency_sec from decision_monotonic."""
+    ex = _make_executor()
+
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 155.0))
+
+    import asyncio
+
+    decision_time = time.monotonic()
+    time.sleep(0.05)
+
+    asyncio.run(ex.short("AAPL", decision_id=2, decision_monotonic=decision_time))
+
+    assert ex._notifier.notify_short.called
+    call_kwargs = ex._notifier.notify_short.call_args.kwargs
+    fill_latency_sec = call_kwargs.get('fill_latency_sec')
+
+    # Should include the sleep time
+    assert fill_latency_sec is not None
+    assert fill_latency_sec >= 0.045, f"Expected >= 0.045, got {fill_latency_sec}"
+
+
+def test_decision_monotonic_not_included_in_db_when_db_disabled():
+    """When analytics DB is disabled (db=None), buy still works but decision_monotonic has no effect on DB."""
+    ex = _make_executor()
+    ex._db = None  # No DB
+
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 50.0})
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+
+    import asyncio
+
+    decision_time = time.monotonic()
+    time.sleep(0.05)
+
+    # Should complete without error
+    asyncio.run(ex.buy("AAPL", decision_monotonic=decision_time))
+
+    # Verify ticker was added to held
+    assert "AAPL" in ex.held_tickers
+

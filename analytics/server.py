@@ -95,11 +95,11 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     # Recent news → decision → outcome table
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
-        "       t.pnl_usd, t.pnl_pct, t.exit_reason "
+        "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at "
         "FROM news_events n "
         "JOIN llm_decisions d ON d.news_event_id = n.id "
         "LEFT JOIN trades t ON t.decision_id = d.id "
-        "ORDER BY n.ts DESC LIMIT 20"
+        "ORDER BY n.ts DESC LIMIT 500"
     ).fetchall()
 
     charts = {
@@ -134,8 +134,9 @@ def index() -> HTMLResponse:
         action = html.escape(r["action"] or "")
         ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
         exit_reason = html.escape(r["exit_reason"]) if r["exit_reason"] else "—"
+        closed = "true" if r["closed_at"] is not None else "false"
         table_rows += (
-            f"<tr>"
+            f'<tr data-action="{action}" data-closed="{closed}">'
             f"<td>{ts}</td>"
             f"<td>{headline}</td>"
             f"<td>{action}</td>"
@@ -146,7 +147,7 @@ def index() -> HTMLResponse:
             f"</tr>\n"
         )
 
-    html = f"""<!DOCTYPE html>
+    content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -160,13 +161,23 @@ def index() -> HTMLResponse:
   th, td {{ border: 1px solid #ddd; padding: 7px 10px; text-align: left; }}
   th {{ background: #f6f6f6; font-weight: 600; }}
   tr:nth-child(even) {{ background: #fafafa; }}
+  .filters {{ display: flex; gap: 8px; margin-top: 16px; }}
+  .filters button {{ padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6; cursor: pointer; font-size: 13px; }}
+  .filters button.active {{ background: #222; color: #fff; border-color: #222; }}
 </style>
 </head>
 <body>
 <h1>Trading Analytics</h1>
 {chart_divs}
-<h2>Recent Trades (last 20)</h2>
-<table>
+<h2>Recent Trades (last 500)</h2>
+<div class="filters">
+  <button class="active" onclick="filterTrades('all', this)">All</button>
+  <button onclick="filterTrades('buy', this)">Buy</button>
+  <button onclick="filterTrades('short', this)">Short</button>
+  <button onclick="filterTrades('hold', this)">Hold</button>
+  <button onclick="filterTrades('closed', this)" style="margin-left:16px">Closed only</button>
+</div>
+<table id="trades-table">
 <thead>
   <tr><th>Time (UTC)</th><th>Headline</th><th>Action</th><th>Ticker</th>
       <th>P&amp;L USD</th><th>P&amp;L %</th><th>Exit</th></tr>
@@ -175,10 +186,34 @@ def index() -> HTMLResponse:
 {table_rows}
 </tbody>
 </table>
+<script>
+  let currentAction = 'all';
+  let closedOnly = false;
+
+  function filterTrades(filter, btn) {{
+    if (filter === 'closed') {{
+      closedOnly = !closedOnly;
+      btn.classList.toggle('active', closedOnly);
+    }} else {{
+      document.querySelectorAll('.filters button:not(:last-child)').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      currentAction = filter;
+    }}
+    applyFilters();
+  }}
+
+  function applyFilters() {{
+    document.querySelectorAll('#trades-table tbody tr').forEach(row => {{
+      const actionMatch = currentAction === 'all' || row.dataset.action === currentAction;
+      const closedMatch = !closedOnly || row.dataset.closed === 'true';
+      row.style.display = (actionMatch && closedMatch) ? '' : 'none';
+    }});
+  }}
+</script>
 </body>
 </html>"""
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=content)
 
 
 if __name__ == "__main__":
-    uvicorn.run("analytics.server:app", host="0.0.0.0", port=8080, reload=False)
+    uvicorn.run("analytics.server:app", host="127.0.0.1", port=8080, reload=False)

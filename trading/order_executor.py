@@ -164,7 +164,7 @@ class OrderExecutor:
         except Exception as db_err:
             logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
 
-    async def buy(self, ticker: str, decision_id: int | None = None) -> None:
+    async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
             return
@@ -207,7 +207,11 @@ class OrderExecutor:
 
             # Wait for fill confirmation before recording or notifying
             filled, fill_price = await self._wait_for_fill(order_id)
-            fill_latency_sec = time.monotonic() - _submitted_at
+            # Measure latency from decision time when provided, otherwise from submission
+            if decision_monotonic is not None:
+                fill_latency_sec = time.monotonic() - decision_monotonic
+            else:
+                fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
                 logger.warning("BUY order %s for %s fill unconfirmed — rolling back state", order_id, ticker)
                 self._held_tickers.discard(ticker)
@@ -231,12 +235,12 @@ class OrderExecutor:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
 
             logger.info("BUY filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, qty, actual_price, fill_latency_sec, order_id)
-            await self._notifier.notify_buy(ticker, self._notional_usd, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
+            await self._notifier.notify_buy(ticker, actual_price * qty, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
-    async def short(self, ticker: str, decision_id: int | None = None) -> None:
+    async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping short for %s", ticker)
             return
@@ -262,7 +266,11 @@ class OrderExecutor:
 
             # Wait for fill confirmation before recording or notifying
             filled, fill_price = await self._wait_for_fill(order_id)
-            fill_latency_sec = time.monotonic() - _submitted_at
+            # Measure latency from decision time when provided, otherwise from submission
+            if decision_monotonic is not None:
+                fill_latency_sec = time.monotonic() - decision_monotonic
+            else:
+                fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
                 logger.warning("SHORT order %s for %s fill unconfirmed — rolling back state", order_id, ticker)
                 self._shorted_tickers.discard(ticker)
@@ -349,13 +357,12 @@ class OrderExecutor:
         # Order submitted — update state immediately to prevent re-sell attempts
         self._update_close_state(ticker, pnl_usd)
 
-        # Wait for fill to get actual exit price; proceed with estimated P&L on timeout
-        # (market order was submitted — it will fill; we just may not have the exact price)
         filled, fill_price = await self._wait_for_fill(order_id)
         if not filled:
-            logger.warning(
-                "SELL order %s for %s fill unconfirmed — reporting with estimated P&L", order_id, ticker
-            )
+            logger.warning("SELL order %s for %s fill unconfirmed — skipping sell notification", order_id, ticker)
+            await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+            await self._notifier.notify_error(f"sell {ticker}", f"order {order_id} fill unconfirmed")
+            return
 
         # Refine P&L with actual fill price when available
         if fill_price and pnl_was_computed and entry_price > 0 and qty_held > 0:

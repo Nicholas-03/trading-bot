@@ -1,6 +1,7 @@
 # news/news_handler.py
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from alpaca.data.live import NewsDataStream
@@ -77,6 +78,8 @@ class NewsHandler:
                         db_err,
                     )
 
+            # Capture decision timestamp before analyzing
+            decision_monotonic = time.monotonic()
             decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
@@ -99,10 +102,10 @@ class NewsHandler:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
 
             if decision.action == "buy" and decision.ticker:
-                await self._executor.buy(decision.ticker, decision_id=decision_id)
+                await self._executor.buy(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic)
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
-                    await self._executor.short(decision.ticker, decision_id=decision_id)
+                    await self._executor.short(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic)
                 else:
                     logger.info("Short selling disabled — skipping short for %s", decision.ticker)
             elif decision.action == "sell" and decision.ticker:

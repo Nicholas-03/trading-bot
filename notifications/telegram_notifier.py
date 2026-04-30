@@ -69,9 +69,8 @@ class TelegramNotifier:
         if fill_price:
             msg += f"💲 Fill: ${fill_price:.2f}/share\n"
         if fill_latency_sec is not None:
-            msg += f"⏱ Fill time: {fill_latency_sec:.1f}s\n"
-        msg += f"🔖 Order ID: {order_id}"
-        return msg
+            msg += f"⏱ Fill time: {fill_latency_sec:.1f}s"
+        return msg.rstrip("\n")
 
     def _format_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> str:
         msg = f"🔴 SELL executed\n📌 Ticker: {ticker}"
