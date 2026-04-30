@@ -19,7 +19,13 @@ class TradierClient:
     _LIVE_BASE = "https://api.tradier.com/v1"
     _SANDBOX_BASE = "https://sandbox.tradier.com/v1"
 
-    def __init__(self, access_token: str, account_id: str, paper: bool = True) -> None:
+    def __init__(
+        self,
+        access_token: str,
+        account_id: str,
+        paper: bool = True,
+        quote_token: str | None = None,
+    ) -> None:
         self._account_id = account_id
         base = self._SANDBOX_BASE if paper else self._LIVE_BASE
         self._http = httpx.Client(
@@ -30,6 +36,18 @@ class TradierClient:
             },
             timeout=10.0,
         )
+        # When paper trading, optionally use a live-account token for real-time quotes.
+        # Sandbox quotes are 15-min delayed; the live /markets/quotes endpoint is real-time.
+        self._quote_http: httpx.Client | None = None
+        if paper and quote_token:
+            self._quote_http = httpx.Client(
+                base_url=self._LIVE_BASE,
+                headers={
+                    "Authorization": f"Bearer {quote_token}",
+                    "Accept": "application/json",
+                },
+                timeout=10.0,
+            )
 
     def get_clock(self) -> TradierClock:
         resp = self._http.get("/markets/clock")
@@ -45,7 +63,8 @@ class TradierClient:
     def get_quotes(self, symbols: list[str]) -> dict[str, float]:
         if not symbols:
             return {}
-        resp = self._http.get(
+        http = self._quote_http or self._http
+        resp = http.get(
             "/markets/quotes",
             params={"symbols": ",".join(symbols)},
         )
@@ -92,6 +111,8 @@ class TradierClient:
 
     def close(self) -> None:
         self._http.close()
+        if self._quote_http:
+            self._quote_http.close()
 
 
 def _raise_for_status(resp: httpx.Response) -> None:

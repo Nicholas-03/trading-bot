@@ -11,6 +11,7 @@ class Config:
     tradier_access_token: str
     tradier_account_id: str
     tradier_paper: bool
+    tradier_live_token: str
     anthropic_api_key: str
     anthropic_model: str
     google_api_key: str
@@ -70,6 +71,7 @@ def load_config() -> Config:
         tradier_access_token=os.environ["TRADIER_ACCESS_TOKEN"],
         tradier_account_id=os.environ["TRADIER_ACCOUNT_ID"],
         tradier_paper=os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"),
+        tradier_live_token=os.getenv("TRADIER_LIVE_TOKEN", ""),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),

@@ -25,6 +25,7 @@ def _make_tradier_client(config: Config) -> TradierClient:
         access_token=config.tradier_access_token,
         account_id=config.tradier_account_id,
         paper=config.tradier_paper,
+        quote_token=config.tradier_live_token or None,
     )
 
 
