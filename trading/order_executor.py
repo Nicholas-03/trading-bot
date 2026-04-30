@@ -44,6 +44,8 @@ class OrderExecutor:
         self._trading_paused: bool = False
         # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
+        # ticker -> UTC datetime when the hold_hours window expires
+        self._hold_until: dict[str, datetime] = {}
         # daily P&L counters — reset lazily at start of each new calendar day
         self._last_day: date = date.today()
         self._daily_buys: int = 0
@@ -78,6 +80,11 @@ class OrderExecutor:
     def confirm_closed(self, ticker: str) -> None:
         """Remove the pending-close guard once Tradier no longer returns the position."""
         self._pending_close.discard(ticker)
+
+    def expired_hold_tickers(self) -> frozenset[str]:
+        """Return tickers whose hold_hours window has elapsed and are still tracked."""
+        now = datetime.now(timezone.utc)
+        return frozenset(t for t, exp in self._hold_until.items() if now >= exp)
 
     async def _wait_for_fill(
         self,
@@ -135,6 +142,7 @@ class OrderExecutor:
         self._held_tickers.discard(ticker)
         self._shorted_tickers.discard(ticker)
         self._position_book.pop(ticker, None)
+        self._hold_until.pop(ticker, None)
         self._pending_close.add(ticker)
         self._maybe_reset_day()
         self._maybe_reset_week()
@@ -164,7 +172,7 @@ class OrderExecutor:
         except Exception as db_err:
             logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
 
-    async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None) -> None:
+    async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
             return
@@ -224,11 +232,14 @@ class OrderExecutor:
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
 
+            if hold_hours > 0:
+                self._hold_until[ticker] = datetime.now(timezone.utc) + timedelta(hours=hold_hours)
+
             if self._db is not None:
                 try:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
-                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at, fill_latency_sec
+                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at, fill_latency_sec, hold_hours
                     )
                     self._position_book[ticker] = (actual_price, qty, trade_id)
                 except Exception as db_err:
@@ -240,7 +251,7 @@ class OrderExecutor:
             logger.error("Failed to buy %s: %s", ticker, e)
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
-    async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None) -> None:
+    async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping short for %s", ticker)
             return
@@ -283,12 +294,15 @@ class OrderExecutor:
             actual_price = fill_price or 0.0
             self._position_book[ticker] = (actual_price, self._short_qty, None)
 
+            if hold_hours > 0:
+                self._hold_until[ticker] = datetime.now(timezone.utc) + timedelta(hours=hold_hours)
+
             if self._db is not None:
                 try:
                     opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
                         self._db.record_trade_open,
-                        decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at, fill_latency_sec,
+                        decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at, fill_latency_sec, hold_hours,
                     )
                     self._position_book[ticker] = (actual_price, self._short_qty, trade_id)
                 except Exception as db_err:

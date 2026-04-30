@@ -95,6 +95,12 @@ class PositionMonitor:
             self._executor.confirm_closed(ticker)
             logger.info("Confirmed closed: %s no longer in Tradier positions", ticker)
 
+        # Close positions whose hold_hours window has elapsed
+        for ticker in self._executor.expired_hold_tickers():
+            if ticker not in self._executor.pending_close:
+                logger.info("Hold-hours expired for %s — closing position", ticker)
+                await self._executor.sell(ticker, exit_reason="hold_hours")
+
         open_positions = [
             pos for pos in positions if pos.symbol not in self._executor.pending_close
         ]

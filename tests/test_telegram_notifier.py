@@ -23,7 +23,6 @@ def test_format_buy():
     assert "✅ BUY filled" in msg
     assert "AAPL" in msg
     assert "$5.00" in msg
-    assert "abc123" in msg
 
 
 def test_format_sell():

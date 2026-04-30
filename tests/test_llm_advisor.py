@@ -8,6 +8,8 @@ def test_parse_buy_decision():
     assert decision.action == "buy"
     assert decision.ticker == "AAPL"
     assert "earnings" in decision.reasoning
+    assert decision.confidence == 0.0
+    assert decision.hold_hours == 0
 
 
 def test_parse_sell_decision():
@@ -60,3 +62,17 @@ def test_parse_short_decision():
     decision = _parse_response(text)
     assert decision.action == "short"
     assert decision.ticker == "META"
+
+
+def test_parse_confidence_and_hold_hours():
+    text = '{"action": "buy", "ticker": "NVDA", "reasoning": "Earnings beat", "confidence": 0.85, "hold_hours": 4}'
+    decision = _parse_response(text)
+    assert decision.confidence == 0.85
+    assert decision.hold_hours == 4
+
+
+def test_parse_confidence_defaults_when_absent():
+    text = '{"action": "hold", "ticker": null, "reasoning": "Nothing actionable"}'
+    decision = _parse_response(text)
+    assert decision.confidence == 0.0
+    assert decision.hold_hours == 0

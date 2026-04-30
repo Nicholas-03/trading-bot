@@ -142,6 +142,7 @@ class TelegramCommandListener:
         self._client = httpx.AsyncClient(timeout=35.0)
         self._offset = 0
         self._started_at = time.monotonic()
+        self._awaiting_sellall_confirm: bool = False
 
     async def run(self) -> None:
         logger.info("Telegram command listener started")
@@ -170,6 +171,7 @@ class TelegramCommandListener:
         "/status — show uptime and open positions\n"
         "/off — pause trading (no new buys or shorts)\n"
         "/on — resume trading\n"
+        "/sellall — close ALL open positions (asks for confirmation)\n"
         "/restart — restart the bot process\n"
         "/help — show this message"
     )
@@ -177,6 +179,21 @@ class TelegramCommandListener:
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message", {})
         text = message.get("text", "").strip()
+
+        if self._awaiting_sellall_confirm:
+            if text == "/confirm":
+                self._awaiting_sellall_confirm = False
+                await self._execute_sellall()
+            elif text == "/cancel":
+                self._awaiting_sellall_confirm = False
+                await self._reply("❌ Sell-all cancelled.")
+            else:
+                await self._reply(
+                    "⚠️ Waiting for sell-all confirmation.\n"
+                    "Reply /confirm to proceed or /cancel to abort."
+                )
+            return
+
         if text == "/status":
             await self._send_status()
         elif text == "/off":
@@ -185,11 +202,42 @@ class TelegramCommandListener:
         elif text == "/on":
             self._order_executor.trading_paused = False
             await self._reply("▶️ Trading resumed.")
+        elif text == "/sellall":
+            await self._prompt_sellall()
         elif text == "/restart":
             await self._reply("🔄 Restarting bot...")
             os.execv(sys.executable, [sys.executable] + sys.argv)
         elif text == "/help":
             await self._reply(self._HELP_TEXT)
+
+    async def _prompt_sellall(self) -> None:
+        held = sorted(self._order_executor.held_tickers)
+        shorted = sorted(self._order_executor.shorted_tickers)
+        if not held and not shorted:
+            await self._reply("📭 No open positions to sell.")
+            return
+        lines = ["⚠️ Emergency sell-all requested!\n\nThis will close:"]
+        if held:
+            lines.append(f"📈 Long: {', '.join(held)}")
+        if shorted:
+            lines.append(f"📉 Short: {', '.join(shorted)}")
+        lines.append("\nReply /confirm to execute or /cancel to abort.")
+        self._awaiting_sellall_confirm = True
+        await self._reply("\n".join(lines))
+
+    async def _execute_sellall(self) -> None:
+        held = list(self._order_executor.held_tickers)
+        shorted = list(self._order_executor.shorted_tickers)
+        all_tickers = held + shorted
+        if not all_tickers:
+            await self._reply("📭 No open positions found.")
+            return
+        await self._reply(f"🚨 Closing {len(all_tickers)} position(s)...")
+        await asyncio.gather(
+            *(self._order_executor.sell(ticker) for ticker in all_tickers),
+            return_exceptions=True,
+        )
+        await self._reply("✅ Sell-all complete.")
 
     async def _reply(self, message: str) -> None:
         try:

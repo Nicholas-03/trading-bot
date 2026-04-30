@@ -27,6 +27,7 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     analytics_db_path: str
+    min_confidence: float
 
 
 def _parse_float(key: str, default: str) -> float:
@@ -85,6 +86,7 @@ def load_config() -> Config:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
+        min_confidence=_parse_float("MIN_CONFIDENCE", "0.7"),
     )
 
     if cfg.trade_amount_usd <= 0:
@@ -95,5 +97,7 @@ def load_config() -> Config:
         raise ValueError("STOP_LOSS_PCT must be between 0 and 100 exclusive (e.g. 2 = 2%)")
     if not (0 < cfg.take_profit_pct < 1):
         raise ValueError("TAKE_PROFIT_PCT must be between 0 and 100 exclusive (e.g. 3 = 3%)")
+    if not (0.0 <= cfg.min_confidence <= 1.0):
+        raise ValueError("MIN_CONFIDENCE must be between 0.0 and 1.0")
 
     return cfg

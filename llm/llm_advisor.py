@@ -28,13 +28,17 @@ Actions available:
 
 Rules:
 - Only act on tickers directly mentioned in the news.
-- Be conservative — only act on clearly bullish or clearly bearish news.
 - Do not open a long and short on the same ticker simultaneously.
-- Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
-  {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence"}}
-  {{"action": "short", "ticker": "SYMBOL", "reasoning": "one sentence"}}
-  {{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence"}}
-  {{"action": "hold", "ticker": null, "reasoning": "one sentence"}}
+- Be conservative — only act on clearly bullish or clearly bearish news with a specific, quantifiable catalyst (earnings beat, revenue guidance, contract announcement, FDA approval). Do NOT act on analyst upgrades/price target raises, vague momentum articles ("shares are trading higher"), or opinion pieces.
+
+Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
+{{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
+{{"action": "short", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
+{{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": 0}}
+{{"action": "hold", "ticker": null, "reasoning": "one sentence", "confidence": 0.0, "hold_hours": 0}}
+
+confidence: your estimated probability that the price moves in the intended direction within hold_hours. Be honest — if unsure, return hold.
+hold_hours: how many hours the catalyst is expected to remain relevant (1-48).
 """
 
 _VALID_ACTIONS = frozenset({"buy", "short", "sell", "hold"})
@@ -45,6 +49,8 @@ class Decision:
     action: Literal["buy", "short", "sell", "hold"]
     ticker: str | None
     reasoning: str
+    confidence: float = 0.0
+    hold_hours: int = 0
 
 
 def _parse_response(text: str) -> Decision:
@@ -68,6 +74,8 @@ def _parse_response(text: str) -> Decision:
                 action=action,
                 ticker=ticker,
                 reasoning=data.get("reasoning", ""),
+                confidence=float(data.get("confidence", 0.0)),
+                hold_hours=int(data.get("hold_hours", 0)),
             )
         except (json.JSONDecodeError, KeyError):
             idx = pos + 1

@@ -97,15 +97,23 @@ class NewsHandler:
                     decision_id = await asyncio.to_thread(
                         self._db.record_decision,
                         news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
+                        decision.confidence, decision.hold_hours,
                     )
                 except Exception as db_err:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
 
+            if decision.action in ("buy", "short") and decision.confidence < self._config.min_confidence:
+                logger.info(
+                    "Skipping %s %s — confidence %.2f below threshold %.2f",
+                    decision.action, decision.ticker, decision.confidence, self._config.min_confidence,
+                )
+                return
+
             if decision.action == "buy" and decision.ticker:
-                await self._executor.buy(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic)
+                await self._executor.buy(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
-                    await self._executor.short(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic)
+                    await self._executor.short(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
                 else:
                     logger.info("Short selling disabled — skipping short for %s", decision.ticker)
             elif decision.action == "sell" and decision.ticker:

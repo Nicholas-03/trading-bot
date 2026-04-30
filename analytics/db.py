@@ -27,7 +27,9 @@ class TradeDB:
                 ts            TEXT NOT NULL,
                 action        TEXT NOT NULL,
                 ticker        TEXT,
-                reasoning     TEXT
+                reasoning     TEXT,
+                confidence    REAL DEFAULT 0.0,
+                hold_hours    INTEGER DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS trades (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,16 +43,23 @@ class TradeDB:
                 pnl_pct           REAL,
                 exit_reason       TEXT,
                 fill_latency_sec  REAL,
+                hold_hours        INTEGER DEFAULT 0,
                 opened_at         TEXT NOT NULL,
                 closed_at         TEXT
             );
         """)
-        # Migration: add fill_latency_sec to existing databases that predate this column
-        try:
-            self._conn.execute("ALTER TABLE trades ADD COLUMN fill_latency_sec REAL")
-            self._conn.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        # Migrations for columns added after initial schema
+        for ddl in [
+            "ALTER TABLE trades ADD COLUMN fill_latency_sec REAL",
+            "ALTER TABLE llm_decisions ADD COLUMN confidence REAL DEFAULT 0.0",
+            "ALTER TABLE llm_decisions ADD COLUMN hold_hours INTEGER DEFAULT 0",
+            "ALTER TABLE trades ADD COLUMN hold_hours INTEGER DEFAULT 0",
+        ]:
+            try:
+                self._conn.execute(ddl)
+                self._conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def record_news(self, ts: str, headline: str, summary: str | None, symbols: list[str]) -> int:
         cur = self._conn.execute(
@@ -61,11 +70,19 @@ class TradeDB:
         return cur.lastrowid  # type: ignore[return-value]
 
     def record_decision(
-        self, news_event_id: int | None, ts: str, action: str, ticker: str | None, reasoning: str
+        self,
+        news_event_id: int | None,
+        ts: str,
+        action: str,
+        ticker: str | None,
+        reasoning: str,
+        confidence: float = 0.0,
+        hold_hours: int = 0,
     ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO llm_decisions (news_event_id, ts, action, ticker, reasoning) VALUES (?, ?, ?, ?, ?)",
-            (news_event_id, ts, action, ticker, reasoning),
+            "INSERT INTO llm_decisions (news_event_id, ts, action, ticker, reasoning, confidence, hold_hours) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (news_event_id, ts, action, ticker, reasoning, confidence, hold_hours),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -79,11 +96,12 @@ class TradeDB:
         entry_price: float | None,
         opened_at: str,
         fill_latency_sec: float | None = None,
+        hold_hours: int = 0,
     ) -> int:
         cur = self._conn.execute(
-            "INSERT INTO trades (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec),
+            "INSERT INTO trades (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec, hold_hours) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec, hold_hours),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
