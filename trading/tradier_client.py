@@ -1,6 +1,10 @@
 # trading/tradier_client.py
+import time
 import httpx
 from dataclasses import dataclass
+
+_RETRYABLE_STATUSES = {429, 502, 503, 504}
+_RETRY_DELAYS = (1.0, 2.0, 4.0)  # seconds between attempts 1→2, 2→3, 3→4
 
 
 @dataclass
@@ -50,36 +54,34 @@ class TradierClient:
             )
 
     def get_clock(self) -> TradierClock:
-        resp = self._http.get("/markets/clock")
-        _raise_for_status(resp)
+        resp = self._request("GET", "/markets/clock")
         state = resp.json()["clock"]["state"]
         return TradierClock(is_open=(state == "open"))
 
     def get_all_positions(self) -> list[TradierPosition]:
-        resp = self._http.get(f"/accounts/{self._account_id}/positions")
-        _raise_for_status(resp)
+        resp = self._request("GET", f"/accounts/{self._account_id}/positions")
         return _parse_positions(resp.json())
 
     def get_quotes(self, symbols: list[str]) -> dict[str, float]:
         if not symbols:
             return {}
-        http = self._quote_http or self._http
-        resp = http.get(
+        resp = self._request(
+            "GET",
             "/markets/quotes",
+            http=self._quote_http or self._http,
             params={"symbols": ",".join(symbols)},
         )
-        _raise_for_status(resp)
         return _parse_quotes(resp.json())
 
     def get_buying_power(self) -> float:
         """Return available buying power for the account."""
-        resp = self._http.get(f"/accounts/{self._account_id}/balances")
-        _raise_for_status(resp)
+        resp = self._request("GET", f"/accounts/{self._account_id}/balances")
         return _parse_buying_power(resp.json())
 
     def submit_order(self, symbol: str, side: str, qty: int) -> str:
         """Side: buy | sell | sell_short | buy_to_cover"""
-        resp = self._http.post(
+        resp = self._request(
+            "POST",
             f"/accounts/{self._account_id}/orders",
             data={
                 "class": "equity",
@@ -90,7 +92,6 @@ class TradierClient:
                 "duration": "day",
             },
         )
-        _raise_for_status(resp)
         return str(resp.json()["order"]["id"])
 
     def close_position(self, symbol: str) -> str:
@@ -105,9 +106,27 @@ class TradierClient:
 
     def get_order(self, order_id: str) -> tuple[str, float | None]:
         """Return (status, avg_fill_price) for an order."""
-        resp = self._http.get(f"/accounts/{self._account_id}/orders/{order_id}")
-        _raise_for_status(resp)
+        resp = self._request("GET", f"/accounts/{self._account_id}/orders/{order_id}")
         return _parse_order_status(resp.json())
+
+    def _request(self, method: str, path: str, *, http: httpx.Client | None = None, **kwargs) -> httpx.Response:
+        """Execute an HTTP request with automatic retry on transient server errors."""
+        client = http or self._http
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
+            resp = client.request(method, path, **kwargs)
+            if resp.status_code not in _RETRYABLE_STATUSES:
+                _raise_for_status(resp)
+                return resp
+            last_exc = httpx.HTTPStatusError(
+                f"{resp.status_code} {resp.text}",
+                request=resp.request,
+                response=resp,
+            )
+            if delay is None:
+                break
+            time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def close(self) -> None:
         self._http.close()
