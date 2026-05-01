@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import plotly.utils
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades.db")
 
@@ -24,6 +24,16 @@ def _conn() -> sqlite3.Connection:
 
 def _fig_json(fig: go.Figure) -> dict:
     return json.loads(plotly.utils.PlotlyJSONEncoder().encode(fig))
+
+
+def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
+    row = con.execute(
+        "SELECT n.headline, n.ts, d.action, d.ticker, d.confidence, d.hold_hours, d.reasoning "
+        "FROM llm_decisions d JOIN news_events n ON n.id = d.news_event_id "
+        "WHERE d.id = ?",
+        (decision_id,),
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def _build_charts() -> tuple[dict, list[dict]]:
@@ -213,6 +223,18 @@ def index() -> HTMLResponse:
 </body>
 </html>"""
     return HTMLResponse(content=content)
+
+
+@app.get("/api/decision/{decision_id}")
+def get_decision(decision_id: int):
+    con = _conn()
+    try:
+        result = _query_decision(con, decision_id)
+    finally:
+        con.close()
+    if result is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return result
 
 
 if __name__ == "__main__":
