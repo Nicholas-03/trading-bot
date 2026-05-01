@@ -1,6 +1,6 @@
 import sqlite3
 import pytest
-from analytics.server import _query_decision
+from analytics.server import _query_decision, _query_stats
 
 
 def _make_db() -> sqlite3.Connection:
@@ -68,9 +68,6 @@ def test_query_decision_returns_fields():
     assert result["confidence"] == pytest.approx(0.85)
     assert result["reasoning"] == "Banks benefit from rate hikes"
     assert result["hold_hours"] == 2
-
-
-from analytics.server import _query_stats
 
 
 def test_query_stats_empty_db():
