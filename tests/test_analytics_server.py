@@ -62,6 +62,8 @@ def test_query_decision_returns_fields():
     result = _query_decision(con, 1)
     assert result is not None
     assert result["headline"] == "Fed raises rates"
+    assert result["ts"] == "2026-01-01T10:00:00"
+    assert result["action"] == "buy"
     assert result["ticker"] == "JPM"
     assert result["confidence"] == pytest.approx(0.85)
     assert result["reasoning"] == "Banks benefit from rate hikes"
