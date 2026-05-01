@@ -284,7 +284,14 @@ class TelegramLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            text = f"🚨 {record.levelname} [{record.name}]\n{self.format(record)}"
+            parts = [f"🚨 {record.levelname} [{record.name}]", record.getMessage()]
+            if record.exc_info and record.exc_info[0]:
+                exc_val = str(record.exc_info[1]) if record.exc_info[1] else ""
+                exc_line = record.exc_info[0].__name__
+                if exc_val:
+                    exc_line += f": {exc_val}"
+                parts.append(exc_line)
+            text = "\n".join(parts)
             asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
         except Exception:
             self.handleError(record)

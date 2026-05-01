@@ -34,7 +34,7 @@ class TradierClient:
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
             },
-            timeout=10.0,
+            timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
         )
         # When paper trading, optionally use a live-account token for real-time quotes.
         # Sandbox quotes are 15-min delayed; the live /markets/quotes endpoint is real-time.
@@ -46,7 +46,7 @@ class TradierClient:
                     "Authorization": f"Bearer {quote_token}",
                     "Accept": "application/json",
                 },
-                timeout=10.0,
+                timeout=httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0),
             )
 
     def get_clock(self) -> TradierClock:
