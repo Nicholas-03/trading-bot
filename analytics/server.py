@@ -157,6 +157,60 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     ))
     fig_actions.update_layout(title="LLM Decision Counts", xaxis_title="Action", yaxis_title="Count")
 
+    # 7: Win rate by ticker (≥2 closed trades)
+    wr_rows = con.execute(
+        "SELECT ticker, "
+        "SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS win_rate, "
+        "COUNT(*) AS cnt "
+        "FROM trades WHERE closed_at IS NOT NULL AND ticker IS NOT NULL "
+        "GROUP BY ticker HAVING cnt >= 2 ORDER BY win_rate DESC"
+    ).fetchall()
+    fig_wr = go.Figure(go.Bar(
+        x=[r["win_rate"] for r in wr_rows],
+        y=[r["ticker"] for r in wr_rows],
+        orientation="h",
+    ))
+    fig_wr.update_layout(title="Win Rate by Ticker", xaxis_title="Win Rate %", yaxis_title="Ticker",
+                         height=max(200, len(wr_rows) * 30 + 80))
+
+    # 8: Avg P&L by hour of day (UTC)
+    hour_rows = con.execute(
+        "SELECT strftime('%H', closed_at) AS hour, AVG(pnl_usd) AS avg_pnl "
+        "FROM trades WHERE pnl_usd IS NOT NULL AND closed_at IS NOT NULL "
+        "GROUP BY hour ORDER BY hour"
+    ).fetchall()
+    fig_hour = go.Figure(go.Bar(
+        x=[r["hour"] for r in hour_rows],
+        y=[r["avg_pnl"] for r in hour_rows],
+    ))
+    fig_hour.update_layout(title="Avg P&L by Hour of Day (UTC)", xaxis_title="Hour", yaxis_title="Avg USD")
+
+    # 9: Confidence vs outcome
+    conf_rows = con.execute(
+        "SELECT d.confidence, t.pnl_pct, t.ticker "
+        "FROM trades t JOIN llm_decisions d ON d.id = t.decision_id "
+        "WHERE t.pnl_pct IS NOT NULL AND d.confidence IS NOT NULL"
+    ).fetchall()
+    fig_conf = go.Figure(go.Scatter(
+        x=[r["confidence"] for r in conf_rows],
+        y=[r["pnl_pct"] * 100 for r in conf_rows],
+        mode="markers",
+        text=[r["ticker"] for r in conf_rows],
+    ))
+    fig_conf.update_layout(title="Confidence vs Outcome", xaxis_title="LLM Confidence", yaxis_title="P&L %")
+
+    # 10: Fill latency trend
+    lat_rows = con.execute(
+        "SELECT opened_at, fill_latency_sec FROM trades "
+        "WHERE fill_latency_sec IS NOT NULL ORDER BY opened_at"
+    ).fetchall()
+    fig_lat = go.Figure(go.Scatter(
+        x=[r["opened_at"] for r in lat_rows],
+        y=[r["fill_latency_sec"] for r in lat_rows],
+        mode="lines+markers",
+    ))
+    fig_lat.update_layout(title="Fill Latency Trend", xaxis_title="Time", yaxis_title="Seconds")
+
     # Recent news → decision → outcome table
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
@@ -174,6 +228,10 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "dist": _fig_json(fig_dist),
         "duration": _fig_json(fig_dur),
         "actions": _fig_json(fig_actions),
+        "win_rate": _fig_json(fig_wr),
+        "pnl_hour": _fig_json(fig_hour),
+        "conf_outcome": _fig_json(fig_conf),
+        "latency_trend": _fig_json(fig_lat),
     }
     return charts, [dict(r) for r in recent]
 
