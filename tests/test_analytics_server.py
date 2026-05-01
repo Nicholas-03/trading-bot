@@ -68,3 +68,52 @@ def test_query_decision_returns_fields():
     assert result["confidence"] == pytest.approx(0.85)
     assert result["reasoning"] == "Banks benefit from rate hikes"
     assert result["hold_hours"] == 2
+
+
+from analytics.server import _query_stats
+
+
+def test_query_stats_empty_db():
+    con = _make_db()
+    stats = _query_stats(con)
+    assert stats["total"] == 0
+    assert stats["win_rate"] == 0.0
+    assert stats["total_pnl"] == 0.0
+    assert stats["best"] is None
+    assert stats["worst"] is None
+
+
+def test_query_stats_with_trades():
+    con = _make_db()
+    con.execute(
+        "INSERT INTO trades (ticker, side, qty, pnl_usd, opened_at, closed_at) "
+        "VALUES ('AAPL', 'buy', 10, 50.0, '2026-01-01', '2026-01-01')"
+    )
+    con.execute(
+        "INSERT INTO trades (ticker, side, qty, pnl_usd, opened_at, closed_at) "
+        "VALUES ('GOOG', 'buy', 5, -20.0, '2026-01-02', '2026-01-02')"
+    )
+    con.execute(
+        "INSERT INTO trades (ticker, side, qty, pnl_usd, opened_at, closed_at) "
+        "VALUES ('MSFT', 'buy', 3, 10.0, '2026-01-03', '2026-01-03')"
+    )
+    con.commit()
+    stats = _query_stats(con)
+    assert stats["total"] == 3
+    assert stats["win_rate"] == pytest.approx(66.67, rel=0.01)
+    assert stats["total_pnl"] == pytest.approx(40.0)
+    assert stats["best"] == ("AAPL", 50.0)
+    assert stats["worst"] == ("GOOG", -20.0)
+
+
+def test_query_stats_ignores_open_trades():
+    con = _make_db()
+    # Trade with no closed_at is still open — must not count
+    con.execute(
+        "INSERT INTO trades (ticker, side, qty, pnl_usd, opened_at) "
+        "VALUES ('AAPL', 'buy', 10, 50.0, '2026-01-01')"
+    )
+    con.commit()
+    stats = _query_stats(con)
+    assert stats["total"] == 0
+    assert stats["best"] is None

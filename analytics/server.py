@@ -36,6 +36,38 @@ def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     return dict(row) if row is not None else None
 
 
+def _query_stats(con: sqlite3.Connection) -> dict:
+    row = con.execute(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) AS wins, "
+        "SUM(pnl_usd) AS total_pnl "
+        "FROM trades WHERE closed_at IS NOT NULL"
+    ).fetchone()
+    total = row["total"] or 0
+    wins = row["wins"] or 0
+    total_pnl = row["total_pnl"] or 0.0
+    win_rate = (wins / total * 100) if total > 0 else 0.0
+
+    best = con.execute(
+        "SELECT ticker, pnl_usd FROM trades "
+        "WHERE closed_at IS NOT NULL AND pnl_usd IS NOT NULL "
+        "ORDER BY pnl_usd DESC LIMIT 1"
+    ).fetchone()
+    worst = con.execute(
+        "SELECT ticker, pnl_usd FROM trades "
+        "WHERE closed_at IS NOT NULL AND pnl_usd IS NOT NULL "
+        "ORDER BY pnl_usd ASC LIMIT 1"
+    ).fetchone()
+
+    return {
+        "total": total,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "best": (best["ticker"], best["pnl_usd"]) if best else None,
+        "worst": (worst["ticker"], worst["pnl_usd"]) if worst else None,
+    }
+
+
 def _build_charts() -> tuple[dict, list[dict]]:
     con = _conn()
     try:
