@@ -1,23 +1,27 @@
 # News Trading Bot
 
-Listens to real-time news from Alpaca's WebSocket feed, uses Claude or Gemini to decide whether to buy or sell a stock based on the news, and executes trades via Tradier.
+Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide whether to buy, short, sell, or hold based on the news, and executes trades via Tradier.
 
 ## How it works
 
 1. Connects to Alpaca's news WebSocket and receives live news events.
-2. Sends each news headline, summary, and mentioned tickers to the LLM.
-3. The LLM returns a `buy`, `sell`, or `hold` decision.
-4. On `buy`: places a market order for `TRADE_AMOUNT_USD` worth of the ticker (only during market hours and when sufficient buying power exists).
-5. On `sell`: closes the full position for the ticker.
-6. Every 30 seconds, checks all open positions and automatically sells if:
+2. Sends each news headline, summary, and mentioned tickers to the LLM along with current long/short positions.
+3. The LLM returns a `buy`, `short`, `sell`, or `hold` decision with a confidence score and expected hold duration.
+4. Decisions below `MIN_CONFIDENCE` are skipped.
+5. On `buy`: places a DAY market order for `TRADE_AMOUNT_USD` worth of the ticker (only during market hours and when sufficient buying power exists).
+6. On `short`: places a short sell order for `SHORT_QTY` shares of the ticker.
+7. On `sell`: closes the full long or short position for the ticker.
+8. Every 30 seconds, checks all open positions and automatically closes if:
    - P&L drops to **-2%** (stop-loss)
    - P&L reaches **+3%** (take-profit)
+   - The LLM's `hold_hours` window has expired
+9. All trades are recorded to a local SQLite analytics database.
 
 ## Prerequisites
 
 - [Alpaca](https://alpaca.markets) account — used for the real-time news feed only (not for trading); a free account works
 - [Tradier](https://developer.tradier.com) account — used for all trading; sandbox is free
-- An LLM API key — either [Anthropic](https://console.anthropic.com) or [Google AI](https://aistudio.google.com)
+- An LLM API key — [Anthropic](https://console.anthropic.com) (Claude), [Google AI](https://aistudio.google.com) (Gemini), or [DeepSeek](https://platform.deepseek.com)
 
 ## Local development
 
@@ -52,16 +56,21 @@ Edit `.env` with your API keys and settings:
 | `TRADIER_ACCESS_TOKEN` | Tradier access token | required |
 | `TRADIER_ACCOUNT_ID` | Tradier account ID | required |
 | `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
-| `LLM_PROVIDER` | LLM to use: `claude` or `gemini` | required |
-| `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude) | conditional |
+| `TRADIER_LIVE_TOKEN` | Live account token for real-time quotes while paper trading (sandbox quotes are 15-min delayed) | optional |
+| `LLM_PROVIDER` | LLM to use: `claude`, `gemini`, or `deepseek` | required |
+| `ANTHROPIC_API_KEY` | Anthropic API key (if `LLM_PROVIDER=claude`) | conditional |
 | `ANTHROPIC_MODEL` | Claude model ID | `claude-opus-4-6` |
-| `GOOGLE_API_KEY` | Google API key (if using Gemini) | conditional |
+| `GOOGLE_API_KEY` | Google API key (if `LLM_PROVIDER=gemini`) | conditional |
 | `GEMINI_MODEL` | Gemini model ID | `gemini-2.0-flash` |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (if `LLM_PROVIDER=deepseek`) | conditional |
+| `DEEPSEEK_MODEL` | DeepSeek model ID | `deepseek-chat` |
 | `TRADE_AMOUNT_USD` | Dollar amount per buy order | `5.0` |
 | `ALLOW_SHORT` | Enable short selling | `false` |
 | `SHORT_QTY` | Shares per short sell order | `1` |
-| `STOP_LOSS_PCT` | Stop-loss threshold (percentage, e.g. `2` = 2%) | `2` |
-| `TAKE_PROFIT_PCT` | Take-profit threshold (percentage, e.g. `3` = 3%) | `3` |
+| `STOP_LOSS_PCT` | Stop-loss threshold (e.g. `2` = 2%) | `2` |
+| `TAKE_PROFIT_PCT` | Take-profit threshold (e.g. `3` = 3%) | `3` |
+| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0–1.0) to act on a decision | `0.7` |
+| `ANALYTICS_DB_PATH` | Path to the SQLite analytics database | `data/trades.db` |
 | `TELEGRAM_ENABLED` | Send trade notifications via Telegram | `false` |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (if enabled) | conditional |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID (if enabled) | conditional |
@@ -103,6 +112,14 @@ docker compose logs -f
 docker compose down
 ```
 
+## Analytics
+
+All news events, LLM decisions, and trade executions are stored in a local SQLite database (default: `data/trades.db`). Use `export_db.py` to dump the database as markdown for LLM analysis:
+
+```bash
+python export_db.py
+```
+
 ## Testing
 
 Unit tests cover pure logic with no external API calls:
@@ -116,6 +133,6 @@ End-to-end testing is done against Tradier's sandbox. Set `TRADIER_PAPER=true` a
 ## Limitations
 
 - Only stocks with tickers mentioned in the news are eligible for trades.
-- One position per ticker at a time (duplicate buy signals are skipped).
+- One long and one short position per ticker at a time (duplicate signals are skipped).
 - Buys are skipped outside market hours or when buying power is below `TRADE_AMOUNT_USD`.
 - For live trading, set `TRADIER_PAPER=false` and use live Tradier credentials.

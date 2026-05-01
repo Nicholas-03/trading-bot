@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-import sys
 import time
 import httpx
 import pytz
@@ -172,7 +170,6 @@ class TelegramCommandListener:
         "/off — pause trading (no new buys or shorts)\n"
         "/on — resume trading\n"
         "/sellall — close ALL open positions (asks for confirmation)\n"
-        "/restart — restart the bot process\n"
         "/help — show this message"
     )
 
@@ -204,9 +201,6 @@ class TelegramCommandListener:
             await self._reply("▶️ Trading resumed.")
         elif text == "/sellall":
             await self._prompt_sellall()
-        elif text == "/restart":
-            await self._reply("🔄 Restarting bot...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
         elif text == "/help":
             await self._reply(self._HELP_TEXT)
 
@@ -273,6 +267,36 @@ class TelegramCommandListener:
             f"{positions_str}"
         )
         await self._reply(message)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+
+class TelegramLogHandler(logging.Handler):
+    """Logging handler that forwards ERROR+ records to a Telegram chat."""
+
+    def __init__(self, token: str, chat_id: str, loop: asyncio.AbstractEventLoop) -> None:
+        super().__init__(level=logging.ERROR)
+        self._token = token
+        self._chat_id = chat_id
+        self._loop = loop
+        self._client = httpx.AsyncClient(timeout=10.0)
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            text = f"🚨 {record.levelname} [{record.name}]\n{self.format(record)}"
+            asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
+        except Exception:
+            self.handleError(record)
+
+    async def _send(self, message: str) -> None:
+        try:
+            await self._client.post(
+                _API_URL.format(token=self._token),
+                json={"chat_id": self._chat_id, "text": message},
+            )
+        except Exception:
+            pass  # never log from inside a log handler
 
     async def aclose(self) -> None:
         await self._client.aclose()

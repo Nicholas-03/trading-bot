@@ -9,7 +9,7 @@ from trading.order_executor import OrderExecutor
 from llm.llm_advisor import LLMAdvisor
 from news.news_handler import NewsHandler
 from trading.position_monitor import PositionMonitor
-from notifications.telegram_notifier import TelegramNotifier, TelegramCommandListener, NoOpNotifier
+from notifications.telegram_notifier import TelegramNotifier, TelegramCommandListener, TelegramLogHandler, NoOpNotifier
 
 logging.basicConfig(
     level=logging.INFO,
@@ -46,8 +46,15 @@ async def main() -> None:
     try:
         held_tickers, shorted_tickers = _load_open_positions(client)
 
+        log_handler: TelegramLogHandler | None = None
         if config.telegram_enabled:
             notifier = TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+            log_handler = TelegramLogHandler(
+                config.telegram_bot_token,
+                config.telegram_chat_id,
+                asyncio.get_event_loop(),
+            )
+            logging.getLogger().addHandler(log_handler)
         else:
             notifier = NoOpNotifier()
 
@@ -85,6 +92,9 @@ async def main() -> None:
             await notifier.aclose()
             if command_listener:
                 await command_listener.aclose()
+            if log_handler:
+                logging.getLogger().removeHandler(log_handler)
+                await log_handler.aclose()
     finally:
         if db is not None:
             db.close()
