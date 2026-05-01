@@ -68,10 +68,33 @@ def _query_stats(con: sqlite3.Connection) -> dict:
     }
 
 
-def _build_charts() -> tuple[dict, list[dict]]:
+def _render_stats_bar(stats: dict) -> str:
+    pnl_class = "pos" if stats["total_pnl"] >= 0 else "neg"
+    pnl_sign = "+" if stats["total_pnl"] >= 0 else ""
+    best_str = f"{stats['best'][0]} {stats['best'][1]:+.2f}" if stats["best"] else "—"
+    worst_str = f"{stats['worst'][0]} {stats['worst'][1]:+.2f}" if stats["worst"] else "—"
+    return (
+        '<div class="stats-bar">'
+        f'<div class="stat-card"><div class="label">Closed Trades</div>'
+        f'<div class="value">{stats["total"]}</div></div>'
+        f'<div class="stat-card"><div class="label">Win Rate</div>'
+        f'<div class="value">{stats["win_rate"]:.1f}%</div></div>'
+        f'<div class="stat-card"><div class="label">Total P&amp;L</div>'
+        f'<div class="value {pnl_class}">{pnl_sign}{stats["total_pnl"]:.2f}</div></div>'
+        f'<div class="stat-card"><div class="label">Best Trade</div>'
+        f'<div class="value pos">{html.escape(best_str)}</div></div>'
+        f'<div class="stat-card"><div class="label">Worst Trade</div>'
+        f'<div class="value neg">{html.escape(worst_str)}</div></div>'
+        '</div>'
+    )
+
+
+def _build_page_data() -> tuple[dict, dict, list[dict]]:
     con = _conn()
     try:
-        return _query_charts(con)
+        charts, recent = _query_charts(con)
+        stats = _query_stats(con)
+        return charts, stats, recent
     finally:
         con.close()
 
@@ -157,7 +180,9 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    charts, recent = _build_charts()
+    charts, stats, recent = _build_page_data()
+
+    stats_bar = _render_stats_bar(stats)
 
     chart_divs = ""
     for key, fig_data in charts.items():
@@ -206,10 +231,17 @@ def index() -> HTMLResponse:
   .filters {{ display: flex; gap: 8px; margin-top: 16px; }}
   .filters button {{ padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6; cursor: pointer; font-size: 13px; }}
   .filters button.active {{ background: #222; color: #fff; border-color: #222; }}
+  .stats-bar {{ display: flex; gap: 16px; margin: 20px 0 32px; flex-wrap: wrap; }}
+  .stat-card {{ flex: 1; min-width: 140px; background: #f6f6f6; border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px 16px; }}
+  .stat-card .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }}
+  .stat-card .value {{ font-size: 22px; font-weight: 700; margin-top: 4px; }}
+  .stat-card .value.pos {{ color: #1a7f37; }}
+  .stat-card .value.neg {{ color: #c0392b; }}
 </style>
 </head>
 <body>
 <h1>Trading Analytics</h1>
+{stats_bar}
 {chart_divs}
 <h2>Recent Trades (last 500)</h2>
 <div class="filters">
