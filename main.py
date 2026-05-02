@@ -66,7 +66,11 @@ async def main() -> None:
             logger.info("Analytics DB: %s", config.analytics_db_path)
 
         order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, db)
-        llm_advisor = LLMAdvisor(config)
+        if config.llm_provider == "multi":
+            from llm.multi_advisor import MultiLLMAdvisor
+            llm_advisor = MultiLLMAdvisor(config)
+        else:
+            llm_advisor = LLMAdvisor(config)
         news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
         position_monitor = PositionMonitor(client, config, order_executor, notifier)
 
