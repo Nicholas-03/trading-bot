@@ -20,7 +20,10 @@ class ChatGPTProvider:
                     max_tokens=512,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                return response.choices[0].message.content
+                content = response.choices[0].message.content
+                if content is None:
+                    raise ValueError("OpenAI returned no text content (finish_reason may be non-stop)")
+                return content
             except openai.APIStatusError as e:
                 if e.status_code >= 500 and attempt < max_retries:
                     wait = 2 ** attempt
