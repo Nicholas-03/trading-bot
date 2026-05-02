@@ -183,7 +183,12 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         x=[r["hour"] for r in hour_rows],
         y=[r["avg_pnl"] for r in hour_rows],
     ))
-    fig_hour.update_layout(title="Avg P&L by Hour of Day (UTC)", xaxis_title="Hour", yaxis_title="Avg USD")
+    fig_hour.update_layout(
+        title="Avg P&L by Hour of Day (UTC)",
+        xaxis_title="Hour",
+        yaxis_title="Avg USD",
+        xaxis=dict(categoryorder="category ascending"),
+    )
 
     # 9: Confidence vs outcome
     conf_rows = con.execute(
