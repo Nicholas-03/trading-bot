@@ -73,24 +73,39 @@ class TradierClient:
         )
         return _parse_quotes(resp.json())
 
+    def get_quotes_with_open(self, symbols: list[str]) -> dict[str, tuple[float, float | None]]:
+        """Return {symbol: (last_price, session_open_price)} for each symbol."""
+        if not symbols:
+            return {}
+        resp = self._request(
+            "GET",
+            "/markets/quotes",
+            http=self._quote_http or self._http,
+            params={"symbols": ",".join(symbols)},
+        )
+        return _parse_quotes_with_open(resp.json())
+
     def get_buying_power(self) -> float:
         """Return available buying power for the account."""
         resp = self._request("GET", f"/accounts/{self._account_id}/balances")
         return _parse_buying_power(resp.json())
 
-    def submit_order(self, symbol: str, side: str, qty: int) -> str:
-        """Side: buy | sell | sell_short | buy_to_cover"""
+    def submit_order(self, symbol: str, side: str, qty: int, limit_price: float | None = None) -> str:
+        """Side: buy | sell | sell_short | buy_to_cover. limit_price=None uses a market order."""
+        data: dict[str, str] = {
+            "class": "equity",
+            "symbol": symbol,
+            "side": side,
+            "quantity": str(qty),
+            "type": "market" if limit_price is None else "limit",
+            "duration": "day",
+        }
+        if limit_price is not None:
+            data["price"] = f"{limit_price:.2f}"
         resp = self._request(
             "POST",
             f"/accounts/{self._account_id}/orders",
-            data={
-                "class": "equity",
-                "symbol": symbol,
-                "side": side,
-                "quantity": str(qty),
-                "type": "market",
-                "duration": "day",
-            },
+            data=data,
         )
         return str(resp.json()["order"]["id"])
 
@@ -178,6 +193,24 @@ def _parse_quotes(data: dict) -> dict[str, float]:
         for q in quote_data
         if q.get("last") is not None
     }
+
+
+def _parse_quotes_with_open(data: dict) -> dict[str, tuple[float, float | None]]:
+    """Parse Tradier quotes response into {symbol: (last, open_price)} pairs."""
+    raw = data.get("quotes", {})
+    quote_data = raw.get("quote")
+    if quote_data is None:
+        return {}
+    if isinstance(quote_data, dict):
+        quote_data = [quote_data]
+    result: dict[str, tuple[float, float | None]] = {}
+    for q in quote_data:
+        last = q.get("last")
+        if last is None:
+            continue
+        open_price = q.get("open")
+        result[q["symbol"]] = (float(last), float(open_price) if open_price is not None else None)
+    return result
 
 
 def _parse_order_status(data: dict) -> tuple[str, float | None]:

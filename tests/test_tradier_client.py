@@ -1,6 +1,6 @@
 # tests/test_tradier_client.py
 import pytest
-from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, _parse_order_status, TradierPosition
+from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, _parse_order_status, _parse_quotes_with_open, TradierPosition
 
 
 def test_parse_positions_null_string():
@@ -138,3 +138,36 @@ def test_parse_order_status_missing_order_key():
     status, price = _parse_order_status({})
     assert status == "unknown"
     assert price is None
+
+
+# --- _parse_quotes_with_open ---
+
+def test_parse_quotes_with_open_single():
+    data = {"quotes": {"quote": {"symbol": "AAPL", "last": 175.5, "open": 170.0}}}
+    result = _parse_quotes_with_open(data)
+    assert result == {"AAPL": (175.5, 170.0)}
+
+def test_parse_quotes_with_open_multiple():
+    data = {
+        "quotes": {
+            "quote": [
+                {"symbol": "AAPL", "last": 175.5, "open": 170.0},
+                {"symbol": "MSFT", "last": 420.0, "open": 415.0},
+            ]
+        }
+    }
+    result = _parse_quotes_with_open(data)
+    assert result["AAPL"] == (175.5, 170.0)
+    assert result["MSFT"] == (420.0, 415.0)
+
+def test_parse_quotes_with_open_missing_open():
+    data = {"quotes": {"quote": {"symbol": "AAPL", "last": 175.5}}}
+    result = _parse_quotes_with_open(data)
+    assert result == {"AAPL": (175.5, None)}
+
+def test_parse_quotes_with_open_empty():
+    assert _parse_quotes_with_open({}) == {}
+
+def test_parse_quotes_with_open_null_last_excluded():
+    data = {"quotes": {"quote": {"symbol": "AAPL", "last": None, "open": 170.0}}}
+    assert _parse_quotes_with_open(data) == {}
