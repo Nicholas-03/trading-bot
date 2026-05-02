@@ -18,6 +18,8 @@ class Config:
     gemini_model: str
     deepseek_api_key: str
     deepseek_model: str
+    openai_api_key: str
+    openai_model: str
     llm_provider: str
     trade_amount_usd: float
     short_qty: int
@@ -47,9 +49,9 @@ def load_config() -> Config:
     load_dotenv()
 
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    if provider not in ("claude", "gemini", "deepseek", "multi"):
+    if provider not in ("claude", "gemini", "deepseek", "chatgpt", "multi"):
         raise ValueError(
-            f"LLM_PROVIDER must be 'claude', 'gemini', 'deepseek', or 'multi', got {provider!r}"
+            f"LLM_PROVIDER must be 'claude', 'gemini', 'deepseek', 'chatgpt', or 'multi', got {provider!r}"
         )
 
     # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
@@ -60,8 +62,10 @@ def load_config() -> Config:
         required.append("GOOGLE_API_KEY")
     elif provider == "deepseek":
         required.append("DEEPSEEK_API_KEY")
-    else:  # multi — all three providers are active
-        required.extend(["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"])
+    elif provider == "chatgpt":
+        required.append("OPENAI_API_KEY")
+    else:  # multi — all four providers are active
+        required.extend(["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"])
 
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -86,6 +90,8 @@ def load_config() -> Config:
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
         deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
         deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o"),
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
