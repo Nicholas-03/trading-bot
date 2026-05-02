@@ -109,6 +109,48 @@ class TradierClient:
         )
         return str(resp.json()["order"]["id"])
 
+    def submit_otoco_order(
+        self,
+        symbol: str,
+        qty: int,
+        tp_price: float,
+        sl_price: float,
+        entry_limit: float | None = None,
+    ) -> str:
+        """Place a bracket (OTOCO) order: entry + take-profit limit + stop-loss stop.
+
+        entry_limit=None uses a market entry; a float value uses a limit entry.
+        The TP/SL legs are GTC so they persist until triggered.
+        """
+        data: dict[str, str] = {
+            "class": "otoco",
+            "symbol[0]": symbol,
+            "side[0]": "buy",
+            "quantity[0]": str(qty),
+            "type[0]": "market" if entry_limit is None else "limit",
+            "duration[0]": "day",
+            "symbol[1]": symbol,
+            "side[1]": "sell",
+            "quantity[1]": str(qty),
+            "type[1]": "limit",
+            "price[1]": f"{tp_price:.2f}",
+            "duration[1]": "gtc",
+            "symbol[2]": symbol,
+            "side[2]": "sell",
+            "quantity[2]": str(qty),
+            "type[2]": "stop",
+            "stop[2]": f"{sl_price:.2f}",
+            "duration[2]": "gtc",
+        }
+        if entry_limit is not None:
+            data["price[0]"] = f"{entry_limit:.2f}"
+        resp = self._request("POST", f"/accounts/{self._account_id}/orders", data=data)
+        return str(resp.json()["order"]["id"])
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel an open order by ID."""
+        self._request("DELETE", f"/accounts/{self._account_id}/orders/{order_id}")
+
     def close_position(self, symbol: str) -> str:
         """Sell long or cover short — looks up current position to determine side/qty."""
         positions = self.get_all_positions()

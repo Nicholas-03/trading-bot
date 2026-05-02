@@ -38,8 +38,6 @@ class PositionMonitor:
         notifier: Notifier,
     ) -> None:
         self._client = client
-        self._stop_loss = config.stop_loss_pct
-        self._take_profit = config.take_profit_pct
         self._executor = order_executor
         self._notifier = notifier
         self._last_report_date: date | None = None
@@ -90,54 +88,21 @@ class PositionMonitor:
         positions = await asyncio.to_thread(self._client.get_all_positions)
         live_symbols = {pos.symbol for pos in positions}
 
-        # Confirm tickers that Tradier no longer returns
+        # Confirm tickers that Tradier no longer returns as part of a manual close
         for ticker in self._executor.pending_close - live_symbols:
             self._executor.confirm_closed(ticker)
             logger.info("Confirmed closed: %s no longer in Tradier positions", ticker)
+
+        # Detect positions closed by OTOCO bracket (held but disappeared, not manually closed)
+        otoco_closed = self._executor.held_tickers - live_symbols - self._executor.pending_close
+        if otoco_closed:
+            quotes = await asyncio.to_thread(self._client.get_quotes, list(otoco_closed))
+            for ticker in otoco_closed:
+                logger.info("Position %s no longer in Tradier — OTOCO bracket fired", ticker)
+                await self._executor.handle_bracket_close(ticker, quotes.get(ticker))
 
         # Close positions whose hold_hours window has elapsed
         for ticker in self._executor.expired_hold_tickers():
             if ticker not in self._executor.pending_close:
                 logger.info("Hold-hours expired for %s — closing position", ticker)
                 await self._executor.sell(ticker, exit_reason="hold_hours")
-
-        open_positions = [
-            pos for pos in positions if pos.symbol not in self._executor.pending_close
-        ]
-        if not open_positions:
-            return
-
-        symbols = [pos.symbol for pos in open_positions]
-        quotes = await asyncio.to_thread(self._client.get_quotes, symbols)
-
-        for pos in open_positions:
-            try:
-                ticker = pos.symbol
-                if pos.qty < 0:
-                    logger.debug("Skipping short position %s — P&L monitoring not supported for shorts", ticker)
-                    continue
-                qty = abs(pos.qty)
-                if qty == 0:
-                    continue
-                # cost_basis is the total cost (e.g. $300 for 2 shares at $150 avg)
-                entry = pos.cost_basis / qty
-                if entry == 0.0:
-                    logger.warning("Skipping %s — entry price is zero", ticker)
-                    continue
-
-                current = quotes.get(ticker)
-                if current is None:
-                    logger.warning("No quote for %s — skipping", ticker)
-                    continue
-
-                pnl = compute_pnl_pct(entry, current)
-                pnl_usd = (current - entry) * qty
-
-                if pnl <= -self._stop_loss:
-                    logger.info("Stop-loss triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd, exit_reason="stop_loss")
-                elif pnl >= self._take_profit:
-                    logger.info("Take-profit triggered for %s (P&L %.2f%%)", ticker, pnl * 100)
-                    await self._executor.sell(ticker, pnl_pct=pnl, pnl_usd=pnl_usd, exit_reason="take_profit")
-            except Exception:
-                logger.exception("Error processing position %s", pos.symbol)

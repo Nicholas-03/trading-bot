@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, AsyncMock
 import time
 import pytest
 from trading.order_executor import OrderExecutor, _monday_of
+from trading.tradier_client import TradierPosition
 from config import Config
 
 
@@ -12,6 +13,8 @@ def _make_executor() -> OrderExecutor:
     config = MagicMock(spec=Config)
     config.trade_amount_usd = 100.0
     config.short_qty = 1
+    config.stop_loss_pct = 0.02
+    config.take_profit_pct = 0.03
     config.max_slippage_pct = 0.01
     config.extended_move_low_price_pct = 0.15
     config.extended_move_any_pct = 0.20
@@ -218,8 +221,10 @@ def test_buy_rolls_back_state_on_unconfirmed_fill():
     ex = _make_executor()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 95.0)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("rejected", None))
+    ex._client.get_all_positions = MagicMock(return_value=[])
+    ex._client.cancel_order = MagicMock()
 
     import asyncio
     asyncio.run(ex.buy("AAPL"))
@@ -256,8 +261,11 @@ def test_buy_with_decision_monotonic_calculates_correct_latency():
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (50.0, 47.0)})  # Lower price so qty=2
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=2.0, cost_basis=104.0)
+    ])
 
     import asyncio
 
@@ -285,8 +293,11 @@ def test_buy_without_decision_monotonic_uses_submission_time():
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (50.0, 47.0)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=2.0, cost_basis=104.0)
+    ])
 
     import asyncio
 
@@ -332,8 +343,11 @@ def test_decision_monotonic_not_included_in_db_when_db_disabled():
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (50.0, 47.0)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 52.0))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=2.0, cost_basis=104.0)
+    ])
 
     import asyncio
 
@@ -388,12 +402,15 @@ def test_buy_allowed_for_fresh_ticker_despite_other_stops():
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"ARVN": (10.5, 9.8)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 10.5))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="ARVN", qty=9.0, cost_basis=94.5)
+    ])
 
     asyncio.run(ex.buy("ARVN"))
 
-    ex._client.submit_order.assert_called_once()
+    ex._client.submit_otoco_order.assert_called_once()
 
 
 def test_daily_stopped_tickers_resets_on_new_day():
@@ -472,12 +489,15 @@ def test_buy_allowed_moderate_move():
     ex = _make_executor_with_guards()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"ARVN": (10.29, 9.80)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 10.29))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="ARVN", qty=9.0, cost_basis=92.61)
+    ])
 
     asyncio.run(ex.buy("ARVN"))
 
-    ex._client.submit_order.assert_called_once()
+    ex._client.submit_otoco_order.assert_called_once()
 
 
 # --- falling on good news ---
@@ -502,47 +522,57 @@ def test_buy_allowed_slight_pullback():
     ex = _make_executor_with_guards()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"INSG": (19.41, 19.60)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 19.41))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="INSG", qty=5.0, cost_basis=97.05)
+    ])
 
     asyncio.run(ex.buy("INSG"))
 
-    ex._client.submit_order.assert_called_once()
+    ex._client.submit_otoco_order.assert_called_once()
 
 
 # --- limit order dispatch ---
 
-def test_buy_uses_limit_order_for_low_price_stock():
-    """Price < $5 → limit order must be used with slippage cap."""
+def test_buy_uses_limit_entry_for_low_price_stock():
+    """Price < $5 → OTOCO must be placed with a limit entry price (slippage cap)."""
     import asyncio
     ex = _make_executor_with_guards()
     # FATN: open $2.99, last $3.18 → +6.4% (below 15% threshold) + price < 5
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"FATN": (3.18, 2.99)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 3.18))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="FATN", qty=31.0, cost_basis=98.58)
+    ])
 
     asyncio.run(ex.buy("FATN"))
 
-    call_args = ex._client.submit_order.call_args
-    limit_price = call_args.kwargs.get("limit_price") or (call_args.args[3] if len(call_args.args) > 3 else None)
-    assert limit_price is not None
-    assert limit_price == pytest.approx(3.18 * 1.01, rel=1e-4)
+    call_args = ex._client.submit_otoco_order.call_args
+    # submit_otoco_order(symbol, qty, tp_price, sl_price, entry_limit) — entry_limit is args[4]
+    entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
+    assert entry_limit is not None
+    assert entry_limit == pytest.approx(3.18 * 1.01, rel=1e-4)
 
 
-def test_buy_uses_market_order_for_calm_large_cap():
-    """High-price stock with modest intraday move → market order (limit_price=None)."""
+def test_buy_uses_market_entry_for_calm_large_cap():
+    """High-price stock with modest intraday move → OTOCO with market entry (entry_limit=None)."""
     import asyncio
     ex = _make_executor_with_guards()
     # IONQ: open $44.16, last $46.05 → +4.3%, price > $5
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"IONQ": (46.05, 44.16)})
-    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
     ex._client.get_order = MagicMock(return_value=("filled", 46.05))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="IONQ", qty=2.0, cost_basis=92.10)
+    ])
 
     asyncio.run(ex.buy("IONQ"))
 
-    call_args = ex._client.submit_order.call_args
-    limit_price = call_args.kwargs.get("limit_price") or (call_args.args[3] if len(call_args.args) > 3 else None)
-    assert limit_price is None
+    call_args = ex._client.submit_otoco_order.call_args
+    entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
+    assert entry_limit is None
 

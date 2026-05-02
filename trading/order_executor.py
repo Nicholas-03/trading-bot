@@ -36,6 +36,8 @@ class OrderExecutor:
         self._client = client
         self._notional_usd = config.trade_amount_usd
         self._short_qty = config.short_qty
+        self._stop_loss_pct: float = config.stop_loss_pct
+        self._take_profit_pct: float = config.take_profit_pct
         self._max_slippage_pct: float = config.max_slippage_pct
         self._extended_move_low_price_pct: float = config.extended_move_low_price_pct
         self._extended_move_any_pct: float = config.extended_move_any_pct
@@ -47,6 +49,8 @@ class OrderExecutor:
         self._trading_paused: bool = False
         # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
+        # ticker -> OTOCO bracket group order ID (present only for long positions)
+        self._bracket_orders: dict[str, str] = {}
         # ticker -> UTC datetime when the hold_hours window expires
         self._hold_until: dict[str, datetime] = {}
         # same-day re-entry guard — reset at midnight
@@ -117,6 +121,40 @@ class OrderExecutor:
         logger.warning("Order %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
         return False, None
 
+    async def _wait_for_position(
+        self,
+        ticker: str,
+        order_id: str,
+        timeout_sec: float = _FILL_TIMEOUT,
+        poll_interval: float = _FILL_POLL,
+    ) -> tuple[bool, float | None]:
+        """Poll until the position appears in the account or the bracket order reaches a terminal state.
+
+        Returns (filled, avg_entry_price). Used for OTOCO entry confirmation because the
+        parent OTOCO order status stays 'open' while the bracket is active — polling the
+        position list is the reliable signal that leg 0 filled.
+        """
+        max_polls = max(1, int(timeout_sec / poll_interval))
+        for _ in range(max_polls):
+            try:
+                status, _ = await asyncio.to_thread(self._client.get_order, order_id)
+                if status in ("canceled", "expired", "rejected", "error"):
+                    logger.warning("OTOCO %s reached terminal state: %s", order_id, status)
+                    return False, None
+            except Exception as e:
+                logger.warning("Error checking OTOCO order %s status: %s", order_id, e)
+            try:
+                positions = await asyncio.to_thread(self._client.get_all_positions)
+                pos = next((p for p in positions if p.symbol == ticker), None)
+                if pos is not None and abs(pos.qty) > 0:
+                    avg_price = pos.cost_basis / abs(pos.qty) if pos.qty != 0 else None
+                    return True, avg_price
+            except Exception as e:
+                logger.warning("Error polling position for %s: %s", ticker, e)
+            await asyncio.sleep(poll_interval)
+        logger.warning("OTOCO %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
+        return False, None
+
     def daily_summary(self) -> tuple[int, int, float]:
         """Return (buys, sells, realized_pnl) for today. Resets counters on day boundary."""
         self._maybe_reset_day()
@@ -182,6 +220,29 @@ class OrderExecutor:
         except Exception as db_err:
             logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
 
+    async def handle_bracket_close(self, ticker: str, current_price: float | None) -> None:
+        """Called by PositionMonitor when a long position disappears after an OTOCO bracket fired."""
+        entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
+        self._bracket_orders.pop(ticker, None)
+
+        pnl_pct: float | None = None
+        pnl_usd: float | None = None
+        exit_price: float | None = current_price
+        exit_reason = "bracket_order"
+
+        if current_price and entry_price > 0 and qty_held > 0:
+            pnl_pct = (current_price - entry_price) / entry_price
+            pnl_usd = (current_price - entry_price) * qty_held
+            exit_reason = "take_profit" if pnl_pct >= 0 else "stop_loss"
+
+        self._update_close_state(ticker, pnl_usd, exit_reason)
+        await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+
+        pnl_str = f"{pnl_pct * 100:.2f}%" if pnl_pct is not None else "unknown"
+        logger.info("BRACKET CLOSE for %s price=$%.2f pnl=%s reason=%s",
+                    ticker, current_price or 0, pnl_str, exit_reason)
+        await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
+
     async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
@@ -245,22 +306,30 @@ class OrderExecutor:
                 )
                 return
 
-            # --- limit order for volatile / low-price stocks ---
-            limit_price: float | None = None
+            # --- limit entry for volatile / low-price stocks ---
+            entry_limit: float | None = None
             if open_price is not None and open_price > 0:
                 intraday_move_pct = (price - open_price) / open_price
                 if price < 5.0 or intraday_move_pct > 0.10:
-                    limit_price = price * (1 + self._max_slippage_pct)
-                    logger.info(
-                        "Using LIMIT order for %s @ $%.4f (market $%.2f + %.0f%% slippage cap)",
-                        ticker, limit_price, price, self._max_slippage_pct * 100,
-                    )
+                    entry_limit = price * (1 + self._max_slippage_pct)
             else:
                 if price < 5.0:
-                    limit_price = price * (1 + self._max_slippage_pct)
+                    entry_limit = price * (1 + self._max_slippage_pct)
 
-            order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty, limit_price)
+            tp_price = round(price * (1 + self._take_profit_pct), 2)
+            sl_price = round(price * (1 - self._stop_loss_pct), 2)
+
+            if entry_limit is not None:
+                logger.info(
+                    "OTOCO LIMIT entry for %s @ $%.4f (quote $%.2f + %.0f%% slippage), TP=$%.2f SL=$%.2f",
+                    ticker, entry_limit, price, self._max_slippage_pct * 100, tp_price, sl_price,
+                )
+
+            order_id = await asyncio.to_thread(
+                self._client.submit_otoco_order, ticker, qty, tp_price, sl_price, entry_limit
+            )
             _submitted_at = time.monotonic()
+            self._bracket_orders[ticker] = order_id
 
             # Guard against duplicate buys immediately — broker accepted the order
             self._held_tickers.add(ticker)
@@ -271,17 +340,22 @@ class OrderExecutor:
             self._daily_buys += 1
             self._weekly_buys += 1
 
-            # Wait for fill confirmation before recording or notifying
-            filled, fill_price = await self._wait_for_fill(order_id)
+            # Wait for entry leg fill: poll positions (OTOCO parent stays 'open' while bracket is active)
+            filled, fill_price = await self._wait_for_position(ticker, order_id)
             # Measure latency from decision time when provided, otherwise from submission
             if decision_monotonic is not None:
                 fill_latency_sec = time.monotonic() - decision_monotonic
             else:
                 fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
-                logger.warning("BUY order %s for %s fill unconfirmed — rolling back state", order_id, ticker)
+                try:
+                    await asyncio.to_thread(self._client.cancel_order, order_id)
+                except Exception:
+                    pass
+                logger.warning("OTOCO %s for %s fill unconfirmed — rolling back state", order_id, ticker)
                 self._held_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
+                self._bracket_orders.pop(ticker, None)
                 self._daily_buys -= 1
                 self._weekly_buys -= 1
                 await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
@@ -383,6 +457,15 @@ class OrderExecutor:
         if ticker not in self._held_tickers and ticker not in self._shorted_tickers:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
             return
+
+        # Cancel any active OTOCO bracket before closing to avoid order conflicts
+        bracket_id = self._bracket_orders.pop(ticker, None)
+        if bracket_id:
+            try:
+                await asyncio.to_thread(self._client.cancel_order, bracket_id)
+                logger.info("Cancelled bracket order %s for %s before manual close", bracket_id, ticker)
+            except Exception as e:
+                logger.warning("Failed to cancel bracket %s for %s: %s", bracket_id, ticker, e)
 
         entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
         exit_price: float | None = None
