@@ -234,11 +234,14 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     fig_lat.update_layout(title="Fill Latency Trend", xaxis_title="Time", yaxis_title="Seconds")
 
     # Recent news → decision → outcome table
+    # In multi-provider mode each news event has 3 llm_decisions rows; show only
+    # Claude's row (or legacy NULL-provider row) so one row appears per event.
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
         "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
         "FROM news_events n "
         "JOIN llm_decisions d ON d.news_event_id = n.id "
+        "    AND (d.provider = 'claude' OR d.provider IS NULL) "
         "LEFT JOIN trades t ON t.decision_id = d.id "
         "ORDER BY n.ts DESC LIMIT 500"
     ).fetchall()
@@ -441,6 +444,8 @@ def index() -> HTMLResponse:
           providerHtml =
             '<div class="meta">confidence: ' + conf + ' &nbsp;|&nbsp; hold: ' + hold + '</div>' +
             '<div class="reasoning">' + esc(dec.reasoning) + '</div>';
+        }} else {{
+          providerHtml = '<div class="meta">No decision data available.</div>';
         }}
         const detail = document.createElement('tr');
         detail.className = 'detail-row';
