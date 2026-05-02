@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
 from llm.llm_advisor import Decision, _PROMPT_TEMPLATE, _parse_response
 from llm.providers import ClaudeProvider, DeepSeekProvider, GeminiProvider
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,6 +34,7 @@ class MultiLLMAdvisor:
             text = await provider.complete(prompt)
             decision = _parse_response(text)
         except Exception as exc:
+            logger.warning("Provider %s error: %s", provider_name, exc)
             decision = Decision(action="hold", ticker=None, reasoning=f"error: {exc}")
         return ProviderResult(
             provider=provider_name,
@@ -55,11 +59,9 @@ class MultiLLMAdvisor:
             shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
             news_age_hours=news_age_hours,
         )
-        results: list[ProviderResult] = list(
-            await asyncio.gather(
-                self._call("claude", self._claude, prompt),
-                self._call("gemini", self._gemini, prompt),
-                self._call("deepseek", self._deepseek, prompt),
-            )
+        results: list[ProviderResult] = await asyncio.gather(
+            self._call("claude", self._claude, prompt),
+            self._call("gemini", self._gemini, prompt),
+            self._call("deepseek", self._deepseek, prompt),
         )
         return MultiDecision(primary=results[0].decision, all_results=results)
