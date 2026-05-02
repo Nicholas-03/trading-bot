@@ -36,6 +36,9 @@ class OrderExecutor:
         self._client = client
         self._notional_usd = config.trade_amount_usd
         self._short_qty = config.short_qty
+        self._max_slippage_pct: float = config.max_slippage_pct
+        self._extended_move_low_price_pct: float = config.extended_move_low_price_pct
+        self._extended_move_any_pct: float = config.extended_move_any_pct
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
@@ -46,6 +49,9 @@ class OrderExecutor:
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
         # ticker -> UTC datetime when the hold_hours window expires
         self._hold_until: dict[str, datetime] = {}
+        # same-day re-entry guard — reset at midnight
+        self._daily_bought_tickers: set[str] = set()
+        self._daily_stopped_tickers: set[str] = set()
         # daily P&L counters — reset lazily at start of each new calendar day
         self._last_day: date = date.today()
         self._daily_buys: int = 0
@@ -127,6 +133,8 @@ class OrderExecutor:
             self._daily_buys = 0
             self._daily_sells = 0
             self._daily_realized_pnl = 0.0
+            self._daily_bought_tickers.clear()
+            self._daily_stopped_tickers.clear()
             self._last_day = today
 
     def _maybe_reset_week(self) -> None:
@@ -137,13 +145,15 @@ class OrderExecutor:
             self._weekly_realized_pnl = 0.0
             self._last_week_monday = monday
 
-    def _update_close_state(self, ticker: str, pnl_usd: float | None) -> None:
+    def _update_close_state(self, ticker: str, pnl_usd: float | None, exit_reason: str = "") -> None:
         """Update in-memory state when a position is closed (success or already-gone error)."""
         self._held_tickers.discard(ticker)
         self._shorted_tickers.discard(ticker)
         self._position_book.pop(ticker, None)
         self._hold_until.pop(ticker, None)
         self._pending_close.add(ticker)
+        if exit_reason == "stop_loss":
+            self._daily_stopped_tickers.add(ticker)
         self._maybe_reset_day()
         self._maybe_reset_week()
         self._daily_sells += 1
@@ -182,6 +192,12 @@ class OrderExecutor:
         if ticker in self._shorted_tickers:
             logger.info("Skipping buy for %s — currently shorted, cover first", ticker)
             return
+        if ticker in self._daily_stopped_tickers:
+            logger.info("SKIP [same_day_reentry_block] %s — stopped out earlier today", ticker)
+            return
+        if ticker in self._daily_bought_tickers:
+            logger.info("SKIP [same_day_reentry_block] %s — already bought and closed today", ticker)
+            return
         try:
             buying_power = await asyncio.to_thread(self._client.get_buying_power)
             if buying_power < self._notional_usd:
@@ -190,11 +206,37 @@ class OrderExecutor:
                     ticker, buying_power, self._notional_usd,
                 )
                 return
-            quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
-            price = quotes.get(ticker)
-            if not price:
+            quotes_ext = await asyncio.to_thread(self._client.get_quotes_with_open, [ticker])
+            quote = quotes_ext.get(ticker)
+            if not quote:
                 logger.error("No quote available for %s — skipping buy", ticker)
                 return
+            price, open_price = quote
+
+            # --- intraday extension filter ---
+            if open_price is not None and open_price > 0:
+                intraday_move = (price - open_price) / open_price
+                if price < 5.0 and intraday_move > self._extended_move_low_price_pct:
+                    logger.info(
+                        "SKIP [extended_move_block] %s — price $%.2f is up %.1f%% from open $%.2f (low-price threshold %.0f%%)",
+                        ticker, price, intraday_move * 100, open_price, self._extended_move_low_price_pct * 100,
+                    )
+                    return
+                if intraday_move > self._extended_move_any_pct:
+                    logger.info(
+                        "SKIP [extended_move_block] %s — price $%.2f is up %.1f%% from open $%.2f (any-price threshold %.0f%%)",
+                        ticker, price, intraday_move * 100, open_price, self._extended_move_any_pct * 100,
+                    )
+                    return
+
+                # --- falling on good news filter ---
+                if intraday_move < -0.03:
+                    logger.info(
+                        "SKIP [negative_price_confirmation_block] %s — price $%.2f is down %.1f%% from session open $%.2f despite positive catalyst",
+                        ticker, price, intraday_move * 100, open_price,
+                    )
+                    return
+
             qty = math.floor(self._notional_usd / price)
             if qty == 0:
                 logger.info(
@@ -202,11 +244,27 @@ class OrderExecutor:
                     ticker, price, self._notional_usd,
                 )
                 return
-            order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty)
+
+            # --- limit order for volatile / low-price stocks ---
+            limit_price: float | None = None
+            if open_price is not None and open_price > 0:
+                intraday_move_pct = (price - open_price) / open_price
+                if price < 5.0 or intraday_move_pct > 0.10:
+                    limit_price = price * (1 + self._max_slippage_pct)
+                    logger.info(
+                        "Using LIMIT order for %s @ $%.4f (market $%.2f + %.0f%% slippage cap)",
+                        ticker, limit_price, price, self._max_slippage_pct * 100,
+                    )
+            else:
+                if price < 5.0:
+                    limit_price = price * (1 + self._max_slippage_pct)
+
+            order_id = await asyncio.to_thread(self._client.submit_order, ticker, "buy", qty, limit_price)
             _submitted_at = time.monotonic()
 
             # Guard against duplicate buys immediately — broker accepted the order
             self._held_tickers.add(ticker)
+            self._daily_bought_tickers.add(ticker)
             self._position_book[ticker] = (price, qty, None)
             self._maybe_reset_day()
             self._maybe_reset_week()
@@ -344,7 +402,7 @@ class OrderExecutor:
             order_id = await asyncio.to_thread(self._client.close_position, ticker)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (400, 404):
-                self._update_close_state(ticker, pnl_usd)
+                self._update_close_state(ticker, pnl_usd, exit_reason)
                 await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
                 logger.warning(
                     "Close %s — position already gone or closing (HTTP %s), removing from tracking",
@@ -356,7 +414,7 @@ class OrderExecutor:
             return
         except ValueError as e:
             if "no open position" in str(e).lower():
-                self._update_close_state(ticker, pnl_usd)
+                self._update_close_state(ticker, pnl_usd, exit_reason)
                 await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
                 logger.warning("Close %s — position not found in broker, removing from tracking", ticker)
             else:
@@ -369,7 +427,7 @@ class OrderExecutor:
             return
 
         # Order submitted — update state immediately to prevent re-sell attempts
-        self._update_close_state(ticker, pnl_usd)
+        self._update_close_state(ticker, pnl_usd, exit_reason)
 
         filled, fill_price = await self._wait_for_fill(order_id)
         if not filled:
