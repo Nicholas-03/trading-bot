@@ -16,6 +16,7 @@ News:
 Headline: {headline}
 Summary: {summary}
 Tickers mentioned: {symbols}
+News age: {news_age_hours:.1f} hours since publication
 
 Currently held long positions: {held_tickers}
 Currently held short positions: {shorted_tickers}
@@ -26,15 +27,21 @@ Actions available:
 - sell: close an open long OR short position. Only for tickers you currently hold.
 - hold: do nothing.
 
-Rules:
-- Only act on tickers directly mentioned in the news.
-- Do not open a long and short on the same ticker simultaneously.
-- Be conservative — only act on clearly bullish or clearly bearish news with a specific, quantifiable catalyst (earnings beat, revenue guidance, contract announcement, FDA approval). Do NOT act on analyst upgrades/price target raises, vague momentum articles ("shares are trading higher"), or opinion pieces.
+Rules — evaluate each one before deciding:
+1. Only act on tickers directly mentioned in the news.
+2. Do not open a long and short on the same ticker simultaneously.
+3. REQUIRE a specific, quantifiable catalyst: confirmed earnings beat vs consensus (with actual %), FDA approval/rejection, signed acquisition with deal value, regulatory decision. Do NOT act on analyst upgrades, price target changes, or vague positive sentiment.
+4. REJECT retrospective move-explanation articles. Headlines matching "Why is X stock surging/skyrocketing/jumping/rising/gaining/soaring" are written AFTER the move already happened — the opportunity is gone. Return hold.
+5. REJECT articles where the headline says shares are "trading higher after..." or "trading lower after..." — this describes a price that already moved. Return hold.
+6. REJECT routine scheduled data releases: monthly auto sales reports, CEO/shareholder letters without specific new surprises, recurring supply/demand reports. These are already priced in by the market.
+7. STALE NEWS WARNING: if news_age_hours > 2.0, the market has likely already fully priced in this catalyst. Lower confidence significantly. If news_age_hours > 4.0, return hold unless the catalyst is an exceptionally rare binary event (e.g., FDA approval).
+8. MARKET DIRECTION CHECK: if the article text implies the price has already made a large move, be skeptical. Chasing an extended move has poor risk/reward. Lower confidence when the article implies "up 9%" or "surging 25%".
+9. Same-day duplicate: if the same underlying event (same earnings release, same FDA approval) is being re-reported in a follow-up article, return hold.
 
 Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
 {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
 {{"action": "short", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
-{{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": 0}}
+{{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0, "hold_hours": 0}}
 {{"action": "hold", "ticker": null, "reasoning": "one sentence", "confidence": 0.0, "hold_hours": 0}}
 
 confidence: your estimated probability that the price moves in the intended direction within hold_hours. Be honest — if unsure, return hold.
@@ -101,6 +108,7 @@ class LLMAdvisor:
         symbols: list[str],
         held_tickers: set[str],
         shorted_tickers: set[str],
+        news_age_hours: float = 0.0,
     ) -> Decision:
         prompt = _PROMPT_TEMPLATE.format(
             headline=headline,
@@ -108,6 +116,7 @@ class LLMAdvisor:
             symbols=", ".join(symbols) if symbols else "none",
             held_tickers=", ".join(held_tickers) if held_tickers else "none",
             shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
+            news_age_hours=news_age_hours,
         )
         try:
             text = await self._provider.complete(prompt)
