@@ -4,7 +4,7 @@ import time
 from dataclasses import dataclass
 
 from llm.llm_advisor import Decision, _PROMPT_TEMPLATE, _parse_response
-from llm.providers import ClaudeProvider, DeepSeekProvider, GeminiProvider
+from llm.providers import ChatGPTProvider, ClaudeProvider, DeepSeekProvider, GeminiProvider
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ class MultiLLMAdvisor:
         self._claude = ClaudeProvider(config.anthropic_api_key, config.anthropic_model)
         self._gemini = GeminiProvider(config.google_api_key, config.gemini_model)
         self._deepseek = DeepSeekProvider(config.deepseek_api_key, config.deepseek_model)
+        self._chatgpt = ChatGPTProvider(config.openai_api_key, config.openai_model)
 
     async def _call(self, provider_name: str, provider, prompt: str) -> ProviderResult:
         start = time.monotonic()
@@ -63,5 +64,6 @@ class MultiLLMAdvisor:
             self._call("claude", self._claude, prompt),
             self._call("gemini", self._gemini, prompt),
             self._call("deepseek", self._deepseek, prompt),
+            self._call("chatgpt", self._chatgpt, prompt),
         )
         return MultiDecision(primary=results[0].decision, all_results=results)
