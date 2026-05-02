@@ -47,8 +47,10 @@ def load_config() -> Config:
     load_dotenv()
 
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    if provider not in ("claude", "gemini", "deepseek"):
-        raise ValueError(f"LLM_PROVIDER must be 'claude', 'gemini', or 'deepseek', got {provider!r}")
+    if provider not in ("claude", "gemini", "deepseek", "multi"):
+        raise ValueError(
+            f"LLM_PROVIDER must be 'claude', 'gemini', 'deepseek', or 'multi', got {provider!r}"
+        )
 
     # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
     required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
@@ -56,8 +58,10 @@ def load_config() -> Config:
         required.append("ANTHROPIC_API_KEY")
     elif provider == "gemini":
         required.append("GOOGLE_API_KEY")
-    else:
+    elif provider == "deepseek":
         required.append("DEEPSEEK_API_KEY")
+    else:  # multi — all three providers are active
+        required.extend(["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY"])
 
     missing = [k for k in required if not os.getenv(k)]
     if missing:
