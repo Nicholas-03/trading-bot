@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from alpaca.data.live import NewsDataStream
 from trading.tradier_client import TradierClient
 from llm.llm_advisor import LLMAdvisor
+from llm.multi_advisor import MultiDecision, MultiLLMAdvisor
 from trading.order_executor import OrderExecutor
 from config import Config
 from news.filters import is_retrospective_headline, is_routine_news, compute_news_age_hours
@@ -22,7 +23,7 @@ class NewsHandler:
         self,
         client: TradierClient,
         config: Config,
-        llm_advisor: LLMAdvisor,
+        llm_advisor: LLMAdvisor | MultiLLMAdvisor,
         order_executor: OrderExecutor,
         db: "TradeDB | None" = None,
     ) -> None:
@@ -104,7 +105,7 @@ class NewsHandler:
 
             # Capture decision timestamp before analyzing
             decision_monotonic = time.monotonic()
-            decision = await self._advisor.analyze(
+            result = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
                 symbols=symbols,
@@ -113,17 +114,34 @@ class NewsHandler:
                 news_age_hours=age_hours,
             )
 
+            if isinstance(result, MultiDecision):
+                decision = result.primary
+            else:
+                decision = result
+
             logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
             decision_id: int | None = None
             if self._db is not None and news_event_id is not None:
                 try:
                     decision_ts = datetime.now(timezone.utc).isoformat()
-                    decision_id = await asyncio.to_thread(
-                        self._db.record_decision,
-                        news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
-                        decision.confidence, decision.hold_hours,
-                    )
+                    if isinstance(result, MultiDecision):
+                        for pr in result.all_results:
+                            row_id = await asyncio.to_thread(
+                                self._db.record_decision,
+                                news_event_id, decision_ts,
+                                pr.decision.action, pr.decision.ticker, pr.decision.reasoning,
+                                pr.decision.confidence, pr.decision.hold_hours,
+                                pr.provider, pr.latency_sec,
+                            )
+                            if pr.provider == "claude":
+                                decision_id = row_id
+                    else:
+                        decision_id = await asyncio.to_thread(
+                            self._db.record_decision,
+                            news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
+                            decision.confidence, decision.hold_hours,
+                        )
                 except Exception as db_err:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
 
