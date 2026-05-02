@@ -85,3 +85,26 @@ def test_full_chain(db):
     trade = db._conn.execute("SELECT decision_id, exit_reason FROM trades WHERE id=?", (tid,)).fetchone()
     assert trade[0] == did
     assert trade[1] == "llm"
+
+
+def test_record_decision_stores_provider_and_latency(db):
+    nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
+    did = db.record_decision(
+        nid, "2026-01-01T00:00:01Z", "buy", "AAPL", "reason", 0.9, 2,
+        provider="claude", latency_sec=1.23,
+    )
+    row = db._conn.execute(
+        "SELECT provider, latency_sec FROM llm_decisions WHERE id=?", (did,)
+    ).fetchone()
+    assert row[0] == "claude"
+    assert abs(row[1] - 1.23) < 0.001
+
+
+def test_record_decision_provider_defaults_to_none(db):
+    nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
+    did = db.record_decision(nid, "2026-01-01T00:00:01Z", "hold", None, "reason")
+    row = db._conn.execute(
+        "SELECT provider, latency_sec FROM llm_decisions WHERE id=?", (did,)
+    ).fetchone()
+    assert row[0] is None
+    assert row[1] is None
