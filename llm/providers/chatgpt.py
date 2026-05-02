@@ -17,7 +17,7 @@ class ChatGPTProvider:
             try:
                 response = await self._client.chat.completions.create(
                     model=self._model,
-                    max_tokens=512,
+                    max_completion_tokens=512,
                     messages=[{"role": "user", "content": prompt}],
                 )
                 content = response.choices[0].message.content
