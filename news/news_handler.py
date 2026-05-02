@@ -9,6 +9,7 @@ from trading.tradier_client import TradierClient
 from llm.llm_advisor import LLMAdvisor
 from trading.order_executor import OrderExecutor
 from config import Config
+from news.filters import is_retrospective_headline, is_routine_news, compute_news_age_hours
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
@@ -65,10 +66,33 @@ class NewsHandler:
                 logger.debug("No tickers in news event — skipping")
                 return
 
+            # --- retrospective headline filter (pre-LLM) ---
+            if is_retrospective_headline(headline):
+                logger.info("SKIP [retrospective_headline_block] %s", headline[:100])
+                return
+
+            # --- routine news filter (pre-LLM) ---
+            if is_routine_news(headline):
+                logger.info("SKIP [routine_news_block] %s", headline[:100])
+                return
+
+            # --- staleness filter (pre-LLM) ---
+            article_ts = getattr(news, "created_at", None)
+            if not isinstance(article_ts, datetime):
+                article_ts = None
+            age_hours = compute_news_age_hours(article_ts) if article_ts is not None else 0.0
+            stale_threshold = self._config.news_stale_hours
+            if age_hours > stale_threshold:
+                logger.info(
+                    "SKIP [stale_news_block] %s — news is %.1fh old (threshold %.1fh)",
+                    headline[:80], age_hours, stale_threshold,
+                )
+                return
+
             news_event_id: int | None = None
             if self._db is not None:
                 try:
-                    news_ts = datetime.now(timezone.utc).isoformat()
+                    news_ts = (article_ts or datetime.now(timezone.utc)).isoformat()
                     news_event_id = await asyncio.to_thread(
                         self._db.record_news, news_ts, headline, summary, symbols
                     )
@@ -86,6 +110,7 @@ class NewsHandler:
                 symbols=symbols,
                 held_tickers=self._executor.held_tickers,
                 shorted_tickers=self._executor.shorted_tickers,
+                news_age_hours=age_hours,
             )
 
             logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
