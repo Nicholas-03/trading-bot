@@ -29,6 +29,10 @@ class Config:
     telegram_chat_id: str
     analytics_db_path: str
     min_confidence: float
+    max_slippage_pct: float
+    extended_move_low_price_pct: float
+    extended_move_any_pct: float
+    news_stale_hours: float
 
 
 def _parse_float(key: str, default: str) -> float:
@@ -89,6 +93,10 @@ def load_config() -> Config:
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
         min_confidence=_parse_float("MIN_CONFIDENCE", "0.7"),
+        max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "1.0") / 100,
+        extended_move_low_price_pct=_parse_float("EXTENDED_MOVE_LOW_PRICE_PCT", "15.0") / 100,
+        extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "20.0") / 100,
+        news_stale_hours=_parse_float("NEWS_STALE_HOURS", "2.0"),
     )
 
     if cfg.trade_amount_usd <= 0:
@@ -101,5 +109,13 @@ def load_config() -> Config:
         raise ValueError("TAKE_PROFIT_PCT must be between 0 and 100 exclusive (e.g. 3 = 3%)")
     if not (0.0 <= cfg.min_confidence <= 1.0):
         raise ValueError("MIN_CONFIDENCE must be between 0.0 and 1.0")
+    if not (0.0 < cfg.max_slippage_pct < 0.10):
+        raise ValueError("MAX_SLIPPAGE_PCT must be between 0 and 10 (exclusive)")
+    if not (0.0 < cfg.extended_move_low_price_pct < 1.0):
+        raise ValueError("EXTENDED_MOVE_LOW_PRICE_PCT must be between 0 and 100 exclusive")
+    if not (0.0 < cfg.extended_move_any_pct < 1.0):
+        raise ValueError("EXTENDED_MOVE_ANY_PCT must be between 0 and 100 exclusive")
+    if cfg.news_stale_hours <= 0:
+        raise ValueError("NEWS_STALE_HOURS must be positive")
 
     return cfg
