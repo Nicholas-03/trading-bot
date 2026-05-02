@@ -219,7 +219,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     # Recent news → decision → outcome table
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
-        "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at "
+        "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
         "FROM news_events n "
         "JOIN llm_decisions d ON d.news_event_id = n.id "
         "LEFT JOIN trades t ON t.decision_id = d.id "
@@ -265,8 +265,10 @@ def index() -> HTMLResponse:
         ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
         exit_reason = html.escape(r["exit_reason"]) if r["exit_reason"] else "—"
         closed = "true" if r["closed_at"] is not None else "false"
+        decision_id = r.get("decision_id") or ""
         table_rows += (
-            f'<tr data-action="{action}" data-closed="{closed}">'
+            f'<tr class="trade-row" data-action="{action}" data-closed="{closed}" data-decision-id="{decision_id}">'
+            f'<td class="expand-btn">&#9658;</td>'
             f"<td>{ts}</td>"
             f"<td>{headline}</td>"
             f"<td>{action}</td>"
@@ -300,6 +302,10 @@ def index() -> HTMLResponse:
   .stat-card .value {{ font-size: 22px; font-weight: 700; margin-top: 4px; }}
   .stat-card .value.pos {{ color: #1a7f37; }}
   .stat-card .value.neg {{ color: #c0392b; }}
+  .expand-btn {{ cursor: pointer; color: #888; user-select: none; text-align: center; width: 24px; }}
+  .detail-row td {{ background: #f4f7ff; padding: 12px 16px; font-size: 13px; border-top: none; }}
+  .detail-row .reasoning {{ white-space: pre-wrap; margin-top: 8px; color: #444; line-height: 1.5; }}
+  .detail-row .meta {{ color: #888; font-size: 12px; margin-top: 4px; }}
 </style>
 </head>
 <body>
@@ -316,7 +322,7 @@ def index() -> HTMLResponse:
 </div>
 <table id="trades-table">
 <thead>
-  <tr><th>Time (UTC)</th><th>Headline</th><th>Action</th><th>Ticker</th>
+  <tr><th></th><th>Time (UTC)</th><th>Headline</th><th>Action</th><th>Ticker</th>
       <th>P&amp;L USD</th><th>P&amp;L %</th><th>Exit</th></tr>
 </thead>
 <tbody>
@@ -341,11 +347,43 @@ def index() -> HTMLResponse:
 
   function applyFilters() {{
     document.querySelectorAll('#trades-table tbody tr').forEach(row => {{
+      if (row.classList.contains('detail-row')) return;
       const actionMatch = currentAction === 'all' || row.dataset.action === currentAction;
       const closedMatch = !closedOnly || row.dataset.closed === 'true';
       row.style.display = (actionMatch && closedMatch) ? '' : 'none';
     }});
   }}
+
+  document.querySelector('#trades-table tbody').addEventListener('click', function(e) {{
+    const row = e.target.closest('tr.trade-row');
+    if (!row) return;
+    const next = row.nextElementSibling;
+    if (next && next.classList.contains('detail-row')) {{
+      next.remove();
+      row.querySelector('.expand-btn').textContent = '▶';
+      return;
+    }}
+    const decisionId = row.dataset.decisionId;
+    if (!decisionId) return;
+    fetch('/api/decision/' + decisionId)
+      .then(r => r.json())
+      .then(d => {{
+        const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const conf = d.confidence != null ? d.confidence.toFixed(2) : '—';
+        const hold = d.hold_hours != null ? d.hold_hours + 'h' : '—';
+        const detail = document.createElement('tr');
+        detail.className = 'detail-row';
+        detail.innerHTML =
+          '<td colspan="8">' +
+          '<strong>' + esc(d.headline) + '</strong>' +
+          '<div class="meta">' + esc(d.ts) + ' &nbsp;|&nbsp; confidence: ' + conf +
+          ' &nbsp;|&nbsp; hold: ' + hold + '</div>' +
+          '<div class="reasoning">' + esc(d.reasoning) + '</div>' +
+          '</td>';
+        row.after(detail);
+        row.querySelector('.expand-btn').textContent = '▼';
+      }});
+  }});
 </script>
 </body>
 </html>"""
