@@ -28,12 +28,29 @@ def _fig_json(fig: go.Figure) -> dict:
 
 def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     row = con.execute(
-        "SELECT n.headline, n.ts, d.action, d.ticker, d.confidence, d.hold_hours, d.reasoning "
-        "FROM llm_decisions d JOIN news_events n ON n.id = d.news_event_id "
-        "WHERE d.id = ?",
-        (decision_id,),
+        "SELECT news_event_id FROM llm_decisions WHERE id = ?", (decision_id,)
     ).fetchone()
-    return dict(row) if row is not None else None
+    if row is None:
+        return None
+    news_event_id = row["news_event_id"]
+
+    headline_row = con.execute(
+        "SELECT headline, ts FROM news_events WHERE id = ?", (news_event_id,)
+    ).fetchone()
+
+    decision_rows = con.execute(
+        "SELECT provider, action, ticker, confidence, hold_hours, reasoning, latency_sec "
+        "FROM llm_decisions WHERE news_event_id = ? "
+        "ORDER BY CASE provider "
+        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 ELSE 3 END",
+        (news_event_id,),
+    ).fetchall()
+
+    return {
+        "headline": headline_row["headline"] if headline_row else None,
+        "ts": headline_row["ts"] if headline_row else None,
+        "decisions": [dict(d) for d in decision_rows],
+    }
 
 
 def _query_stats(con: sqlite3.Connection) -> dict:
@@ -226,6 +243,31 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "ORDER BY n.ts DESC LIMIT 500"
     ).fetchall()
 
+    # 11: Provider response latency (box plot)
+    plat_rows = con.execute(
+        "SELECT provider, latency_sec FROM llm_decisions "
+        "WHERE provider IS NOT NULL AND latency_sec IS NOT NULL"
+    ).fetchall()
+    fig_plat = go.Figure()
+    for p in ["claude", "gemini", "deepseek"]:
+        vals = [r["latency_sec"] for r in plat_rows if r["provider"] == p]
+        if vals:
+            fig_plat.add_trace(go.Box(y=vals, name=p))
+    fig_plat.update_layout(title="Provider Response Latency", yaxis_title="Seconds")
+
+    # 12: LLM agreement rate (events where all 3 providers agreed on the same action)
+    agree_rows = con.execute(
+        "SELECT COUNT(DISTINCT action) AS unique_actions "
+        "FROM llm_decisions WHERE provider IS NOT NULL "
+        "GROUP BY news_event_id HAVING COUNT(*) = 3"
+    ).fetchall()
+    agreed = sum(1 for r in agree_rows if r["unique_actions"] == 1)
+    disagreed = len(agree_rows) - agreed
+    fig_agree = go.Figure(go.Bar(x=["Agreed", "Disagreed"], y=[agreed, disagreed]))
+    fig_agree.update_layout(
+        title="LLM Agreement Rate (3-provider events)", yaxis_title="News Events"
+    )
+
     charts = {
         "cumulative": _fig_json(fig_cum),
         "daily": _fig_json(fig_daily),
@@ -237,6 +279,8 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "pnl_hour": _fig_json(fig_hour),
         "conf_outcome": _fig_json(fig_conf),
         "latency_trend": _fig_json(fig_lat),
+        "provider_latency": _fig_json(fig_plat),
+        "agreement_rate": _fig_json(fig_agree),
     }
     return charts, [dict(r) for r in recent]
 
@@ -306,6 +350,11 @@ def index() -> HTMLResponse:
   .detail-row td {{ background: #f4f7ff; padding: 12px 16px; font-size: 13px; border-top: none; }}
   .detail-row .reasoning {{ white-space: pre-wrap; margin-top: 8px; color: #444; line-height: 1.5; }}
   .detail-row .meta {{ color: #888; font-size: 12px; margin-top: 4px; }}
+  .provider-compare {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 12px; }}
+  .provider-compare th, .provider-compare td {{ border: 1px solid #ddd; padding: 5px 8px; text-align: left; vertical-align: top; }}
+  .provider-compare th {{ background: #e8e8e8; font-weight: 600; }}
+  .provider-compare td:first-child {{ font-weight: 600; white-space: nowrap; }}
+  .provider-compare td {{ max-width: 280px; white-space: pre-wrap; word-break: break-word; }}
 </style>
 </head>
 <body>
@@ -369,16 +418,37 @@ def index() -> HTMLResponse:
       .then(r => r.json())
       .then(d => {{
         const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        const conf = d.confidence != null ? d.confidence.toFixed(2) : '—';
-        const hold = d.hold_hours != null ? d.hold_hours + 'h' : '—';
+        const decisions = d.decisions || [];
+        let providerHtml = '';
+        if (decisions.length > 1) {{
+          const heads = decisions.map(p => '<th>' + esc(p.provider || '?') + '</th>').join('');
+          const rows2 = [
+            ['Action',     decisions.map(p => esc(p.action || '—'))],
+            ['Ticker',     decisions.map(p => esc(p.ticker || '—'))],
+            ['Confidence', decisions.map(p => p.confidence != null ? p.confidence.toFixed(2) : '—')],
+            ['Hold',       decisions.map(p => p.hold_hours ? p.hold_hours + 'h' : '—')],
+            ['Latency',    decisions.map(p => p.latency_sec != null ? p.latency_sec.toFixed(2) + 's' : '—')],
+            ['Reasoning',  decisions.map(p => esc(p.reasoning || ''))],
+          ];
+          const bodyRows = rows2.map(([label, cells]) =>
+            '<tr><td>' + label + '</td>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>'
+          ).join('');
+          providerHtml = '<table class="provider-compare"><thead><tr><th></th>' + heads + '</tr></thead><tbody>' + bodyRows + '</tbody></table>';
+        }} else if (decisions.length === 1) {{
+          const dec = decisions[0];
+          const conf = dec.confidence != null ? dec.confidence.toFixed(2) : '—';
+          const hold = dec.hold_hours ? dec.hold_hours + 'h' : '—';
+          providerHtml =
+            '<div class="meta">confidence: ' + conf + ' &nbsp;|&nbsp; hold: ' + hold + '</div>' +
+            '<div class="reasoning">' + esc(dec.reasoning) + '</div>';
+        }}
         const detail = document.createElement('tr');
         detail.className = 'detail-row';
         detail.innerHTML =
           '<td colspan="8">' +
           '<strong>' + esc(d.headline) + '</strong>' +
-          '<div class="meta">' + esc(d.ts) + ' &nbsp;|&nbsp; confidence: ' + conf +
-          ' &nbsp;|&nbsp; hold: ' + hold + '</div>' +
-          '<div class="reasoning">' + esc(d.reasoning) + '</div>' +
+          '<div class="meta">' + esc(d.ts) + '</div>' +
+          providerHtml +
           '</td>';
         row.after(detail);
         row.querySelector('.expand-btn').textContent = '▼';

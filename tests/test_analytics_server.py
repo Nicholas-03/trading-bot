@@ -22,7 +22,9 @@ def _make_db() -> sqlite3.Connection:
             ticker TEXT,
             reasoning TEXT,
             confidence REAL DEFAULT 0.0,
-            hold_hours INTEGER DEFAULT 0
+            hold_hours INTEGER DEFAULT 0,
+            provider TEXT,
+            latency_sec REAL
         );
         CREATE TABLE trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,11 +65,13 @@ def test_query_decision_returns_fields():
     assert result is not None
     assert result["headline"] == "Fed raises rates"
     assert result["ts"] == "2026-01-01T10:00:00"
-    assert result["action"] == "buy"
-    assert result["ticker"] == "JPM"
-    assert result["confidence"] == pytest.approx(0.85)
-    assert result["reasoning"] == "Banks benefit from rate hikes"
-    assert result["hold_hours"] == 2
+    assert len(result["decisions"]) == 1
+    d = result["decisions"][0]
+    assert d["action"] == "buy"
+    assert d["ticker"] == "JPM"
+    assert d["confidence"] == pytest.approx(0.85)
+    assert d["reasoning"] == "Banks benefit from rate hikes"
+    assert d["hold_hours"] == 2
 
 
 def test_query_stats_empty_db():
@@ -114,3 +118,31 @@ def test_query_stats_ignores_open_trades():
     stats = _query_stats(con)
     assert stats["total"] == 0
     assert stats["best"] is None
+
+
+def test_query_decision_returns_all_siblings():
+    con = _make_db()
+    con.execute(
+        "INSERT INTO news_events (ts, headline) VALUES ('2026-01-01T10:00:00', 'AAPL beats earnings')"
+    )
+    con.executemany(
+        "INSERT INTO llm_decisions "
+        "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec) "
+        "VALUES (1, '2026-01-01T10:00:01', ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("buy",  "AAPL", "strong",  0.90, 2, "claude",   1.2),
+            ("hold", None,   "unsure",  0.00, 0, "gemini",   0.8),
+            ("buy",  "AAPL", "bullish", 0.75, 1, "deepseek", 2.1),
+        ],
+    )
+    con.commit()
+
+    result = _query_decision(con, 1)  # query using Claude's id
+    assert result is not None
+    assert result["headline"] == "AAPL beats earnings"
+    assert len(result["decisions"]) == 3
+    providers = [d["provider"] for d in result["decisions"]]
+    assert providers == ["claude", "gemini", "deepseek"]
+    assert result["decisions"][0]["action"] == "buy"
+    assert result["decisions"][1]["action"] == "hold"
+    assert abs(result["decisions"][0]["latency_sec"] - 1.2) < 0.001
