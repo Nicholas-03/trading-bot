@@ -132,7 +132,7 @@ class NewsHandler:
                                 news_event_id, decision_ts,
                                 pr.decision.action, pr.decision.ticker, pr.decision.reasoning,
                                 pr.decision.confidence, pr.decision.hold_hours,
-                                pr.provider, pr.latency_sec,
+                                pr.provider, pr.latency_sec, pr.cost_usd,
                             )
                             if pr.provider == "claude":
                                 decision_id = row_id

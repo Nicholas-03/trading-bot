@@ -56,6 +56,7 @@ class TradeDB:
             "ALTER TABLE trades ADD COLUMN hold_hours INTEGER DEFAULT 0",
             "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
             "ALTER TABLE llm_decisions ADD COLUMN latency_sec REAL",
+            "ALTER TABLE llm_decisions ADD COLUMN cost_usd REAL",
         ]:
             try:
                 self._conn.execute(ddl)
@@ -82,12 +83,13 @@ class TradeDB:
         hold_hours: int = 0,
         provider: str | None = None,
         latency_sec: float | None = None,
+        cost_usd: float | None = None,
     ) -> int:
         cur = self._conn.execute(
             "INSERT INTO llm_decisions "
-            "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec),
+            "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd),
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]

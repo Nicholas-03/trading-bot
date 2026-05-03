@@ -108,3 +108,24 @@ def test_record_decision_provider_defaults_to_none(db):
     ).fetchone()
     assert row[0] is None
     assert row[1] is None
+
+
+def test_record_decision_stores_cost_usd(db):
+    nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
+    did = db.record_decision(
+        nid, "2026-01-01T00:00:01Z", "buy", "AAPL", "reason", 0.9, 2,
+        provider="claude", latency_sec=1.23, cost_usd=0.0035,
+    )
+    row = db._conn.execute(
+        "SELECT cost_usd FROM llm_decisions WHERE id=?", (did,)
+    ).fetchone()
+    assert abs(row[0] - 0.0035) < 1e-9
+
+
+def test_record_decision_cost_defaults_to_none(db):
+    nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
+    did = db.record_decision(nid, "2026-01-01T00:00:01Z", "hold", None, "reason")
+    row = db._conn.execute(
+        "SELECT cost_usd FROM llm_decisions WHERE id=?", (did,)
+    ).fetchone()
+    assert row[0] is None
