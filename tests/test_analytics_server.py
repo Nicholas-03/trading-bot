@@ -174,3 +174,21 @@ def test_query_decision_returns_cost_usd():
     assert abs(result["decisions"][1]["cost_usd"] - 0.00155) < 1e-9
     assert abs(result["decisions"][2]["cost_usd"] - 0.00028) < 1e-9
     assert abs(result["decisions"][3]["cost_usd"] - 0.003) < 1e-9
+
+
+def test_query_decision_cost_usd_null_propagates():
+    con = _make_db()
+    con.execute(
+        "INSERT INTO news_events (ts, headline) VALUES ('2026-01-01T10:00:00', 'Test headline')"
+    )
+    con.execute(
+        "INSERT INTO llm_decisions "
+        "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd) "
+        "VALUES (1, '2026-01-01T10:00:01', 'hold', NULL, 'unknown model', 0.0, 0, 'claude', 1.0, NULL)"
+    )
+    con.commit()
+
+    result = _query_decision(con, 1)
+    assert result is not None
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["cost_usd"] is None

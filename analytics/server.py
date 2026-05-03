@@ -258,7 +258,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
             fig_plat.add_trace(go.Box(y=vals, name=p))
     fig_plat.update_layout(title="Provider Response Latency", yaxis_title="Seconds")
 
-    # 12: LLM agreement rate (events where all 3 providers agreed on the same action)
+    # 12: LLM agreement rate (events where all 4 providers agreed on the same action)
     agree_rows = con.execute(
         "SELECT COUNT(DISTINCT action) AS unique_actions "
         "FROM llm_decisions WHERE provider IS NOT NULL "
