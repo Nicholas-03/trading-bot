@@ -16,6 +16,345 @@ DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades.db")
 app = FastAPI()
 
 
+def _ensure_schema() -> None:
+    c = sqlite3.connect(DB_PATH)
+    for ddl in [
+        "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
+        "ALTER TABLE llm_decisions ADD COLUMN latency_sec REAL",
+        "ALTER TABLE llm_decisions ADD COLUMN cost_usd REAL",
+    ]:
+        try:
+            c.execute(ddl)
+            c.commit()
+        except sqlite3.OperationalError:
+            pass
+    c.close()
+
+
+_ensure_schema()
+
+# ── Plotly theme ──────────────────────────────────────────────────────────────
+_PLOTLY_LAYOUT = dict(
+    template="plotly_white",
+    font=dict(family="Inter, system-ui, sans-serif", size=12, color="#374151"),
+    paper_bgcolor="#ffffff",
+    plot_bgcolor="#ffffff",
+    margin=dict(l=48, r=24, t=48, b=40),
+    title=dict(font=dict(size=14, color="#111827", weight="bold")),
+    xaxis=dict(gridcolor="#f3f4f6", linecolor="#e5e7eb"),
+    yaxis=dict(gridcolor="#f3f4f6", linecolor="#e5e7eb"),
+)
+_COLOR_POS  = "#16a34a"
+_COLOR_NEG  = "#dc2626"
+_COLOR_MAIN = "#2563eb"
+_COLOR_BAR  = "#60a5fa"
+
+# ── HTML / CSS ─────────────────────────────────────────────────────────────────
+_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #f9fafb;
+  --surface: #ffffff;
+  --border:  #e5e7eb;
+  --text:    #111827;
+  --muted:   #6b7280;
+  --pos:     #16a34a;
+  --neg:     #dc2626;
+  --accent:  #2563eb;
+  --radius:  8px;
+  --shadow:  0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+}
+
+body {
+  font-family: Inter, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+/* ── Header ── */
+.page-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 28px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.page-header h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.3px;
+}
+.page-header .subtitle {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* ── Section headings ── */
+.section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  margin: 36px 0 14px;
+}
+
+/* ── Stats bar ── */
+.stats-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+}
+.stat-card .label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: 6px;
+}
+.stat-card .value {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+}
+.stat-card .value.pos { color: var(--pos); }
+.stat-card .value.neg { color: var(--neg); }
+
+/* ── Charts grid ── */
+.charts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  min-height: 260px;
+}
+.chart-card.full-width {
+  grid-column: 1 / -1;
+}
+
+/* ── Filters ── */
+.filters {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.filter-group {
+  display: flex;
+  gap: 4px;
+}
+.filter-group + .filter-group {
+  margin-left: 12px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.filters button {
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  transition: all .15s;
+}
+.filters button:hover { border-color: var(--accent); color: var(--accent); }
+.filters button.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ── Table ── */
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+thead th {
+  background: #f3f4f6;
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+tbody tr.trade-row {
+  border-bottom: 1px solid #f3f4f6;
+  transition: background .1s;
+}
+tbody tr.trade-row:hover { background: #f9fafb; }
+tbody tr.trade-row:last-child { border-bottom: none; }
+tbody td {
+  padding: 10px 14px;
+  vertical-align: middle;
+  color: var(--text);
+}
+td.col-time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+td.col-headline { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.col-pnl-pos { color: var(--pos); font-weight: 600; }
+td.col-pnl-neg { color: var(--neg); font-weight: 600; }
+td.col-pnl-nil { color: var(--muted); }
+
+/* Badge */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .2px;
+  text-transform: lowercase;
+}
+.badge-buy   { background: #dbeafe; color: #1d4ed8; }
+.badge-sell  { background: #fce7f3; color: #be185d; }
+.badge-short { background: #fef3c7; color: #b45309; }
+.badge-hold  { background: #f3f4f6; color: #6b7280; }
+
+.badge-exit-sl    { background: #fee2e2; color: #b91c1c; }
+.badge-exit-tp    { background: #dcfce7; color: #15803d; }
+.badge-exit-other { background: #f3f4f6; color: #6b7280; }
+
+/* Expand button */
+.expand-btn {
+  cursor: pointer;
+  color: var(--muted);
+  user-select: none;
+  text-align: center;
+  width: 28px;
+  font-size: 10px;
+  transition: color .15s;
+}
+.expand-btn:hover { color: var(--accent); }
+
+/* ── Detail row ── */
+tr.detail-row td {
+  padding: 16px 20px 20px;
+  background: #f8faff;
+  border-bottom: 1px solid var(--border);
+}
+.detail-headline {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.detail-ts {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.detail-reasoning {
+  font-size: 12px;
+  color: #374151;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-top: 6px;
+}
+.detail-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  display: flex;
+  gap: 16px;
+}
+
+/* Provider comparison table */
+.provider-compare {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 8px;
+  font-size: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.provider-compare thead th {
+  background: #f3f4f6;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.provider-compare tbody td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  vertical-align: top;
+  color: var(--text);
+}
+.provider-compare tbody tr:last-child td { border-bottom: none; }
+.provider-compare td:first-child {
+  font-weight: 600;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .3px;
+  white-space: nowrap;
+  background: #f9fafb;
+}
+.provider-compare td.reasoning-cell {
+  max-width: 260px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  color: #374151;
+  line-height: 1.5;
+}
+"""
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -25,6 +364,35 @@ def _conn() -> sqlite3.Connection:
 def _fig_json(fig: go.Figure) -> dict:
     return json.loads(plotly.utils.PlotlyJSONEncoder().encode(fig))
 
+
+def _apply_theme(fig: go.Figure, height: int = 300) -> go.Figure:
+    fig.update_layout(**_PLOTLY_LAYOUT, height=height)
+    return fig
+
+
+def _action_badge(action: str) -> str:
+    cls = {"buy": "badge-buy", "sell": "badge-sell", "short": "badge-short"}.get(action.lower(), "badge-hold")
+    return f'<span class="badge {cls}">{html.escape(action)}</span>'
+
+
+def _exit_badge(reason: str) -> str:
+    if not reason or reason == "—":
+        return "—"
+    lo = reason.lower()
+    cls = "badge-exit-sl" if "stop" in lo or "sl" in lo else ("badge-exit-tp" if "take" in lo or "tp" in lo else "badge-exit-other")
+    return f'<span class="badge {cls}">{html.escape(reason)}</span>'
+
+
+def _pnl_td(value: float | None, fmt_str: str, pct: bool = False) -> str:
+    if value is None:
+        return '<td class="col-pnl-nil">—</td>'
+    v = value * 100 if pct else value
+    cls = "col-pnl-pos" if v >= 0 else "col-pnl-neg"
+    sign = "+" if v >= 0 else ""
+    return f'<td class="{cls}">{sign}{v:.{1 if pct else 2}f}{"%" if pct else ""}</td>'
+
+
+# ── DB queries ─────────────────────────────────────────────────────────────────
 
 def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     row = con.execute(
@@ -85,37 +453,6 @@ def _query_stats(con: sqlite3.Connection) -> dict:
     }
 
 
-def _render_stats_bar(stats: dict) -> str:
-    pnl_class = "pos" if stats["total_pnl"] >= 0 else "neg"
-    pnl_sign = "+" if stats["total_pnl"] >= 0 else ""
-    best_str = f"{stats['best'][0]} {stats['best'][1]:+.2f}" if stats["best"] else "—"
-    worst_str = f"{stats['worst'][0]} {stats['worst'][1]:+.2f}" if stats["worst"] else "—"
-    return (
-        '<div class="stats-bar">'
-        f'<div class="stat-card"><div class="label">Closed Trades</div>'
-        f'<div class="value">{stats["total"]}</div></div>'
-        f'<div class="stat-card"><div class="label">Win Rate</div>'
-        f'<div class="value">{stats["win_rate"]:.1f}%</div></div>'
-        f'<div class="stat-card"><div class="label">Total P&amp;L</div>'
-        f'<div class="value {pnl_class}">{pnl_sign}{stats["total_pnl"]:.2f}</div></div>'
-        f'<div class="stat-card"><div class="label">Best Trade</div>'
-        f'<div class="value pos">{html.escape(best_str)}</div></div>'
-        f'<div class="stat-card"><div class="label">Worst Trade</div>'
-        f'<div class="value neg">{html.escape(worst_str)}</div></div>'
-        '</div>'
-    )
-
-
-def _build_page_data() -> tuple[dict, dict, list[dict]]:
-    con = _conn()
-    try:
-        charts, recent = _query_charts(con)
-        stats = _query_stats(con)
-        return charts, stats, recent
-    finally:
-        con.close()
-
-
 def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     # 1 & 2: Cumulative and daily P&L
     rows = con.execute(
@@ -131,10 +468,18 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         total += p
         cumulative.append(total)
 
-    fig_cum = go.Figure(go.Scatter(x=days, y=cumulative, mode="lines+markers"))
+    fig_cum = go.Figure(go.Scatter(
+        x=days, y=cumulative, mode="lines+markers",
+        line=dict(color=_COLOR_MAIN, width=2),
+        marker=dict(size=5, color=_COLOR_MAIN),
+        fill="tozeroy", fillcolor="rgba(37,99,235,0.08)",
+    ))
+    _apply_theme(fig_cum, height=280)
     fig_cum.update_layout(title="Cumulative P&L", xaxis_title="Date", yaxis_title="USD")
 
-    fig_daily = go.Figure(go.Bar(x=days, y=daily_pnl))
+    bar_colors = [_COLOR_POS if v >= 0 else _COLOR_NEG for v in daily_pnl]
+    fig_daily = go.Figure(go.Bar(x=days, y=daily_pnl, marker_color=bar_colors))
+    _apply_theme(fig_daily, height=260)
     fig_daily.update_layout(title="Daily P&L", xaxis_title="Date", yaxis_title="USD")
 
     # 3: Exit reason donut
@@ -145,14 +490,17 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     fig_exit = go.Figure(go.Pie(
         labels=[r["exit_reason"] for r in exit_rows],
         values=[r["cnt"] for r in exit_rows],
-        hole=0.4,
+        hole=0.45,
+        marker=dict(colors=["#2563eb", "#16a34a", "#dc2626", "#f59e0b", "#8b5cf6"]),
     ))
+    _apply_theme(fig_exit, height=260)
     fig_exit.update_layout(title="Exit Reason Distribution")
 
     # 4: P&L % distribution
     pct_rows = con.execute("SELECT pnl_pct FROM trades WHERE pnl_pct IS NOT NULL").fetchall()
     pcts = [r["pnl_pct"] * 100 for r in pct_rows]
-    fig_dist = go.Figure(go.Histogram(x=pcts, nbinsx=20))
+    fig_dist = go.Figure(go.Histogram(x=pcts, nbinsx=20, marker_color=_COLOR_BAR))
+    _apply_theme(fig_dist, height=260)
     fig_dist.update_layout(title="P&L % Distribution at Exit", xaxis_title="P&L %", yaxis_title="Count")
 
     # 5: Trade duration histogram
@@ -161,7 +509,8 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "FROM trades WHERE closed_at IS NOT NULL AND opened_at IS NOT NULL"
     ).fetchall()
     durations = [r["mins"] for r in dur_rows if r["mins"] is not None]
-    fig_dur = go.Figure(go.Histogram(x=durations, nbinsx=20))
+    fig_dur = go.Figure(go.Histogram(x=durations, nbinsx=20, marker_color=_COLOR_BAR))
+    _apply_theme(fig_dur, height=260)
     fig_dur.update_layout(title="Trade Duration", xaxis_title="Minutes held", yaxis_title="Count")
 
     # 6: LLM decision counts
@@ -171,7 +520,9 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     fig_actions = go.Figure(go.Bar(
         x=[r["action"] for r in action_rows],
         y=[r["cnt"] for r in action_rows],
+        marker_color=_COLOR_MAIN,
     ))
+    _apply_theme(fig_actions, height=260)
     fig_actions.update_layout(title="LLM Decision Counts", xaxis_title="Action", yaxis_title="Count")
 
     # 7: Win rate by ticker (≥2 closed trades)
@@ -182,28 +533,33 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "FROM trades WHERE closed_at IS NOT NULL AND ticker IS NOT NULL "
         "GROUP BY ticker HAVING cnt >= 2 ORDER BY win_rate DESC"
     ).fetchall()
+    wr_colors = [_COLOR_POS if r["win_rate"] >= 50 else _COLOR_NEG for r in wr_rows]
     fig_wr = go.Figure(go.Bar(
         x=[r["win_rate"] for r in wr_rows],
         y=[r["ticker"] for r in wr_rows],
         orientation="h",
+        marker_color=wr_colors,
     ))
-    fig_wr.update_layout(title="Win Rate by Ticker", xaxis_title="Win Rate %", yaxis_title="Ticker",
-                         height=max(200, len(wr_rows) * 30 + 80))
+    chart_h = max(260, len(wr_rows) * 28 + 80)
+    _apply_theme(fig_wr, height=chart_h)
+    fig_wr.update_layout(title="Win Rate by Ticker", xaxis_title="Win Rate %", yaxis_title="Ticker")
 
-    # 8: Avg P&L by hour of day (UTC)
+    # 8: Avg P&L by hour
     hour_rows = con.execute(
         "SELECT strftime('%H', closed_at) AS hour, AVG(pnl_usd) AS avg_pnl "
         "FROM trades WHERE pnl_usd IS NOT NULL AND closed_at IS NOT NULL "
         "GROUP BY hour ORDER BY hour"
     ).fetchall()
+    hour_colors = [_COLOR_POS if r["avg_pnl"] >= 0 else _COLOR_NEG for r in hour_rows]
     fig_hour = go.Figure(go.Bar(
         x=[r["hour"] for r in hour_rows],
         y=[r["avg_pnl"] for r in hour_rows],
+        marker_color=hour_colors,
     ))
+    _apply_theme(fig_hour, height=260)
     fig_hour.update_layout(
         title="Avg P&L by Hour of Day (UTC)",
-        xaxis_title="Hour",
-        yaxis_title="Avg USD",
+        xaxis_title="Hour (UTC)", yaxis_title="Avg USD",
         xaxis=dict(categoryorder="category ascending"),
     )
 
@@ -213,12 +569,15 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "FROM trades t JOIN llm_decisions d ON d.id = t.decision_id "
         "WHERE t.pnl_pct IS NOT NULL AND d.confidence IS NOT NULL"
     ).fetchall()
+    point_colors = [_COLOR_POS if r["pnl_pct"] >= 0 else _COLOR_NEG for r in conf_rows]
     fig_conf = go.Figure(go.Scatter(
         x=[r["confidence"] for r in conf_rows],
         y=[r["pnl_pct"] * 100 for r in conf_rows],
         mode="markers",
         text=[r["ticker"] for r in conf_rows],
+        marker=dict(color=point_colors, size=7, opacity=0.75),
     ))
+    _apply_theme(fig_conf, height=260)
     fig_conf.update_layout(title="Confidence vs Outcome", xaxis_title="LLM Confidence", yaxis_title="P&L %")
 
     # 10: Fill latency trend
@@ -230,12 +589,13 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         x=[r["opened_at"] for r in lat_rows],
         y=[r["fill_latency_sec"] for r in lat_rows],
         mode="lines+markers",
+        line=dict(color=_COLOR_MAIN, width=1.5),
+        marker=dict(size=4),
     ))
+    _apply_theme(fig_lat, height=260)
     fig_lat.update_layout(title="Fill Latency Trend", xaxis_title="Time", yaxis_title="Seconds")
 
-    # Recent news → decision → outcome table
-    # In multi-provider mode each news event has 3 llm_decisions rows; show only
-    # Claude's row (or legacy NULL-provider row) so one row appears per event.
+    # Recent news → decision → outcome
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
         "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
@@ -246,19 +606,21 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "ORDER BY n.ts DESC LIMIT 500"
     ).fetchall()
 
-    # 11: Provider response latency (box plot)
+    # 11: Provider response latency
     plat_rows = con.execute(
         "SELECT provider, latency_sec FROM llm_decisions "
         "WHERE provider IS NOT NULL AND latency_sec IS NOT NULL"
     ).fetchall()
     fig_plat = go.Figure()
+    provider_colors = {"claude": "#8b5cf6", "gemini": "#2563eb", "deepseek": "#0891b2", "chatgpt": "#16a34a"}
     for p in ["claude", "gemini", "deepseek", "chatgpt"]:
         vals = [r["latency_sec"] for r in plat_rows if r["provider"] == p]
         if vals:
-            fig_plat.add_trace(go.Box(y=vals, name=p))
+            fig_plat.add_trace(go.Box(y=vals, name=p, marker_color=provider_colors.get(p, _COLOR_MAIN)))
+    _apply_theme(fig_plat, height=260)
     fig_plat.update_layout(title="Provider Response Latency", yaxis_title="Seconds")
 
-    # 12: LLM agreement rate (events where all 4 providers agreed on the same action)
+    # 12: LLM agreement rate
     agree_rows = con.execute(
         "SELECT COUNT(DISTINCT action) AS unique_actions "
         "FROM llm_decisions WHERE provider IS NOT NULL "
@@ -266,10 +628,13 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     ).fetchall()
     agreed = sum(1 for r in agree_rows if r["unique_actions"] == 1)
     disagreed = len(agree_rows) - agreed
-    fig_agree = go.Figure(go.Bar(x=["Agreed", "Disagreed"], y=[agreed, disagreed]))
-    fig_agree.update_layout(
-        title="LLM Agreement Rate (4-provider events)", yaxis_title="News Events"
-    )
+    fig_agree = go.Figure(go.Bar(
+        x=["Agreed", "Disagreed"],
+        y=[agreed, disagreed],
+        marker_color=[_COLOR_POS, _COLOR_NEG],
+    ))
+    _apply_theme(fig_agree, height=260)
+    fig_agree.update_layout(title="LLM Agreement Rate (4-provider events)", yaxis_title="News Events")
 
     # 13: Total cost per provider
     cost_rows = con.execute(
@@ -283,124 +648,202 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     fig_cost = go.Figure(go.Bar(
         x=[r["provider"] for r in cost_rows],
         y=[r["total_cost"] for r in cost_rows],
+        marker_color=[provider_colors.get(r["provider"], _COLOR_BAR) for r in cost_rows],
     ))
-    fig_cost.update_layout(
-        title="Total Cost per Provider (USD)",
-        xaxis_title="Provider",
-        yaxis_title="USD",
-    )
+    _apply_theme(fig_cost, height=260)
+    fig_cost.update_layout(title="Total Cost per Provider (USD)", xaxis_title="Provider", yaxis_title="USD")
 
     charts = {
-        "cumulative": _fig_json(fig_cum),
-        "daily": _fig_json(fig_daily),
-        "exit": _fig_json(fig_exit),
-        "dist": _fig_json(fig_dist),
-        "duration": _fig_json(fig_dur),
-        "actions": _fig_json(fig_actions),
-        "win_rate": _fig_json(fig_wr),
-        "pnl_hour": _fig_json(fig_hour),
-        "conf_outcome": _fig_json(fig_conf),
-        "latency_trend": _fig_json(fig_lat),
+        "cumulative":       _fig_json(fig_cum),
+        "daily":            _fig_json(fig_daily),
+        "exit":             _fig_json(fig_exit),
+        "dist":             _fig_json(fig_dist),
+        "duration":         _fig_json(fig_dur),
+        "actions":          _fig_json(fig_actions),
+        "win_rate":         _fig_json(fig_wr),
+        "pnl_hour":         _fig_json(fig_hour),
+        "conf_outcome":     _fig_json(fig_conf),
+        "latency_trend":    _fig_json(fig_lat),
         "provider_latency": _fig_json(fig_plat),
-        "agreement_rate": _fig_json(fig_agree),
-        "total_cost": _fig_json(fig_cost),
+        "agreement_rate":   _fig_json(fig_agree),
+        "total_cost":       _fig_json(fig_cost),
     }
     return charts, [dict(r) for r in recent]
 
 
+def _build_page_data() -> tuple[dict, dict, list[dict]]:
+    con = _conn()
+    try:
+        charts, recent = _query_charts(con)
+        stats = _query_stats(con)
+        return charts, stats, recent
+    finally:
+        con.close()
+
+
+# ── Rendering ──────────────────────────────────────────────────────────────────
+
+def _render_stats_bar(stats: dict) -> str:
+    pnl_cls = "pos" if stats["total_pnl"] >= 0 else "neg"
+    pnl_sign = "+" if stats["total_pnl"] >= 0 else ""
+    best_str = f"{stats['best'][0]} {stats['best'][1]:+.2f}" if stats["best"] else "—"
+    worst_str = f"{stats['worst'][0]} {stats['worst'][1]:+.2f}" if stats["worst"] else "—"
+    cards = [
+        ("Closed Trades",  str(stats["total"]),                       ""),
+        ("Win Rate",       f"{stats['win_rate']:.1f}%",               ""),
+        ("Total P&amp;L",  f"{pnl_sign}{stats['total_pnl']:.2f}",     pnl_cls),
+        ("Best Trade",     html.escape(best_str),                     "pos"),
+        ("Worst Trade",    html.escape(worst_str),                    "neg"),
+    ]
+    items = "".join(
+        f'<div class="stat-card">'
+        f'<div class="label">{label}</div>'
+        f'<div class="value {cls}">{value}</div>'
+        f'</div>'
+        for label, value, cls in cards
+    )
+    return f'<div class="stats-bar">{items}</div>'
+
+
+# Charts layout: (key, full_width)
+_CHART_LAYOUT: list[tuple[str, bool]] = [
+    ("cumulative",       True),
+    ("daily",            False),
+    ("exit",             False),
+    ("dist",             False),
+    ("duration",         False),
+    ("actions",          False),
+    ("agreement_rate",   False),
+    ("provider_latency", False),
+    ("total_cost",       False),
+    ("win_rate",         True),
+    ("pnl_hour",         False),
+    ("conf_outcome",     False),
+    ("latency_trend",    True),
+]
+
+
+def _render_charts(charts: dict) -> str:
+    items = ""
+    for key, full in _CHART_LAYOUT:
+        if key not in charts:
+            continue
+        fig = charts[key]
+        cls = "chart-card full-width" if full else "chart-card"
+        items += (
+            f'<div class="{cls}">'
+            f'<div id="c-{key}"></div>'
+            f'</div>\n'
+        )
+    scripts = ""
+    for key, _ in _CHART_LAYOUT:
+        if key not in charts:
+            continue
+        fig = charts[key]
+        scripts += (
+            f'<script>Plotly.newPlot("c-{key}",'
+            f'{json.dumps(fig["data"])},{json.dumps(fig["layout"])},'
+            f'{{responsive:true,displayModeBar:false}})</script>\n'
+        )
+    return f'<div class="charts-grid">{items}</div>\n{scripts}'
+
+
+def _render_table_rows(recent: list[dict]) -> str:
+    rows = ""
+    for r in recent:
+        pnl_usd_td = _pnl_td(r["pnl_usd"], ".2f")
+        pnl_pct_td = _pnl_td(r["pnl_pct"], ".1f", pct=True)
+        headline = html.escape((r["headline"] or "")[:72])
+        ts = html.escape((r["ts"] or "")[:16])
+        action = r["action"] or "hold"
+        ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
+        exit_reason = r["exit_reason"] or ""
+        closed = "true" if r["closed_at"] is not None else "false"
+        decision_id = r.get("decision_id") or ""
+        rows += (
+            f'<tr class="trade-row" data-action="{html.escape(action)}" '
+            f'data-closed="{closed}" data-decision-id="{decision_id}">'
+            f'<td class="expand-btn">&#9658;</td>'
+            f'<td class="col-time">{ts}</td>'
+            f'<td class="col-headline" title="{headline}">{headline}</td>'
+            f'<td>{_action_badge(action)}</td>'
+            f'<td><strong>{ticker}</strong></td>'
+            f'{pnl_usd_td}'
+            f'{pnl_pct_td}'
+            f'<td>{_exit_badge(exit_reason)}</td>'
+            f'</tr>\n'
+        )
+    return rows
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     charts, stats, recent = _build_page_data()
-
     stats_bar = _render_stats_bar(stats)
-
-    chart_divs = ""
-    for key, fig_data in charts.items():
-        chart_divs += (
-            f'<div id="c-{key}" style="margin-bottom:40px"></div>\n'
-            f'<script>Plotly.newPlot("c-{key}",'
-            f'{json.dumps(fig_data["data"])},{json.dumps(fig_data["layout"])})</script>\n'
-        )
-
-    table_rows = ""
-    for r in recent:
-        pnl_usd = f"{r['pnl_usd']:+.2f}" if r["pnl_usd"] is not None else "—"
-        pnl_pct = f"{r['pnl_pct'] * 100:+.1f}%" if r["pnl_pct"] is not None else "—"
-        headline = html.escape((r["headline"] or "")[:60])
-        ts = html.escape((r["ts"] or "")[:16])
-        action = html.escape(r["action"] or "")
-        ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
-        exit_reason = html.escape(r["exit_reason"]) if r["exit_reason"] else "—"
-        closed = "true" if r["closed_at"] is not None else "false"
-        decision_id = r.get("decision_id") or ""
-        table_rows += (
-            f'<tr class="trade-row" data-action="{action}" data-closed="{closed}" data-decision-id="{decision_id}">'
-            f'<td class="expand-btn">&#9658;</td>'
-            f"<td>{ts}</td>"
-            f"<td>{headline}</td>"
-            f"<td>{action}</td>"
-            f"<td>{ticker}</td>"
-            f"<td>{pnl_usd}</td>"
-            f"<td>{pnl_pct}</td>"
-            f"<td>{exit_reason}</td>"
-            f"</tr>\n"
-        )
+    charts_html = _render_charts(charts)
+    table_rows = _render_table_rows(recent)
 
     content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trading Analytics</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<style>
-  body {{ font-family: sans-serif; max-width: 1100px; margin: 40px auto; padding: 0 20px; color: #222; }}
-  h1 {{ border-bottom: 2px solid #eee; padding-bottom: 8px; }}
-  h2 {{ margin-top: 48px; }}
-  table {{ border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 13px; }}
-  th, td {{ border: 1px solid #ddd; padding: 7px 10px; text-align: left; }}
-  th {{ background: #f6f6f6; font-weight: 600; }}
-  tr:nth-child(even) {{ background: #fafafa; }}
-  .filters {{ display: flex; gap: 8px; margin-top: 16px; }}
-  .filters button {{ padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #f6f6f6; cursor: pointer; font-size: 13px; }}
-  .filters button.active {{ background: #222; color: #fff; border-color: #222; }}
-  .stats-bar {{ display: flex; gap: 16px; margin: 20px 0 32px; flex-wrap: wrap; }}
-  .stat-card {{ flex: 1; min-width: 140px; background: #f6f6f6; border: 1px solid #e0e0e0; border-radius: 6px; padding: 12px 16px; }}
-  .stat-card .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }}
-  .stat-card .value {{ font-size: 22px; font-weight: 700; margin-top: 4px; }}
-  .stat-card .value.pos {{ color: #1a7f37; }}
-  .stat-card .value.neg {{ color: #c0392b; }}
-  .expand-btn {{ cursor: pointer; color: #888; user-select: none; text-align: center; width: 24px; }}
-  .detail-row td {{ background: #f4f7ff; padding: 12px 16px; font-size: 13px; border-top: none; }}
-  .detail-row .reasoning {{ white-space: pre-wrap; margin-top: 8px; color: #444; line-height: 1.5; }}
-  .detail-row .meta {{ color: #888; font-size: 12px; margin-top: 4px; }}
-  .provider-compare {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 12px; }}
-  .provider-compare th, .provider-compare td {{ border: 1px solid #ddd; padding: 5px 8px; text-align: left; vertical-align: top; }}
-  .provider-compare th {{ background: #e8e8e8; font-weight: 600; }}
-  .provider-compare td:first-child {{ font-weight: 600; white-space: nowrap; }}
-  .provider-compare td {{ max-width: 280px; white-space: pre-wrap; word-break: break-word; }}
-</style>
+<style>{_CSS}</style>
 </head>
 <body>
-<h1>Trading Analytics</h1>
-{stats_bar}
-{chart_divs}
-<h2>Recent Trades (last 500)</h2>
-<div class="filters">
-  <button class="active" onclick="filterTrades('all', this)">All</button>
-  <button onclick="filterTrades('buy', this)">Buy</button>
-  <button onclick="filterTrades('short', this)">Short</button>
-  <button onclick="filterTrades('hold', this)">Hold</button>
-  <button onclick="filterTrades('closed', this)" style="margin-left:16px">Closed only</button>
-</div>
-<table id="trades-table">
-<thead>
-  <tr><th></th><th>Time (UTC)</th><th>Headline</th><th>Action</th><th>Ticker</th>
-      <th>P&amp;L USD</th><th>P&amp;L %</th><th>Exit</th></tr>
-</thead>
-<tbody>
+<div class="page">
+
+  <header class="page-header">
+    <h1>Trading Analytics</h1>
+    <span class="subtitle">Live · last 500 events</span>
+  </header>
+
+  <p class="section-title">Overview</p>
+  {stats_bar}
+
+  <p class="section-title">Charts</p>
+  {charts_html}
+
+  <p class="section-title">Recent Trades</p>
+
+  <div class="filters">
+    <div class="filter-group">
+      <button class="active" onclick="filterTrades('all',this)">All</button>
+      <button onclick="filterTrades('buy',this)">Buy</button>
+      <button onclick="filterTrades('short',this)">Short</button>
+      <button onclick="filterTrades('hold',this)">Hold</button>
+    </div>
+    <div class="filter-group">
+      <button id="btn-closed" onclick="filterTrades('closed',this)">Closed only</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table id="trades-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Time (UTC)</th>
+          <th>Headline</th>
+          <th>Action</th>
+          <th>Ticker</th>
+          <th>P&amp;L USD</th>
+          <th>P&amp;L %</th>
+          <th>Exit</th>
+        </tr>
+      </thead>
+      <tbody>
 {table_rows}
-</tbody>
-</table>
+      </tbody>
+    </table>
+  </div>
+
+</div><!-- .page -->
+
 <script>
   let currentAction = 'all';
   let closedOnly = false;
@@ -410,7 +853,7 @@ def index() -> HTMLResponse:
       closedOnly = !closedOnly;
       btn.classList.toggle('active', closedOnly);
     }} else {{
-      document.querySelectorAll('.filters button:not(:last-child)').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.filter-group:first-child button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       currentAction = filter;
     }}
@@ -432,7 +875,7 @@ def index() -> HTMLResponse:
     const next = row.nextElementSibling;
     if (next && next.classList.contains('detail-row')) {{
       next.remove();
-      row.querySelector('.expand-btn').textContent = '▶';
+      row.querySelector('.expand-btn').innerHTML = '&#9658;';
       return;
     }}
     const decisionId = row.dataset.decisionId;
@@ -443,41 +886,51 @@ def index() -> HTMLResponse:
         const esc = s => (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         const decisions = d.decisions || [];
         let providerHtml = '';
+
         if (decisions.length > 1) {{
           const heads = decisions.map(p => '<th>' + esc(p.provider || '?') + '</th>').join('');
-          const rows2 = [
+          const fmtConf = v => v != null ? v.toFixed(2) : '—';
+          const fmtHold = v => v ? v + 'h' : '—';
+          const fmtLat  = v => v != null ? v.toFixed(2) + 's' : '—';
+          const fmtCost = v => v != null ? '$' + v.toFixed(6) : '—';
+          const fieldRows = [
             ['Action',     decisions.map(p => esc(p.action || '—'))],
             ['Ticker',     decisions.map(p => esc(p.ticker || '—'))],
-            ['Confidence', decisions.map(p => p.confidence != null ? p.confidence.toFixed(2) : '—')],
-            ['Hold',       decisions.map(p => p.hold_hours ? p.hold_hours + 'h' : '—')],
-            ['Latency',    decisions.map(p => p.latency_sec != null ? p.latency_sec.toFixed(2) + 's' : '—')],
-            ['Cost',       decisions.map(p => p.cost_usd != null ? '$' + p.cost_usd.toFixed(6) : '—')],
+            ['Confidence', decisions.map(p => fmtConf(p.confidence))],
+            ['Hold',       decisions.map(p => fmtHold(p.hold_hours))],
+            ['Latency',    decisions.map(p => fmtLat(p.latency_sec))],
+            ['Cost',       decisions.map(p => fmtCost(p.cost_usd))],
             ['Reasoning',  decisions.map(p => esc(p.reasoning || ''))],
           ];
-          const bodyRows = rows2.map(([label, cells]) =>
-            '<tr><td>' + label + '</td>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>'
-          ).join('');
+          const bodyRows = fieldRows.map(([label, cells]) => {{
+            const cls = label === 'Reasoning' ? ' class="reasoning-cell"' : '';
+            return '<tr><td>' + label + '</td>' + cells.map(c => '<td' + cls + '>' + c + '</td>').join('') + '</tr>';
+          }}).join('');
           providerHtml = '<table class="provider-compare"><thead><tr><th></th>' + heads + '</tr></thead><tbody>' + bodyRows + '</tbody></table>';
         }} else if (decisions.length === 1) {{
           const dec = decisions[0];
           const conf = dec.confidence != null ? dec.confidence.toFixed(2) : '—';
           const hold = dec.hold_hours ? dec.hold_hours + 'h' : '—';
           providerHtml =
-            '<div class="meta">confidence: ' + conf + ' &nbsp;|&nbsp; hold: ' + hold + '</div>' +
-            '<div class="reasoning">' + esc(dec.reasoning) + '</div>';
+            '<div class="detail-meta">' +
+            '<span>Confidence: <strong>' + conf + '</strong></span>' +
+            '<span>Hold: <strong>' + hold + '</strong></span>' +
+            '</div>' +
+            '<div class="detail-reasoning">' + esc(dec.reasoning) + '</div>';
         }} else {{
-          providerHtml = '<div class="meta">No decision data available.</div>';
+          providerHtml = '<div class="detail-meta">No decision data available.</div>';
         }}
+
         const detail = document.createElement('tr');
         detail.className = 'detail-row';
         detail.innerHTML =
           '<td colspan="8">' +
-          '<strong>' + esc(d.headline) + '</strong>' +
-          '<div class="meta">' + esc(d.ts) + '</div>' +
+          '<div class="detail-headline">' + esc(d.headline) + '</div>' +
+          '<div class="detail-ts">' + esc(d.ts) + '</div>' +
           providerHtml +
           '</td>';
         row.after(detail);
-        row.querySelector('.expand-btn').textContent = '▼';
+        row.querySelector('.expand-btn').innerHTML = '&#9660;';
       }});
   }});
 </script>
