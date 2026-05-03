@@ -100,7 +100,7 @@ class LLMAdvisor:
             self._provider = GeminiProvider(config.google_api_key, config.gemini_model)
         elif provider == "chatgpt":
             self._provider = ChatGPTProvider(config.openai_api_key, config.openai_model)
-        else:
+        else:  # deepseek
             self._provider = DeepSeekProvider(config.deepseek_api_key, config.deepseek_model)
 
     async def analyze(

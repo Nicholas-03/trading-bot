@@ -231,9 +231,19 @@ class OrderExecutor:
         exit_reason = "bracket_order"
 
         if current_price and entry_price > 0 and qty_held > 0:
-            pnl_pct = (current_price - entry_price) / entry_price
-            pnl_usd = (current_price - entry_price) * qty_held
-            exit_reason = "take_profit" if pnl_pct >= 0 else "stop_loss"
+            # Infer which bracket leg fired from price direction, then use the known
+            # TP/SL levels for P&L — the live quote arrives up to ~30s after the fill
+            # and does not reflect the actual bracket execution price.
+            tp_price = round(entry_price * (1 + self._take_profit_pct), 2)
+            sl_price = round(entry_price * (1 - self._stop_loss_pct), 2)
+            if current_price >= entry_price:
+                exit_price = tp_price
+                exit_reason = "take_profit"
+            else:
+                exit_price = sl_price
+                exit_reason = "stop_loss"
+            pnl_pct = (exit_price - entry_price) / entry_price
+            pnl_usd = (exit_price - entry_price) * qty_held
 
         self._update_close_state(ticker, pnl_usd, exit_reason)
         await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
@@ -354,6 +364,7 @@ class OrderExecutor:
                     pass
                 logger.warning("OTOCO %s for %s fill unconfirmed — rolling back state", order_id, ticker)
                 self._held_tickers.discard(ticker)
+                self._daily_bought_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
                 self._bracket_orders.pop(ticker, None)
                 self._daily_buys -= 1

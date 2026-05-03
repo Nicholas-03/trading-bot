@@ -101,6 +101,12 @@ class PositionMonitor:
                 logger.info("Position %s no longer in Tradier — OTOCO bracket fired", ticker)
                 await self._executor.handle_bracket_close(ticker, quotes.get(ticker))
 
+        # Detect short positions closed externally (not via this bot's sell path)
+        external_short_closed = self._executor.shorted_tickers - live_symbols - self._executor.pending_close
+        for ticker in external_short_closed:
+            logger.warning("Short position %s disappeared from Tradier — reconciling state", ticker)
+            await self._executor.sell(ticker, exit_reason="external_close")
+
         # Close positions whose hold_hours window has elapsed
         for ticker in self._executor.expired_hold_tickers():
             if ticker not in self._executor.pending_close:

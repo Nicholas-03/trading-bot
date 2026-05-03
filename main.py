@@ -52,7 +52,7 @@ async def main() -> None:
             log_handler = TelegramLogHandler(
                 config.telegram_bot_token,
                 config.telegram_chat_id,
-                asyncio.get_event_loop(),
+                asyncio.get_running_loop(),
             )
             logging.getLogger().addHandler(log_handler)
         else:

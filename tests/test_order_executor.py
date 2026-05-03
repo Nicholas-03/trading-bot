@@ -26,11 +26,6 @@ def _make_executor() -> OrderExecutor:
     return OrderExecutor(client, config, set(), set(), notifier)
 
 
-def _make_executor_with_guards() -> OrderExecutor:
-    """Make an executor with guard-related config fields populated."""
-    return _make_executor()
-
-
 # --- _monday_of ---
 
 def test_monday_of_monday():
@@ -231,6 +226,7 @@ def test_buy_rolls_back_state_on_unconfirmed_fill():
 
     assert "AAPL" not in ex.held_tickers
     assert "AAPL" not in ex._position_book
+    assert "AAPL" not in ex._daily_bought_tickers
     buys, _, _ = ex.daily_summary()
     assert buys == 0
 
@@ -366,7 +362,7 @@ def test_decision_monotonic_not_included_in_db_when_db_disabled():
 def test_buy_blocked_after_same_day_stop_loss():
     """After a stop loss on ticker X, a new buy for X the same day must be blocked."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._daily_stopped_tickers.add("UONE")
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
@@ -382,7 +378,7 @@ def test_buy_blocked_after_same_day_stop_loss():
 def test_buy_blocked_on_same_day_duplicate():
     """After a successful buy + close of ticker X today, a second buy must be blocked."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._daily_bought_tickers.add("ARVN")
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
@@ -397,7 +393,7 @@ def test_buy_blocked_on_same_day_duplicate():
 def test_buy_allowed_for_fresh_ticker_despite_other_stops():
     """A stop on UONE must not block a buy for a completely different ticker."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._daily_stopped_tickers.add("UONE")
 
     ex._client.get_buying_power = MagicMock(return_value=500.0)
@@ -414,7 +410,7 @@ def test_buy_allowed_for_fresh_ticker_despite_other_stops():
 
 
 def test_daily_stopped_tickers_resets_on_new_day():
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._daily_stopped_tickers.add("UONE")
     ex._daily_bought_tickers.add("UONE")
     ex._last_day = date.today() - timedelta(days=1)
@@ -426,7 +422,7 @@ def test_daily_stopped_tickers_resets_on_new_day():
 def test_stop_loss_close_adds_to_daily_stopped_tickers():
     """Closing a position with exit_reason='stop_loss' must add ticker to _daily_stopped_tickers."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._held_tickers.add("MX")
     ex._position_book["MX"] = (3.70, 13, None)
     ex._client.close_position = MagicMock(return_value="order-1")
@@ -441,7 +437,7 @@ def test_stop_loss_close_adds_to_daily_stopped_tickers():
 def test_take_profit_close_does_not_add_to_stopped_tickers():
     """A take_profit close must NOT add to _daily_stopped_tickers."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._held_tickers.add("ARVN")
     ex._position_book["ARVN"] = (10.29, 4, None)
     ex._client.close_position = MagicMock(return_value="order-1")
@@ -458,7 +454,7 @@ def test_take_profit_close_does_not_add_to_stopped_tickers():
 def test_buy_blocked_low_price_extended_move():
     """Price < $5 and intraday move > 15% must block the buy."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     # TELA: open $0.90, last $1.10 → +22% > 15%
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"TELA": (1.10, 0.90)})
@@ -472,7 +468,7 @@ def test_buy_blocked_low_price_extended_move():
 def test_buy_blocked_any_price_extreme_move():
     """Any price, intraday move > 20% must block the buy."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     # UONE: open $5.62, last $7.14 → +27%
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"UONE": (7.14, 5.62)})
@@ -486,7 +482,7 @@ def test_buy_blocked_any_price_extreme_move():
 def test_buy_allowed_moderate_move():
     """A 5% move from open must not trigger the extension block."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"ARVN": (10.29, 9.80)})
     ex._client.submit_otoco_order = MagicMock(return_value="order-1")
@@ -505,7 +501,7 @@ def test_buy_allowed_moderate_move():
 def test_buy_blocked_when_stock_down_on_session():
     """Stock down more than 3% from session open while bot wants to buy → block."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     # MRNA: open $47.15, last $44.68 → -5.2%
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"MRNA": (44.68, 47.15)})
@@ -519,7 +515,7 @@ def test_buy_blocked_when_stock_down_on_session():
 def test_buy_allowed_slight_pullback():
     """A -1% intraday move is acceptable — must not trigger the falling-on-good-news block."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"INSG": (19.41, 19.60)})
     ex._client.submit_otoco_order = MagicMock(return_value="order-1")
@@ -538,7 +534,7 @@ def test_buy_allowed_slight_pullback():
 def test_buy_uses_limit_entry_for_low_price_stock():
     """Price < $5 → OTOCO must be placed with a limit entry price (slippage cap)."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     # FATN: open $2.99, last $3.18 → +6.4% (below 15% threshold) + price < 5
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"FATN": (3.18, 2.99)})
@@ -560,7 +556,7 @@ def test_buy_uses_limit_entry_for_low_price_stock():
 def test_buy_uses_market_entry_for_calm_large_cap():
     """High-price stock with modest intraday move → OTOCO with market entry (entry_limit=None)."""
     import asyncio
-    ex = _make_executor_with_guards()
+    ex = _make_executor()
     # IONQ: open $44.16, last $46.05 → +4.3%, price > $5
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"IONQ": (46.05, 44.16)})
@@ -575,4 +571,52 @@ def test_buy_uses_market_entry_for_calm_large_cap():
     call_args = ex._client.submit_otoco_order.call_args
     entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
     assert entry_limit is None
+
+
+# --- handle_bracket_close ---
+
+def test_handle_bracket_close_take_profit_uses_tp_price():
+    """When price >= entry, bracket close must use the TP price for P&L, not live quote."""
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._position_book["AAPL"] = (100.0, 5, None)
+    # config: tp=3%, sl=2% → TP=$103.00, SL=$98.00
+    # live quote is $103.50 — above TP but should NOT be used for P&L
+    asyncio.run(ex.handle_bracket_close("AAPL", 103.50))
+
+    assert "AAPL" not in ex.held_tickers
+    call_args = ex._notifier.notify_sell.call_args
+    pnl_pct = call_args.args[1]
+    assert abs(pnl_pct - 0.03) < 0.0001  # P&L must be exactly +3% (TP level), not +3.5%
+
+
+def test_handle_bracket_close_stop_loss_uses_sl_price():
+    """When price < entry, bracket close must use the SL price for P&L, not live quote."""
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._position_book["AAPL"] = (100.0, 5, None)
+    # live quote is $97.00 — below entry; SL was at $98.00
+    asyncio.run(ex.handle_bracket_close("AAPL", 97.00))
+
+    assert "AAPL" not in ex.held_tickers
+    call_args = ex._notifier.notify_sell.call_args
+    pnl_pct = call_args.args[1]
+    assert abs(pnl_pct - (-0.02)) < 0.0001  # P&L must be exactly -2% (SL level), not -3%
+
+
+def test_handle_bracket_close_no_entry_price_skips_pnl():
+    """When entry price is unknown (0.0), P&L stays None and reason stays 'bracket_order'."""
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._position_book["AAPL"] = (0.0, 0, None)
+
+    asyncio.run(ex.handle_bracket_close("AAPL", 105.0))
+
+    assert "AAPL" not in ex.held_tickers
+    call_args = ex._notifier.notify_sell.call_args
+    pnl_pct = call_args.args[1]
+    assert pnl_pct is None
 

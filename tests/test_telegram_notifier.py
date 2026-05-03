@@ -19,7 +19,7 @@ def test_noop_notifier_does_nothing():
 
 def test_format_buy():
     n = TelegramNotifier.__new__(TelegramNotifier)
-    msg = n._format_buy("AAPL", 5.0, "abc123")
+    msg = n._format_buy("AAPL", 5.0)
     assert "✅ BUY filled" in msg
     assert "AAPL" in msg
     assert "$5.00" in msg

@@ -36,7 +36,7 @@ class TelegramNotifier:
     # --- Public notify methods ---
 
     async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
-        await self._send(self._format_buy(ticker, notional, order_id, fill_price, fill_latency_sec))
+        await self._send(self._format_buy(ticker, notional, fill_price, fill_latency_sec))
 
     async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None:
         await self._send(self._format_sell(ticker, pnl_pct, pnl_usd))
@@ -58,7 +58,7 @@ class TelegramNotifier:
 
     # --- Message formatters ---
 
-    def _format_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> str:
+    def _format_buy(self, ticker: str, notional: float, fill_price: float | None = None, fill_latency_sec: float | None = None) -> str:
         msg = (
             f"✅ BUY filled\n"
             f"📌 Ticker: {ticker}\n"
