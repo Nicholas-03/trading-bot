@@ -2,6 +2,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# (input_price_per_1M_tokens, output_price_per_1M_tokens) in USD
 PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.00, 5.00),
     "gemini-2.5-flash": (0.30, 2.50),
