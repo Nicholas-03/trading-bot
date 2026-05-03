@@ -23,8 +23,11 @@ class DeepSeekProvider:
                     max_tokens=512,
                     messages=[{"role": "user", "content": prompt}],
                 )
+                content = response.choices[0].message.content
+                if content is None:
+                    raise ValueError("DeepSeek returned no text content (finish_reason may be non-stop)")
                 return CompletionResult(
-                    text=response.choices[0].message.content,
+                    text=content,
                     input_tokens=response.usage.prompt_tokens,
                     output_tokens=response.usage.completion_tokens,
                 )
