@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 
-@dataclass
+@dataclass(frozen=True)
 class CompletionResult:
     text: str
     input_tokens: int
