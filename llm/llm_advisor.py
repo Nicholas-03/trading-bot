@@ -121,8 +121,8 @@ class LLMAdvisor:
             news_age_hours=news_age_hours,
         )
         try:
-            text = await self._provider.complete(prompt)
-            return _parse_response(text)
+            result = await self._provider.complete(prompt)
+            return _parse_response(result.text)
         except ValueError as e:
             logger.error("LLM parse error: %s", e)
             return Decision(action="hold", ticker=None, reasoning=f"parse error: {e}")
