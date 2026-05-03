@@ -1,8 +1,8 @@
 import asyncio
 import logging
-
 from google import genai
 from google.genai import errors as genai_errors
+from llm.providers.base import CompletionResult
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +12,7 @@ class GeminiProvider:
         self._client = genai.Client(api_key=api_key)
         self._model = model
 
-    async def complete(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> CompletionResult:
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
@@ -20,7 +20,11 @@ class GeminiProvider:
                     model=self._model,
                     contents=prompt,
                 )
-                return response.text
+                return CompletionResult(
+                    text=response.text,
+                    input_tokens=response.usage_metadata.prompt_token_count,
+                    output_tokens=response.usage_metadata.candidates_token_count,
+                )
             except genai_errors.ServerError as e:
                 if attempt < max_retries:
                     wait = 2 ** attempt

@@ -1,7 +1,7 @@
 import asyncio
 import logging
-
 import openai
+from llm.providers.base import CompletionResult
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ class DeepSeekProvider:
         )
         self._model = model
 
-    async def complete(self, prompt: str) -> str:
+    async def complete(self, prompt: str) -> CompletionResult:
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
@@ -23,7 +23,11 @@ class DeepSeekProvider:
                     max_tokens=512,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                return response.choices[0].message.content
+                return CompletionResult(
+                    text=response.choices[0].message.content,
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens,
+                )
             except openai.APIStatusError as e:
                 if e.status_code >= 500 and attempt < max_retries:
                     wait = 2 ** attempt
