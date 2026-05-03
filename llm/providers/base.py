@@ -1,5 +1,13 @@
+from dataclasses import dataclass
 from typing import Protocol
 
 
+@dataclass
+class CompletionResult:
+    text: str
+    input_tokens: int
+    output_tokens: int
+
+
 class LLMProvider(Protocol):
-    async def complete(self, prompt: str) -> str: ...
+    async def complete(self, prompt: str) -> CompletionResult: ...
