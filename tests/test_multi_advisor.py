@@ -3,6 +3,11 @@ from unittest.mock import AsyncMock
 import pytest
 from llm.multi_advisor import MultiDecision, MultiLLMAdvisor, ProviderResult
 from llm.llm_advisor import Decision
+from llm.providers.base import CompletionResult
+
+
+def _make_completion(text: str) -> CompletionResult:
+    return CompletionResult(text=text, input_tokens=100, output_tokens=50)
 
 
 def _make_advisor(
@@ -13,17 +18,21 @@ def _make_advisor(
 ) -> MultiLLMAdvisor:
     advisor = object.__new__(MultiLLMAdvisor)
     claude_mock = AsyncMock()
-    claude_mock.complete.return_value = claude_response
+    claude_mock.complete.return_value = _make_completion(claude_response)
     gemini_mock = AsyncMock()
-    gemini_mock.complete.return_value = gemini_response
+    gemini_mock.complete.return_value = _make_completion(gemini_response)
     deepseek_mock = AsyncMock()
-    deepseek_mock.complete.return_value = deepseek_response
+    deepseek_mock.complete.return_value = _make_completion(deepseek_response)
     chatgpt_mock = AsyncMock()
-    chatgpt_mock.complete.return_value = chatgpt_response
+    chatgpt_mock.complete.return_value = _make_completion(chatgpt_response)
     advisor._claude = claude_mock
     advisor._gemini = gemini_mock
     advisor._deepseek = deepseek_mock
     advisor._chatgpt = chatgpt_mock
+    advisor._claude_model = "claude-haiku-4-5"
+    advisor._gemini_model = "gemini-2.5-flash"
+    advisor._deepseek_model = "deepseek-v4-flash"
+    advisor._chatgpt_model = "gpt-5.4-mini"
     return advisor
 
 
@@ -51,15 +60,19 @@ def test_claude_error_falls_back_to_hold():
     claude_mock = AsyncMock()
     claude_mock.complete.side_effect = RuntimeError("API down")
     gemini_mock = AsyncMock()
-    gemini_mock.complete.return_value = _HOLD_JSON
+    gemini_mock.complete.return_value = _make_completion(_HOLD_JSON)
     deepseek_mock = AsyncMock()
-    deepseek_mock.complete.return_value = _HOLD_JSON
+    deepseek_mock.complete.return_value = _make_completion(_HOLD_JSON)
     chatgpt_mock = AsyncMock()
-    chatgpt_mock.complete.return_value = _HOLD_JSON
+    chatgpt_mock.complete.return_value = _make_completion(_HOLD_JSON)
     advisor._claude = claude_mock
     advisor._gemini = gemini_mock
     advisor._deepseek = deepseek_mock
     advisor._chatgpt = chatgpt_mock
+    advisor._claude_model = "claude-haiku-4-5"
+    advisor._gemini_model = "gemini-2.5-flash"
+    advisor._deepseek_model = "deepseek-v4-flash"
+    advisor._chatgpt_model = "gpt-5.4-mini"
 
     result = asyncio.run(advisor.analyze("headline", "summary", [], set(), set(), 0.0))
     assert result.primary.action == "hold"
@@ -77,17 +90,21 @@ def test_latency_sec_always_non_negative():
 def test_partial_provider_error_still_returns_four_results():
     advisor = object.__new__(MultiLLMAdvisor)
     claude_mock = AsyncMock()
-    claude_mock.complete.return_value = _BUY_JSON
+    claude_mock.complete.return_value = _make_completion(_BUY_JSON)
     gemini_mock = AsyncMock()
     gemini_mock.complete.side_effect = RuntimeError("timeout")
     deepseek_mock = AsyncMock()
-    deepseek_mock.complete.return_value = _HOLD_JSON
+    deepseek_mock.complete.return_value = _make_completion(_HOLD_JSON)
     chatgpt_mock = AsyncMock()
-    chatgpt_mock.complete.return_value = _HOLD_JSON
+    chatgpt_mock.complete.return_value = _make_completion(_HOLD_JSON)
     advisor._claude = claude_mock
     advisor._gemini = gemini_mock
     advisor._deepseek = deepseek_mock
     advisor._chatgpt = chatgpt_mock
+    advisor._claude_model = "claude-haiku-4-5"
+    advisor._gemini_model = "gemini-2.5-flash"
+    advisor._deepseek_model = "deepseek-v4-flash"
+    advisor._chatgpt_model = "gpt-5.4-mini"
 
     result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
     assert len(result.all_results) == 4
@@ -99,20 +116,62 @@ def test_partial_provider_error_still_returns_four_results():
 def test_chatgpt_error_does_not_affect_primary():
     advisor = object.__new__(MultiLLMAdvisor)
     claude_mock = AsyncMock()
-    claude_mock.complete.return_value = _BUY_JSON
+    claude_mock.complete.return_value = _make_completion(_BUY_JSON)
     gemini_mock = AsyncMock()
-    gemini_mock.complete.return_value = _HOLD_JSON
+    gemini_mock.complete.return_value = _make_completion(_HOLD_JSON)
     deepseek_mock = AsyncMock()
-    deepseek_mock.complete.return_value = _HOLD_JSON
+    deepseek_mock.complete.return_value = _make_completion(_HOLD_JSON)
     chatgpt_mock = AsyncMock()
     chatgpt_mock.complete.side_effect = RuntimeError("rate limited")
     advisor._claude = claude_mock
     advisor._gemini = gemini_mock
     advisor._deepseek = deepseek_mock
     advisor._chatgpt = chatgpt_mock
+    advisor._claude_model = "claude-haiku-4-5"
+    advisor._gemini_model = "gemini-2.5-flash"
+    advisor._deepseek_model = "deepseek-v4-flash"
+    advisor._chatgpt_model = "gpt-5.4-mini"
 
     result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
     assert result.primary.action == "buy"
     assert result.all_results[3].provider == "chatgpt"
     assert result.all_results[3].decision.action == "hold"
     assert "error" in result.all_results[3].decision.reasoning.lower()
+
+
+def test_cost_usd_populated_for_known_models():
+    advisor = _make_advisor(_BUY_JSON, _HOLD_JSON, _HOLD_JSON, _HOLD_JSON)
+    result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
+    for pr in result.all_results:
+        assert pr.cost_usd is not None
+        assert pr.cost_usd >= 0.0
+
+
+def test_cost_usd_is_none_for_unknown_model():
+    advisor = _make_advisor(_BUY_JSON, _HOLD_JSON, _HOLD_JSON, _HOLD_JSON)
+    advisor._claude_model = "unknown-model-xyz"
+    result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
+    assert result.all_results[0].cost_usd is None
+
+
+def test_cost_usd_is_none_on_provider_error():
+    advisor = object.__new__(MultiLLMAdvisor)
+    claude_mock = AsyncMock()
+    claude_mock.complete.side_effect = RuntimeError("API down")
+    gemini_mock = AsyncMock()
+    gemini_mock.complete.return_value = _make_completion(_HOLD_JSON)
+    deepseek_mock = AsyncMock()
+    deepseek_mock.complete.return_value = _make_completion(_HOLD_JSON)
+    chatgpt_mock = AsyncMock()
+    chatgpt_mock.complete.return_value = _make_completion(_HOLD_JSON)
+    advisor._claude = claude_mock
+    advisor._gemini = gemini_mock
+    advisor._deepseek = deepseek_mock
+    advisor._chatgpt = chatgpt_mock
+    advisor._claude_model = "claude-haiku-4-5"
+    advisor._gemini_model = "gemini-2.5-flash"
+    advisor._deepseek_model = "deepseek-v4-flash"
+    advisor._chatgpt_model = "gpt-5.4-mini"
+
+    result = asyncio.run(advisor.analyze("headline", "summary", [], set(), set(), 0.0))
+    assert result.all_results[0].cost_usd is None
