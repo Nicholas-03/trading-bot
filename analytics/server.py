@@ -39,10 +39,10 @@ def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     ).fetchone()
 
     decision_rows = con.execute(
-        "SELECT provider, action, ticker, confidence, hold_hours, reasoning, latency_sec "
+        "SELECT provider, action, ticker, confidence, hold_hours, reasoning, latency_sec, cost_usd "
         "FROM llm_decisions WHERE news_event_id = ? "
         "ORDER BY CASE provider "
-        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 ELSE 3 END",
+        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 WHEN 'chatgpt' THEN 3 ELSE 4 END",
         (news_event_id,),
     ).fetchall()
 
@@ -252,7 +252,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "WHERE provider IS NOT NULL AND latency_sec IS NOT NULL"
     ).fetchall()
     fig_plat = go.Figure()
-    for p in ["claude", "gemini", "deepseek"]:
+    for p in ["claude", "gemini", "deepseek", "chatgpt"]:
         vals = [r["latency_sec"] for r in plat_rows if r["provider"] == p]
         if vals:
             fig_plat.add_trace(go.Box(y=vals, name=p))
@@ -262,13 +262,32 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     agree_rows = con.execute(
         "SELECT COUNT(DISTINCT action) AS unique_actions "
         "FROM llm_decisions WHERE provider IS NOT NULL "
-        "GROUP BY news_event_id HAVING COUNT(*) = 3"
+        "GROUP BY news_event_id HAVING COUNT(*) = 4"
     ).fetchall()
     agreed = sum(1 for r in agree_rows if r["unique_actions"] == 1)
     disagreed = len(agree_rows) - agreed
     fig_agree = go.Figure(go.Bar(x=["Agreed", "Disagreed"], y=[agreed, disagreed]))
     fig_agree.update_layout(
-        title="LLM Agreement Rate (3-provider events)", yaxis_title="News Events"
+        title="LLM Agreement Rate (4-provider events)", yaxis_title="News Events"
+    )
+
+    # 13: Total cost per provider
+    cost_rows = con.execute(
+        "SELECT provider, SUM(cost_usd) AS total_cost "
+        "FROM llm_decisions "
+        "WHERE provider IS NOT NULL AND cost_usd IS NOT NULL "
+        "GROUP BY provider "
+        "ORDER BY CASE provider "
+        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 WHEN 'chatgpt' THEN 3 ELSE 4 END"
+    ).fetchall()
+    fig_cost = go.Figure(go.Bar(
+        x=[r["provider"] for r in cost_rows],
+        y=[r["total_cost"] for r in cost_rows],
+    ))
+    fig_cost.update_layout(
+        title="Total Cost per Provider (USD)",
+        xaxis_title="Provider",
+        yaxis_title="USD",
     )
 
     charts = {
@@ -284,6 +303,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "latency_trend": _fig_json(fig_lat),
         "provider_latency": _fig_json(fig_plat),
         "agreement_rate": _fig_json(fig_agree),
+        "total_cost": _fig_json(fig_cost),
     }
     return charts, [dict(r) for r in recent]
 
@@ -431,6 +451,7 @@ def index() -> HTMLResponse:
             ['Confidence', decisions.map(p => p.confidence != null ? p.confidence.toFixed(2) : '—')],
             ['Hold',       decisions.map(p => p.hold_hours ? p.hold_hours + 'h' : '—')],
             ['Latency',    decisions.map(p => p.latency_sec != null ? p.latency_sec.toFixed(2) + 's' : '—')],
+            ['Cost',       decisions.map(p => p.cost_usd != null ? '$' + p.cost_usd.toFixed(6) : '—')],
             ['Reasoning',  decisions.map(p => esc(p.reasoning || ''))],
           ];
           const bodyRows = rows2.map(([label, cells]) =>

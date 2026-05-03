@@ -24,7 +24,8 @@ def _make_db() -> sqlite3.Connection:
             confidence REAL DEFAULT 0.0,
             hold_hours INTEGER DEFAULT 0,
             provider TEXT,
-            latency_sec REAL
+            latency_sec REAL,
+            cost_usd REAL
         );
         CREATE TABLE trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,3 +147,30 @@ def test_query_decision_returns_all_siblings():
     assert result["decisions"][0]["action"] == "buy"
     assert result["decisions"][1]["action"] == "hold"
     assert abs(result["decisions"][0]["latency_sec"] - 1.2) < 0.001
+
+
+def test_query_decision_returns_cost_usd():
+    con = _make_db()
+    con.execute(
+        "INSERT INTO news_events (ts, headline) VALUES ('2026-01-01T10:00:00', 'AAPL beats earnings')"
+    )
+    con.executemany(
+        "INSERT INTO llm_decisions "
+        "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd) "
+        "VALUES (1, '2026-01-01T10:00:01', ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("buy",  "AAPL", "strong",  0.90, 2, "claude",   1.2, 0.0035),
+            ("hold", None,   "unsure",  0.00, 0, "gemini",   0.8, 0.00155),
+            ("buy",  "AAPL", "bullish", 0.75, 1, "deepseek", 2.1, 0.00028),
+            ("hold", None,   "unsure",  0.00, 0, "chatgpt",  1.5, 0.003),
+        ],
+    )
+    con.commit()
+
+    result = _query_decision(con, 1)
+    assert result is not None
+    assert len(result["decisions"]) == 4
+    assert abs(result["decisions"][0]["cost_usd"] - 0.0035) < 1e-9
+    assert abs(result["decisions"][1]["cost_usd"] - 0.00155) < 1e-9
+    assert abs(result["decisions"][2]["cost_usd"] - 0.00028) < 1e-9
+    assert abs(result["decisions"][3]["cost_usd"] - 0.003) < 1e-9
