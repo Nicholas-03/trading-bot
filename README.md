@@ -114,10 +114,10 @@ docker compose down
 
 ## Analytics
 
-All news events, LLM decisions, and trade executions are stored in a local SQLite database (default: `data/trades.db`). Use `export_db.py` to dump the database as markdown for LLM analysis:
+All news events, LLM decisions, and trade executions are stored in a local SQLite database (default: `data/trades.db`). Use `analytics/export_db.py` to dump the database as markdown for LLM analysis:
 
 ```bash
-python export_db.py
+python analytics/export_db.py
 ```
 
 ## Testing

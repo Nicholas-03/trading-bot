@@ -2,8 +2,8 @@
 Export trades.db to stdout in markdown format — paste directly into any LLM client.
 
 Usage:
-    python data/export_db.py              # uses default DB path (data/trades.db)
-    python data/export_db.py path/to.db   # custom path
+    python analytics/export_db.py              # uses default DB path (data/trades.db)
+    python analytics/export_db.py path/to.db   # custom path
 """
 
 import sqlite3
