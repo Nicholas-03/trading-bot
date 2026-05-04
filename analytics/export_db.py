@@ -91,5 +91,5 @@ def export(db_path: str) -> None:
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/trades.db"
+    path = sys.argv[1] if len(sys.argv) > 1 else "data/trades_railway.db"
     export(path)
