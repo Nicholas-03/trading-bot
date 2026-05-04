@@ -385,6 +385,10 @@ class OrderExecutor:
                         self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at, fill_latency_sec, hold_hours
                     )
                     self._position_book[ticker] = (actual_price, qty, trade_id)
+                    logger.info(
+                        "TRADE INSERTED: trade_id=%s decision_id=%s ticker=%s",
+                        trade_id, decision_id, ticker,
+                    )
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
 

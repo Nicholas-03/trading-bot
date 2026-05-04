@@ -601,7 +601,13 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
         "FROM news_events n "
         "JOIN llm_decisions d ON d.news_event_id = n.id "
-        "    AND (d.provider = 'claude' OR d.provider IS NULL) "
+        "    AND d.id = COALESCE("
+        "        (SELECT t2.decision_id FROM trades t2"
+        "         JOIN llm_decisions d2 ON d2.id = t2.decision_id"
+        "         WHERE d2.news_event_id = n.id LIMIT 1),"
+        "        (SELECT id FROM llm_decisions WHERE news_event_id = n.id AND provider = 'claude' LIMIT 1),"
+        "        (SELECT MIN(id) FROM llm_decisions WHERE news_event_id = n.id)"
+        "    ) "
         "LEFT JOIN trades t ON t.decision_id = d.id "
         "ORDER BY n.ts DESC LIMIT 500"
     ).fetchall()
@@ -952,4 +958,9 @@ def get_decision(decision_id: int):
 
 
 if __name__ == "__main__":
-    uvicorn.run("analytics.server:app", host="127.0.0.1", port=8080, reload=False)
+    uvicorn.run(
+        "analytics.server:app",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8080")),
+        reload=False,
+    )

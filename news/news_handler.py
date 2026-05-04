@@ -166,6 +166,11 @@ class NewsHandler:
                 return
 
             if decision.action == "buy" and decision.ticker:
+                logger.info(
+                    "EXECUTING BUY: provider=%s ticker=%s confidence=%.2f decision_id=%s",
+                    result.primary_provider if isinstance(result, MultiDecision) else "single",
+                    decision.ticker, decision.confidence, decision_id,
+                )
                 await self._executor.buy(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
