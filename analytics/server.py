@@ -11,7 +11,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 
-DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades.db")
+DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades_railway.db")
 
 app = FastAPI()
 
