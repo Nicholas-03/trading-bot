@@ -10,6 +10,7 @@ import plotly.utils
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
+from analytics.db import TradeDB
 
 DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades_railway.db")
 
@@ -17,6 +18,9 @@ app = FastAPI()
 
 
 def _ensure_schema() -> None:
+    db = TradeDB(DB_PATH)
+    db.close()
+
     c = sqlite3.connect(DB_PATH)
     for ddl in [
         "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
