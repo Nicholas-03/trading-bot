@@ -40,12 +40,40 @@ _BUY_JSON = '{"action":"buy","ticker":"AAPL","reasoning":"strong earnings","conf
 _HOLD_JSON = '{"action":"hold","ticker":null,"reasoning":"unsure","confidence":0.0,"hold_hours":0}'
 
 
-def test_primary_is_always_claude_decision():
+def test_primary_falls_back_to_claude_when_no_majority():
+    # Only Claude says buy — no majority → primary is Claude's decision
     advisor = _make_advisor(_BUY_JSON, _HOLD_JSON, _HOLD_JSON, _HOLD_JSON)
     result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
     assert isinstance(result, MultiDecision)
     assert result.primary.action == "buy"
     assert result.primary.ticker == "AAPL"
+    assert result.primary_provider == "claude"
+
+
+_BUY_HIGH_JSON = '{"action":"buy","ticker":"AAPL","reasoning":"strong","confidence":0.95,"hold_hours":2}'
+_BUY_LOW_JSON = '{"action":"buy","ticker":"AAPL","reasoning":"ok","confidence":0.75,"hold_hours":2}'
+
+
+def test_primary_uses_majority_vote_picks_highest_confidence():
+    # 3 providers say buy AAPL; highest confidence (0.95) should be primary
+    advisor = _make_advisor(_BUY_LOW_JSON, _BUY_HIGH_JSON, _BUY_LOW_JSON, _HOLD_JSON)
+    result = asyncio.run(advisor.analyze("headline", "summary", ["AAPL"], set(), set(), 0.0))
+    assert result.primary.action == "buy"
+    assert result.primary.ticker == "AAPL"
+    assert result.primary.confidence == 0.95
+    assert result.primary_provider == "gemini"
+
+
+def test_primary_uses_majority_vote_two_out_of_four():
+    # Exactly 2 providers agree: gemini + deepseek both say buy
+    _BUY_GEMINI = '{"action":"buy","ticker":"TSLA","reasoning":"catalyst","confidence":0.85,"hold_hours":4}'
+    _BUY_DEEPSEEK = '{"action":"buy","ticker":"TSLA","reasoning":"catalyst","confidence":0.80,"hold_hours":4}'
+    advisor = _make_advisor(_HOLD_JSON, _BUY_GEMINI, _BUY_DEEPSEEK, _HOLD_JSON)
+    result = asyncio.run(advisor.analyze("headline", "summary", ["TSLA"], set(), set(), 0.0))
+    assert result.primary.action == "buy"
+    assert result.primary.ticker == "TSLA"
+    assert result.primary.confidence == 0.85
+    assert result.primary_provider == "gemini"
 
 
 def test_all_results_ordered_claude_gemini_deepseek_chatgpt():

@@ -119,7 +119,20 @@ class NewsHandler:
             else:
                 decision = result
 
-            logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
+            if isinstance(result, MultiDecision):
+                logger.info(
+                    "Primary [%s] LLM decision: %s %s confidence=%.2f — %s",
+                    result.primary_provider, decision.action, decision.ticker,
+                    decision.confidence, decision.reasoning,
+                )
+                for pr in result.all_results:
+                    logger.info(
+                        "  [%s] %s %s confidence=%.2f hold_hours=%d",
+                        pr.provider, pr.decision.action, pr.decision.ticker or "—",
+                        pr.decision.confidence, pr.decision.hold_hours,
+                    )
+            else:
+                logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
 
             decision_id: int | None = None
             if self._db is not None and news_event_id is not None:
@@ -134,7 +147,7 @@ class NewsHandler:
                                 pr.decision.confidence, pr.decision.hold_hours,
                                 pr.provider, pr.latency_sec, pr.cost_usd,
                             )
-                            if pr.provider == "claude":
+                            if pr.provider == result.primary_provider:
                                 decision_id = row_id
                     else:
                         decision_id = await asyncio.to_thread(

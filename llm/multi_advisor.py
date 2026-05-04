@@ -21,7 +21,33 @@ class ProviderResult:
 @dataclass
 class MultiDecision:
     primary: Decision
+    primary_provider: str
     all_results: list[ProviderResult]
+
+
+def _pick_primary(results: list[ProviderResult]) -> tuple[Decision, str]:
+    """Majority-vote primary selection.
+
+    If 2+ providers agree on the same (action, ticker) for an actionable
+    decision (buy/short), pick the highest-confidence decision among them.
+    Falls back to Claude (results[0]) when no majority forms.
+    """
+    vote_map: dict[tuple[str, str | None], list[ProviderResult]] = {}
+    for pr in results:
+        if pr.decision.action in ("buy", "short"):
+            key = (pr.decision.action, pr.decision.ticker)
+            vote_map.setdefault(key, []).append(pr)
+
+    majority_groups = [(k, v) for k, v in vote_map.items() if len(v) >= 2]
+    if majority_groups:
+        _, candidates = max(
+            majority_groups,
+            key=lambda item: (len(item[1]), max(pr.decision.confidence for pr in item[1])),
+        )
+        winner = max(candidates, key=lambda pr: pr.decision.confidence)
+        return winner.decision, winner.provider
+
+    return results[0].decision, results[0].provider
 
 
 class MultiLLMAdvisor:
@@ -75,4 +101,5 @@ class MultiLLMAdvisor:
             self._call("deepseek", self._deepseek, self._deepseek_model, prompt),
             self._call("chatgpt", self._chatgpt, self._chatgpt_model, prompt),
         )
-        return MultiDecision(primary=results[0].decision, all_results=results)
+        primary, primary_provider = _pick_primary(results)
+        return MultiDecision(primary=primary, primary_provider=primary_provider, all_results=results)
