@@ -200,6 +200,14 @@ class OrderExecutor:
             self._daily_realized_pnl += pnl_usd
             self._weekly_realized_pnl += pnl_usd
 
+    async def _record_skip_safe(self, decision_id: int | None, reason: str) -> None:
+        if self._db is None or decision_id is None:
+            return
+        try:
+            await asyncio.to_thread(self._db.record_skip, decision_id, reason)
+        except Exception as db_err:
+            logger.warning("Failed to record skip reason for decision %s: %s", decision_id, db_err)
+
     async def _record_close_safe(
         self,
         trade_id: int | None,
@@ -256,18 +264,23 @@ class OrderExecutor:
     async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
+            await self._record_skip_safe(decision_id, "trading_paused")
             return
         if ticker in self._held_tickers:
             logger.info("Skipping buy for %s — already held", ticker)
+            await self._record_skip_safe(decision_id, "already_held")
             return
         if ticker in self._shorted_tickers:
             logger.info("Skipping buy for %s — currently shorted, cover first", ticker)
+            await self._record_skip_safe(decision_id, "already_shorted")
             return
         if ticker in self._daily_stopped_tickers:
             logger.info("SKIP [same_day_reentry_block] %s — stopped out earlier today", ticker)
+            await self._record_skip_safe(decision_id, "same_day_reentry_block")
             return
         if ticker in self._daily_bought_tickers:
             logger.info("SKIP [same_day_reentry_block] %s — already bought and closed today", ticker)
+            await self._record_skip_safe(decision_id, "same_day_reentry_block")
             return
         try:
             buying_power = await asyncio.to_thread(self._client.get_buying_power)
@@ -276,11 +289,13 @@ class OrderExecutor:
                     "Skipping buy for %s — insufficient funds (have $%.2f, need $%.2f)",
                     ticker, buying_power, self._notional_usd,
                 )
+                await self._record_skip_safe(decision_id, "insufficient_funds")
                 return
             quotes_ext = await asyncio.to_thread(self._client.get_quotes_with_open, [ticker])
             quote = quotes_ext.get(ticker)
             if not quote:
                 logger.error("No quote available for %s — skipping buy", ticker)
+                await self._record_skip_safe(decision_id, "no_quote")
                 return
             price, open_price = quote
 
@@ -292,12 +307,14 @@ class OrderExecutor:
                         "SKIP [extended_move_block] %s — price $%.2f is up %.1f%% from open $%.2f (low-price threshold %.0f%%)",
                         ticker, price, intraday_move * 100, open_price, self._extended_move_low_price_pct * 100,
                     )
+                    await self._record_skip_safe(decision_id, "extended_move_block")
                     return
                 if intraday_move > self._extended_move_any_pct:
                     logger.info(
                         "SKIP [extended_move_block] %s — price $%.2f is up %.1f%% from open $%.2f (any-price threshold %.0f%%)",
                         ticker, price, intraday_move * 100, open_price, self._extended_move_any_pct * 100,
                     )
+                    await self._record_skip_safe(decision_id, "extended_move_block")
                     return
 
                 # --- falling on good news filter ---
@@ -306,6 +323,7 @@ class OrderExecutor:
                         "SKIP [negative_price_confirmation_block] %s — price $%.2f is down %.1f%% from session open $%.2f despite positive catalyst",
                         ticker, price, intraday_move * 100, open_price,
                     )
+                    await self._record_skip_safe(decision_id, "negative_price_confirmation_block")
                     return
 
             qty = math.floor(self._notional_usd / price)
@@ -314,6 +332,7 @@ class OrderExecutor:
                     "Skipping buy for %s — price $%.2f exceeds budget $%.2f",
                     ticker, price, self._notional_usd,
                 )
+                await self._record_skip_safe(decision_id, "budget_exceeded")
                 return
 
             # --- limit entry for volatile / low-price stocks ---
@@ -401,12 +420,15 @@ class OrderExecutor:
     async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping short for %s", ticker)
+            await self._record_skip_safe(decision_id, "trading_paused")
             return
         if ticker in self._shorted_tickers:
             logger.info("Skipping short for %s — already shorted", ticker)
+            await self._record_skip_safe(decision_id, "already_shorted")
             return
         if ticker in self._held_tickers:
             logger.info("Skipping short for %s — currently held long, sell first", ticker)
+            await self._record_skip_safe(decision_id, "already_held")
             return
         try:
             order_id = await asyncio.to_thread(

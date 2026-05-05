@@ -29,7 +29,8 @@ class TradeDB:
                 ticker        TEXT,
                 reasoning     TEXT,
                 confidence    REAL DEFAULT 0.0,
-                hold_hours    INTEGER DEFAULT 0
+                hold_hours    INTEGER DEFAULT 0,
+                skip_reason   TEXT
             );
             CREATE TABLE IF NOT EXISTS trades (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +58,7 @@ class TradeDB:
             "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
             "ALTER TABLE llm_decisions ADD COLUMN latency_sec REAL",
             "ALTER TABLE llm_decisions ADD COLUMN cost_usd REAL",
+            "ALTER TABLE llm_decisions ADD COLUMN skip_reason TEXT",
         ]:
             try:
                 self._conn.execute(ddl)
@@ -93,6 +95,13 @@ class TradeDB:
         )
         self._conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
+
+    def record_skip(self, decision_id: int, reason: str) -> None:
+        self._conn.execute(
+            "UPDATE llm_decisions SET skip_reason=? WHERE id=?",
+            (reason, decision_id),
+        )
+        self._conn.commit()
 
     def record_trade_open(
         self,
