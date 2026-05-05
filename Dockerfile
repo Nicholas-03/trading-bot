@@ -24,11 +24,10 @@ WORKDIR /app
 
 # Copy only the source needed at runtime
 COPY main.py config.py ./
-COPY run_app.py ./
 COPY trading/ trading/
 COPY llm/ llm/
 COPY news/ news/
 COPY notifications/ notifications/
 COPY analytics/ analytics/
 
-CMD ["python", "run_app.py"]
+CMD ["python", "main.py"]
