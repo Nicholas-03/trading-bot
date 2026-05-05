@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from config import Config
-from llm.providers import ChatGPTProvider, ClaudeProvider, DeepSeekProvider, GeminiProvider
+from llm.providers import ChatGPTProvider, ClaudeProvider
 from llm.providers.base import LLMProvider
 
 logger = logging.getLogger(__name__)
@@ -96,12 +96,8 @@ class LLMAdvisor:
         provider = config.llm_provider
         if provider == "claude":
             self._provider: LLMProvider = ClaudeProvider(config.anthropic_api_key, config.anthropic_model)
-        elif provider == "gemini":
-            self._provider = GeminiProvider(config.google_api_key, config.gemini_model)
-        elif provider == "chatgpt":
+        else:  # chatgpt
             self._provider = ChatGPTProvider(config.openai_api_key, config.openai_model)
-        else:  # deepseek
-            self._provider = DeepSeekProvider(config.deepseek_api_key, config.deepseek_model)
 
     async def analyze(
         self,

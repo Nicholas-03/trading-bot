@@ -14,10 +14,6 @@ class Config:
     tradier_live_token: str
     anthropic_api_key: str
     anthropic_model: str
-    google_api_key: str
-    gemini_model: str
-    deepseek_api_key: str
-    deepseek_model: str
     openai_api_key: str
     openai_model: str
     llm_provider: str
@@ -49,23 +45,19 @@ def load_config() -> Config:
     load_dotenv()
 
     provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    if provider not in ("claude", "gemini", "deepseek", "chatgpt", "multi"):
+    if provider not in ("claude", "chatgpt", "multi"):
         raise ValueError(
-            f"LLM_PROVIDER must be 'claude', 'gemini', 'deepseek', 'chatgpt', or 'multi', got {provider!r}"
+            f"LLM_PROVIDER must be 'claude', 'chatgpt', or 'multi', got {provider!r}"
         )
 
     # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
     required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
     if provider == "claude":
         required.append("ANTHROPIC_API_KEY")
-    elif provider == "gemini":
-        required.append("GOOGLE_API_KEY")
-    elif provider == "deepseek":
-        required.append("DEEPSEEK_API_KEY")
     elif provider == "chatgpt":
         required.append("OPENAI_API_KEY")
-    else:  # multi — all four providers are active
-        required.extend(["ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"])
+    else:  # multi — claude + chatgpt
+        required.extend(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
 
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -86,10 +78,6 @@ def load_config() -> Config:
         tradier_live_token=os.getenv("TRADIER_LIVE_TOKEN", ""),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
-        google_api_key=os.getenv("GOOGLE_API_KEY", ""),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
-        deepseek_api_key=os.getenv("DEEPSEEK_API_KEY", ""),
-        deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-4o"),
         llm_provider=provider,

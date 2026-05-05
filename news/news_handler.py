@@ -163,6 +163,11 @@ class NewsHandler:
                     "Skipping %s %s — confidence %.2f below threshold %.2f",
                     decision.action, decision.ticker, decision.confidence, self._config.min_confidence,
                 )
+                if self._db is not None and decision_id is not None:
+                    try:
+                        await asyncio.to_thread(self._db.record_skip, decision_id, "confidence_below_threshold")
+                    except Exception as db_err:
+                        logger.warning("Failed to record skip reason for decision %s: %s", decision_id, db_err)
                 return
 
             if decision.action == "buy" and decision.ticker:
@@ -177,6 +182,11 @@ class NewsHandler:
                     await self._executor.short(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
                 else:
                     logger.info("Short selling disabled — skipping short for %s", decision.ticker)
+                    if self._db is not None and decision_id is not None:
+                        try:
+                            await asyncio.to_thread(self._db.record_skip, decision_id, "short_disabled")
+                        except Exception as db_err:
+                            logger.warning("Failed to record skip reason for decision %s: %s", decision_id, db_err)
             elif decision.action == "sell" and decision.ticker:
                 await self._executor.sell(decision.ticker)
         except Exception:

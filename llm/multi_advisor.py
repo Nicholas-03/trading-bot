@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from llm.llm_advisor import Decision, _PROMPT_TEMPLATE, _parse_response
 from llm.pricing import compute_cost
-from llm.providers import ChatGPTProvider, ClaudeProvider, DeepSeekProvider, GeminiProvider
+from llm.providers import ChatGPTProvider, ClaudeProvider
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +28,9 @@ class MultiDecision:
 def _pick_primary(results: list[ProviderResult]) -> tuple[Decision, str]:
     """Majority-vote primary selection.
 
-    If 2+ providers agree on the same (action, ticker) for an actionable
-    decision (buy/short), pick the highest-confidence decision among them.
-    Falls back to Claude (results[0]) when no majority forms.
+    If both providers agree on the same (action, ticker) for an actionable
+    decision (buy/short), pick the highest-confidence decision between them.
+    Falls back to Claude (results[0]) when they disagree.
     """
     vote_map: dict[tuple[str, str | None], list[ProviderResult]] = {}
     for pr in results:
@@ -54,10 +54,6 @@ class MultiLLMAdvisor:
     def __init__(self, config) -> None:
         self._claude = ClaudeProvider(config.anthropic_api_key, config.anthropic_model)
         self._claude_model = config.anthropic_model
-        self._gemini = GeminiProvider(config.google_api_key, config.gemini_model)
-        self._gemini_model = config.gemini_model
-        self._deepseek = DeepSeekProvider(config.deepseek_api_key, config.deepseek_model)
-        self._deepseek_model = config.deepseek_model
         self._chatgpt = ChatGPTProvider(config.openai_api_key, config.openai_model)
         self._chatgpt_model = config.openai_model
 
@@ -97,8 +93,6 @@ class MultiLLMAdvisor:
         )
         results: list[ProviderResult] = await asyncio.gather(
             self._call("claude", self._claude, self._claude_model, prompt),
-            self._call("gemini", self._gemini, self._gemini_model, prompt),
-            self._call("deepseek", self._deepseek, self._deepseek_model, prompt),
             self._call("chatgpt", self._chatgpt, self._chatgpt_model, prompt),
         )
         primary, primary_provider = _pick_primary(results)
