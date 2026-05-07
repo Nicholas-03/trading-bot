@@ -1,4 +1,5 @@
 import pytest
+from datetime import date
 from analytics.db import TradeDB
 
 
@@ -129,3 +130,19 @@ def test_record_decision_cost_defaults_to_none(db):
         "SELECT cost_usd FROM llm_decisions WHERE id=?", (did,)
     ).fetchone()
     assert row[0] is None
+
+
+def test_realized_summary_for_et_date_counts_real_fills_only(db):
+    db.record_trade_open(None, "SONY", "buy", 2, 20.56, "2026-05-06T15:51:08Z")
+    ztek = db.record_trade_open(None, "ZTEK", "buy", 89, 0.51, "2026-05-06T16:33:27Z")
+    din = db.record_trade_open(None, "DIN", "buy", 1, 28.74, "2026-05-06T17:59:59Z")
+    unknown = db.record_trade_open(None, "BLSH", "buy", 1, 47.78, "2026-05-05T14:06:19Z")
+    db.record_trade_close(ztek, 0.49, -1.78, -0.039, "stop_loss", "2026-05-06T16:33:27Z")
+    db.record_trade_close(din, 26.50, -2.24, -0.078, "stop_loss", "2026-05-06T19:53:36Z")
+    db.record_trade_close(unknown, None, None, None, "offline_close", "2026-05-06T19:54:00Z")
+
+    buys, sells, pnl = db.realized_summary_for_et_date(date(2026, 5, 6))
+
+    assert buys == 3
+    assert sells == 2
+    assert abs(pnl - (-4.02)) < 1e-9

@@ -1,7 +1,7 @@
 # trading/position_monitor.py
 import asyncio
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import pytz
 from trading.tradier_client import TradierClient
 from trading.order_executor import OrderExecutor
@@ -79,10 +79,13 @@ class PositionMonitor:
             logger.info("Weekly report sent: buys=%d sells=%d pnl=%.2f", w_buys, w_sells, w_pnl)
 
     def _fetch_eod_data(self) -> tuple[int, int, float]:
-        return self._executor.daily_summary()
+        et = pytz.timezone("America/New_York")
+        return self._executor.daily_summary(datetime.now(et).date())
 
     def _fetch_weekly_data(self) -> tuple[int, int, float]:
-        return self._executor.weekly_summary()
+        et = pytz.timezone("America/New_York")
+        today = datetime.now(et).date()
+        return self._executor.weekly_summary(today - timedelta(days=today.weekday()))
 
     async def _check_positions(self) -> None:
         positions = await asyncio.to_thread(self._client.get_all_positions)

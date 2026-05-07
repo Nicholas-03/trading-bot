@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 import httpx
 from trading.tradier_client import TradierClient
+from trading.tradier_client import TradierOrder
 from config import Config
 from notifications.telegram_notifier import Notifier
 
@@ -174,13 +175,17 @@ class OrderExecutor:
         logger.warning("OTOCO %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
         return False, None
 
-    def daily_summary(self) -> tuple[int, int, float]:
+    def daily_summary(self, target_date: date | None = None) -> tuple[int, int, float]:
         """Return (buys, sells, realized_pnl) for today. Resets counters on day boundary."""
+        if self._db is not None and hasattr(self._db, "realized_summary_for_et_date"):
+            return self._db.realized_summary_for_et_date(target_date or date.today())
         self._maybe_reset_day()
         return self._daily_buys, self._daily_sells, self._daily_realized_pnl
 
-    def weekly_summary(self) -> tuple[int, int, float]:
+    def weekly_summary(self, week_monday: date | None = None) -> tuple[int, int, float]:
         """Return (buys, sells, realized_pnl) for the current ISO week."""
+        if self._db is not None and hasattr(self._db, "realized_summary_for_et_week"):
+            return self._db.realized_summary_for_et_week(week_monday or _monday_of(date.today()))
         self._maybe_reset_week()
         return self._weekly_buys, self._weekly_sells, self._weekly_realized_pnl
 
@@ -287,29 +292,187 @@ class OrderExecutor:
         pnl_usd: float | None,
         pnl_pct: float | None,
         exit_reason: str,
+        closed_at: str | None = None,
     ) -> None:
         if self._db is None or trade_id is None:
             return
         try:
-            closed_at = datetime.now(timezone.utc).isoformat()
             await asyncio.to_thread(
                 self._db.record_trade_close,
-                trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at,
+                trade_id,
+                exit_price,
+                pnl_usd,
+                pnl_pct,
+                exit_reason,
+                closed_at or datetime.now(timezone.utc).isoformat(),
             )
         except Exception as db_err:
             logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
 
+    @staticmethod
+    def _parse_tradier_dt(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    async def _find_recent_exit_fill(
+        self,
+        ticker: str,
+        opened_at: datetime | None,
+        long_position: bool = True,
+    ) -> TradierOrder | None:
+        """Return the latest filled broker exit order for ticker after opened_at."""
+        exit_sides = {"sell"} if long_position else {"buy_to_cover"}
+        try:
+            orders = await asyncio.to_thread(self._client.get_account_orders)
+        except Exception as e:
+            logger.warning("Could not fetch Tradier orders for %s close reconciliation: %s", ticker, e)
+            return None
+
+        candidates: list[tuple[datetime, TradierOrder]] = []
+        for order in orders:
+            if order.symbol != ticker or order.status != "filled" or order.side not in exit_sides:
+                continue
+            filled_at = self._parse_tradier_dt(order.filled_at)
+            if filled_at is None:
+                continue
+            if opened_at is not None and filled_at < opened_at:
+                continue
+            candidates.append((filled_at, order))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    async def _find_recent_entry_fill(
+        self,
+        ticker: str,
+        submitted_at: datetime,
+        long_position: bool = True,
+    ) -> TradierOrder | None:
+        """Return the latest filled broker entry order for ticker after submitted_at."""
+        entry_sides = {"buy"} if long_position else {"sell_short"}
+        try:
+            orders = await asyncio.to_thread(self._client.get_account_orders)
+        except Exception as e:
+            logger.warning("Could not fetch Tradier orders for %s entry reconciliation: %s", ticker, e)
+            return None
+
+        candidates: list[tuple[datetime, TradierOrder]] = []
+        for order in orders:
+            if order.symbol != ticker or order.status != "filled" or order.side not in entry_sides:
+                continue
+            filled_at = self._parse_tradier_dt(order.filled_at)
+            if filled_at is None:
+                continue
+            # Allow a small clock/order propagation cushion around submission time.
+            if filled_at < submitted_at - timedelta(minutes=2):
+                continue
+            candidates.append((filled_at, order))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]
+
+    async def _reconcile_fast_bracket_round_trip(
+        self,
+        ticker: str,
+        decision_id: int | None,
+        submitted_at: datetime,
+        fallback_qty: int,
+        fill_latency_sec: float | None,
+        hold_hours: int,
+    ) -> bool:
+        """Handle buy+bracket-exit sequences that complete between position polls."""
+        entry_fill = await self._find_recent_entry_fill(ticker, submitted_at, long_position=True)
+        if entry_fill is None or entry_fill.avg_fill_price is None:
+            return False
+        entry_time = self._parse_tradier_dt(entry_fill.filled_at)
+        exit_fill = await self._find_recent_exit_fill(ticker, entry_time, long_position=True)
+        if exit_fill is None or exit_fill.avg_fill_price is None:
+            return False
+
+        qty = int(abs(entry_fill.quantity or fallback_qty))
+        entry_price = entry_fill.avg_fill_price
+        exit_price = exit_fill.avg_fill_price
+        exit_reason = "stop_loss" if exit_fill.order_type == "stop" else (
+            "take_profit" if exit_fill.order_type == "limit" else "bracket_order"
+        )
+        pnl_usd = (exit_price - entry_price) * qty
+        pnl_pct = (exit_price - entry_price) / entry_price
+        trade_id: int | None = None
+
+        if self._db is not None:
+            try:
+                opened_at = entry_fill.filled_at or datetime.now(timezone.utc).isoformat()
+                trade_id = await asyncio.to_thread(
+                    self._db.record_trade_open,
+                    decision_id,
+                    ticker,
+                    "buy",
+                    qty,
+                    entry_price,
+                    opened_at,
+                    fill_latency_sec,
+                    hold_hours,
+                )
+                await self._record_close_safe(
+                    trade_id,
+                    ticker,
+                    exit_price,
+                    pnl_usd,
+                    pnl_pct,
+                    exit_reason,
+                    exit_fill.filled_at,
+                )
+            except Exception as db_err:
+                logger.warning("Failed to record fast bracket round trip for %s: %s", ticker, db_err)
+
+        self._position_book[ticker] = (entry_price, qty, trade_id)
+        self._pending_fill.discard(ticker)
+        self._bracket_orders.pop(ticker, None)
+        self._update_close_state(ticker, pnl_usd, exit_reason)
+
+        logger.info(
+            "FAST BRACKET ROUND TRIP for %s entry=$%.2f exit=$%.2f qty=%d pnl=%.2f reason=%s",
+            ticker, entry_price, exit_price, qty, pnl_usd, exit_reason,
+        )
+        await self._notifier.notify_buy(
+            ticker,
+            entry_price * qty,
+            "reconciled",
+            fill_price=entry_price,
+            fill_latency_sec=fill_latency_sec,
+        )
+        await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
+        return True
+
     async def handle_bracket_close(self, ticker: str, current_price: float | None) -> None:
         """Called by PositionMonitor when a long position disappears after an OTOCO bracket fired."""
         entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
+        opened_at = self._hold_opened_at.get(ticker)
         self._bracket_orders.pop(ticker, None)
 
         pnl_pct: float | None = None
         pnl_usd: float | None = None
         exit_price: float | None = current_price
         exit_reason = "bracket_order"
+        closed_at: str | None = None
 
-        if current_price and entry_price > 0 and qty_held > 0:
+        exit_fill = await self._find_recent_exit_fill(ticker, opened_at, long_position=True)
+        if exit_fill and exit_fill.avg_fill_price is not None:
+            exit_price = exit_fill.avg_fill_price
+            closed_at = exit_fill.filled_at
+            if exit_fill.order_type == "stop":
+                exit_reason = "stop_loss"
+            elif exit_fill.order_type == "limit":
+                exit_reason = "take_profit"
+            if entry_price > 0 and qty_held > 0:
+                pnl_pct = (exit_price - entry_price) / entry_price
+                pnl_usd = (exit_price - entry_price) * qty_held
+
+        if pnl_usd is None and current_price and entry_price > 0 and qty_held > 0:
             # Infer which bracket leg fired from price direction, then use the known
             # TP/SL levels for P&L — the live quote arrives up to ~30s after the fill
             # and does not reflect the actual bracket execution price.
@@ -325,7 +488,7 @@ class OrderExecutor:
             pnl_usd = (exit_price - entry_price) * qty_held
 
         self._update_close_state(ticker, pnl_usd, exit_reason)
-        await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+        await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at)
 
         pnl_str = f"{pnl_pct * 100:.2f}%" if pnl_pct is not None else "unknown"
         logger.info("BRACKET CLOSE for %s price=$%.2f pnl=%s reason=%s",
@@ -428,6 +591,7 @@ class OrderExecutor:
             order_id = await asyncio.to_thread(
                 self._client.submit_otoco_order, ticker, qty, tp_price, sl_price, entry_limit
             )
+            submitted_at_utc = datetime.now(timezone.utc)
             _submitted_at = time.monotonic()
             self._bracket_orders[ticker] = order_id
 
@@ -451,6 +615,16 @@ class OrderExecutor:
             else:
                 fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
+                reconciled = await self._reconcile_fast_bracket_round_trip(
+                    ticker,
+                    decision_id,
+                    submitted_at_utc,
+                    qty,
+                    fill_latency_sec,
+                    hold_hours,
+                )
+                if reconciled:
+                    return
                 # Synchronously clean up all tracked state before any awaits so the position monitor
                 # cannot observe a partially-rolled-back entry during cancel_order.
                 self._held_tickers.discard(ticker)
@@ -635,15 +809,15 @@ class OrderExecutor:
             await self._notifier.notify_error(f"sell {ticker}", str(e))
             return
 
-        # Order submitted — update state immediately to prevent re-sell attempts
-        self._update_close_state(ticker, pnl_usd, exit_reason)
+        # Order submitted; do not mark analytics closed until the broker confirms a fill.
+        self._pending_close.add(ticker)
         if exit_reason == "hold_hours":
             logger.info("TIMED EXIT SELL SUBMITTED: ticker=%s order_id=%s trade_id=%s", ticker, order_id, trade_id)
 
         filled, fill_price = await self._wait_for_fill(order_id)
         if not filled:
             logger.warning("SELL order %s for %s fill unconfirmed — skipping sell notification", order_id, ticker)
-            await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+            self._pending_close.discard(ticker)
             await self._notifier.notify_error(f"sell {ticker}", f"order {order_id} fill unconfirmed")
             return
 
@@ -657,6 +831,7 @@ class OrderExecutor:
             pnl_pct = (fill_price - entry_price) / entry_price
             exit_price = fill_price
 
+        self._update_close_state(ticker, pnl_usd, exit_reason)
         await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
         if exit_reason == "hold_hours":
             logger.info("TIMED EXIT CLOSED TRADE: ticker=%s trade_id=%s exit_price=%s pnl_pct=%s",

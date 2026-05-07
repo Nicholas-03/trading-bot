@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, AsyncMock
 import time
 import pytest
 from trading.order_executor import OrderExecutor, _monday_of
-from trading.tradier_client import TradierPosition
+from trading.tradier_client import TradierOrder, TradierPosition
 from config import Config
 
 
@@ -619,4 +619,69 @@ def test_handle_bracket_close_no_entry_price_skips_pnl():
     call_args = ex._notifier.notify_sell.call_args
     pnl_pct = call_args.args[1]
     assert pnl_pct is None
+
+
+def test_sell_unconfirmed_does_not_notify_or_close_db():
+    import asyncio
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._held_tickers.add("DD")
+    ex._position_book["DD"] = (48.87, 1, 123)
+    ex._client.get_quotes = MagicMock(return_value={"DD": 50.07})
+    ex._client.close_position = MagicMock(return_value="sell-1")
+    ex._wait_for_fill = AsyncMock(return_value=(False, None))
+
+    asyncio.run(ex.sell("DD", exit_reason="hold_hours"))
+
+    assert "DD" in ex.held_tickers
+    ex._db.record_trade_close.assert_not_called()
+    ex._notifier.notify_sell.assert_not_called()
+    ex._notifier.notify_error.assert_called_once()
+
+
+def test_buy_fast_bracket_round_trip_uses_tradier_fills():
+    import asyncio
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._db.record_trade_open.return_value = 42
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"ZTEK": (0.56, 0.50)})
+    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
+    ex._wait_for_position = AsyncMock(return_value=(False, None))
+    ex._client.cancel_order = MagicMock()
+    ex._client.get_account_orders = MagicMock(return_value=[
+        TradierOrder(
+            symbol="ZTEK",
+            side="buy",
+            status="filled",
+            order_type="limit",
+            avg_fill_price=0.51,
+            filled_at="2999-05-06T16:33:27.434Z",
+            quantity=89,
+        ),
+        TradierOrder(
+            symbol="ZTEK",
+            side="sell",
+            status="filled",
+            order_type="stop",
+            avg_fill_price=0.49,
+            filled_at="2999-05-06T16:33:27.513Z",
+            quantity=89,
+        ),
+    ])
+
+    asyncio.run(ex.buy("ZTEK", decision_id=4231, hold_hours=24))
+
+    ex._client.cancel_order.assert_not_called()
+    ex._notifier.notify_error.assert_not_called()
+    ex._notifier.notify_buy.assert_called_once()
+    ex._notifier.notify_sell.assert_called_once()
+    sell_args = ex._notifier.notify_sell.call_args.args
+    assert sell_args[0] == "ZTEK"
+    assert abs(sell_args[1] - ((0.49 - 0.51) / 0.51)) < 1e-9
+    assert abs(sell_args[2] - ((0.49 - 0.51) * 89)) < 1e-9
+    ex._db.record_trade_close.assert_called_once()
+    close_args = ex._db.record_trade_close.call_args.args
+    assert close_args[1] == 0.49
+    assert close_args[4] == "stop_loss"
 

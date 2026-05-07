@@ -2,8 +2,19 @@
 
 import logging
 import sqlite3
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_iso_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class TradeDB:
@@ -147,6 +158,52 @@ class TradeDB:
         )
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def realized_summary_for_et_date(self, target_date) -> tuple[int, int, float]:
+        """Return successful entries, realized exits, and realized P&L for one ET date."""
+        et = ZoneInfo("America/New_York")
+        rows = self._conn.execute(
+            "SELECT opened_at, closed_at, pnl_usd FROM trades"
+        ).fetchall()
+        buys = 0
+        sells = 0
+        pnl = 0.0
+        for opened_at_raw, closed_at_raw, pnl_usd in rows:
+            opened_at = _parse_iso_dt(opened_at_raw)
+            if opened_at is not None and opened_at.astimezone(et).date() == target_date:
+                buys += 1
+            closed_at = _parse_iso_dt(closed_at_raw)
+            if (
+                closed_at is not None
+                and closed_at.astimezone(et).date() == target_date
+                and pnl_usd is not None
+            ):
+                sells += 1
+                pnl += float(pnl_usd)
+        return buys, sells, pnl
+
+    def realized_summary_for_et_week(self, week_monday) -> tuple[int, int, float]:
+        """Return successful entries, realized exits, and realized P&L for one ET week."""
+        et = ZoneInfo("America/New_York")
+        rows = self._conn.execute(
+            "SELECT opened_at, closed_at, pnl_usd FROM trades"
+        ).fetchall()
+        buys = 0
+        sells = 0
+        pnl = 0.0
+        for opened_at_raw, closed_at_raw, pnl_usd in rows:
+            opened_at = _parse_iso_dt(opened_at_raw)
+            if opened_at is not None:
+                opened_day = opened_at.astimezone(et).date()
+                if opened_day - timedelta(days=opened_day.weekday()) == week_monday:
+                    buys += 1
+            closed_at = _parse_iso_dt(closed_at_raw)
+            if closed_at is not None and pnl_usd is not None:
+                closed_day = closed_at.astimezone(et).date()
+                if closed_day - timedelta(days=closed_day.weekday()) == week_monday:
+                    sells += 1
+                    pnl += float(pnl_usd)
+        return buys, sells, pnl
 
     def close(self) -> None:
         self._conn.close()

@@ -27,6 +27,7 @@ class TradierOrder:
     order_type: str  # market | limit | stop | stop_limit
     avg_fill_price: float | None
     filled_at: str | None  # ISO timestamp from transaction_date, None if not filled
+    quantity: float | None = None
 
 
 class TradierClient:
@@ -322,6 +323,7 @@ def _flatten_order(o: dict) -> list[TradierOrder]:
     order_type = str(o.get("type") or "")
     avg_fill = o.get("avg_fill_price")
     avg_fill_price = float(avg_fill) if avg_fill else None
+    quantity = o.get("quantity")
     filled_at = o.get("transaction_date") or o.get("last_fill_date")
     if symbol and side and status:
         orders.append(TradierOrder(
@@ -331,6 +333,7 @@ def _flatten_order(o: dict) -> list[TradierOrder]:
             order_type=order_type,
             avg_fill_price=avg_fill_price,
             filled_at=str(filled_at) if filled_at else None,
+            quantity=float(quantity) if quantity else None,
         ))
     legs = o.get("leg")
     if legs:

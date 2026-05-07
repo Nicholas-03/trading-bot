@@ -4,6 +4,8 @@ import html
 import json
 import os
 import sqlite3
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import plotly.graph_objects as go
 import plotly.utils
@@ -12,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from analytics.db import TradeDB
 
-DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades_railway.db")
+DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades.db")
 
 app = FastAPI()
 
@@ -60,7 +62,7 @@ _CSS = """
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  --bg:      #f9fafb;
+  --bg:      #f6f7f9;
   --surface: #ffffff;
   --border:  #e5e7eb;
   --text:    #111827;
@@ -68,8 +70,10 @@ _CSS = """
   --pos:     #16a34a;
   --neg:     #dc2626;
   --accent:  #2563eb;
+  --accent-soft: #eff6ff;
+  --ink-soft: #475569;
   --radius:  8px;
-  --shadow:  0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.04);
+  --shadow:  0 12px 28px rgba(15,23,42,.06), 0 2px 6px rgba(15,23,42,.05);
 }
 
 body {
@@ -96,14 +100,14 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .page-header h1 {
-  font-size: 22px;
+  font-size: 26px;
   font-weight: 700;
   color: var(--text);
-  letter-spacing: -0.3px;
 }
 .page-header .subtitle {
   font-size: 13px;
   color: var(--muted);
+  font-weight: 500;
 }
 
 /* ── Section headings ── */
@@ -129,6 +133,7 @@ body {
   border-radius: var(--radius);
   padding: 16px 18px;
   box-shadow: var(--shadow);
+  min-height: 96px;
 }
 .stat-card .label {
   font-size: 11px;
@@ -139,10 +144,10 @@ body {
   margin-bottom: 6px;
 }
 .stat-card .value {
-  font-size: 26px;
+  font-size: 25px;
   font-weight: 700;
   color: var(--text);
-  letter-spacing: -0.5px;
+  line-height: 1.15;
 }
 .stat-card .value.pos { color: var(--pos); }
 .stat-card .value.neg { color: var(--neg); }
@@ -199,6 +204,7 @@ body {
   background: var(--accent);
   color: #fff;
   border-color: var(--accent);
+  box-shadow: 0 6px 14px rgba(37,99,235,.18);
 }
 
 /* ── Table ── */
@@ -207,11 +213,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 table {
   border-collapse: collapse;
   width: 100%;
+  min-width: 940px;
   font-size: 13px;
 }
 thead th {
@@ -231,6 +239,7 @@ tbody tr.trade-row {
   transition: background .1s;
 }
 tbody tr.trade-row:hover { background: #f9fafb; }
+tbody tr.trade-row[style*="display: none"] + tr.detail-row { display: none; }
 tbody tr.trade-row:last-child { border-bottom: none; }
 tbody td {
   padding: 10px 14px;
@@ -355,6 +364,26 @@ tr.detail-row td {
   color: #374151;
   line-height: 1.5;
 }
+
+@media (max-width: 720px) {
+  .page { padding: 24px 14px 48px; }
+  .page-header {
+    display: block;
+    margin-bottom: 24px;
+  }
+  .page-header .subtitle {
+    display: block;
+    margin-top: 4px;
+  }
+  .stats-bar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .charts-grid { grid-template-columns: 1fr; }
+  .chart-card { padding: 12px; }
+  .filter-group + .filter-group {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+}
 """
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -372,6 +401,19 @@ def _fig_json(fig: go.Figure) -> dict:
 def _apply_theme(fig: go.Figure, height: int = 300) -> go.Figure:
     fig.update_layout(**_PLOTLY_LAYOUT, height=height)
     return fig
+
+
+def _display_text(value: str | None) -> str:
+    return html.unescape(value or "")
+
+
+def _parse_iso_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _action_badge(action: str) -> str:
@@ -419,7 +461,7 @@ def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     ).fetchall()
 
     return {
-        "headline": headline_row["headline"] if headline_row else None,
+        "headline": _display_text(headline_row["headline"]) if headline_row else None,
         "ts": headline_row["ts"] if headline_row else None,
         "decisions": [dict(d) for d in decision_rows],
     }
@@ -447,9 +489,31 @@ def _query_stats(con: sqlite3.Connection) -> dict:
         "WHERE closed_at IS NOT NULL AND pnl_usd IS NOT NULL "
         "ORDER BY pnl_usd ASC LIMIT 1"
     ).fetchone()
+    events = con.execute("SELECT COUNT(*) AS total FROM news_events").fetchone()["total"] or 0
+    decisions = con.execute("SELECT COUNT(*) AS total FROM llm_decisions").fetchone()["total"] or 0
+    open_trades = con.execute(
+        "SELECT COUNT(*) AS total FROM trades WHERE closed_at IS NULL"
+    ).fetchone()["total"] or 0
+    total_trades = con.execute("SELECT COUNT(*) AS total FROM trades").fetchone()["total"] or 0
+    et = ZoneInfo("America/New_York")
+    today_et = datetime.now(et).date()
+    closed_rows = con.execute(
+        "SELECT closed_at FROM trades WHERE closed_at IS NOT NULL AND pnl_usd IS NOT NULL"
+    ).fetchall()
+    realized_today_et = sum(
+        1
+        for r in closed_rows
+        if (closed_at := _parse_iso_dt(r["closed_at"])) is not None
+        and closed_at.astimezone(et).date() == today_et
+    )
 
     return {
+        "events": events,
+        "decisions": decisions,
+        "total_trades": total_trades,
         "total": total,
+        "open_trades": open_trades,
+        "realized_today_et": realized_today_et,
         "win_rate": win_rate,
         "total_pnl": total_pnl,
         "best": (best["ticker"], best["pnl_usd"]) if best else None,
@@ -528,6 +592,42 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     ))
     _apply_theme(fig_actions, height=260)
     fig_actions.update_layout(title="LLM Decision Counts", xaxis_title="Action", yaxis_title="Count")
+
+    # 6b: Decision mix over time
+    mix_rows = con.execute(
+        "SELECT date(ts) AS day, lower(action) AS action, COUNT(*) AS cnt "
+        "FROM llm_decisions WHERE ts IS NOT NULL "
+        "GROUP BY day, lower(action) ORDER BY day"
+    ).fetchall()
+    mix_days = sorted({r["day"] for r in mix_rows})
+    mix_actions = ["buy", "short", "sell", "hold"]
+    mix_colors = {
+        "buy": "#2563eb",
+        "short": "#f59e0b",
+        "sell": "#be185d",
+        "hold": "#94a3b8",
+    }
+    fig_mix = go.Figure()
+    for action in mix_actions:
+        values = [
+            sum(r["cnt"] for r in mix_rows if r["day"] == day and r["action"] == action)
+            for day in mix_days
+        ]
+        if any(values):
+            fig_mix.add_trace(go.Bar(
+                x=mix_days,
+                y=values,
+                name=action,
+                marker_color=mix_colors[action],
+            ))
+    _apply_theme(fig_mix, height=280)
+    fig_mix.update_layout(
+        title="Decision Mix Over Time",
+        xaxis_title="Date",
+        yaxis_title="LLM decisions",
+        barmode="stack",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
 
     # 7: Win rate by ticker (≥2 closed trades)
     wr_rows = con.execute(
@@ -613,7 +713,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "        (SELECT MIN(id) FROM llm_decisions WHERE news_event_id = n.id)"
         "    ) "
         "LEFT JOIN trades t ON t.decision_id = d.id "
-        "ORDER BY n.ts DESC LIMIT 500"
+        "ORDER BY n.ts DESC"
     ).fetchall()
 
     # 11: Provider response latency
@@ -670,6 +770,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "dist":             _fig_json(fig_dist),
         "duration":         _fig_json(fig_dur),
         "actions":          _fig_json(fig_actions),
+        "decision_mix":     _fig_json(fig_mix),
         "win_rate":         _fig_json(fig_wr),
         "pnl_hour":         _fig_json(fig_hour),
         "conf_outcome":     _fig_json(fig_conf),
@@ -698,12 +799,19 @@ def _render_stats_bar(stats: dict) -> str:
     pnl_sign = "+" if stats["total_pnl"] >= 0 else ""
     best_str = f"{stats['best'][0]} {stats['best'][1]:+.2f}" if stats["best"] else "—"
     worst_str = f"{stats['worst'][0]} {stats['worst'][1]:+.2f}" if stats["worst"] else "—"
+    best_cls = "pos" if stats["best"] and stats["best"][1] >= 0 else ("neg" if stats["best"] else "")
+    worst_cls = "pos" if stats["worst"] and stats["worst"][1] >= 0 else ("neg" if stats["worst"] else "")
     cards = [
+        ("News Events",    f"{stats['events']:,}",                  ""),
+        ("LLM Calls",      f"{stats['decisions']:,}",               ""),
+        ("Total Trades",   str(stats["total_trades"]),                ""),
         ("Closed Trades",  str(stats["total"]),                       ""),
+        ("Open Trades",    str(stats["open_trades"]),                 ""),
+        ("Realized Today ET", str(stats["realized_today_et"]),         ""),
         ("Win Rate",       f"{stats['win_rate']:.1f}%",               ""),
         ("Total P&amp;L",  f"{pnl_sign}{stats['total_pnl']:.2f}",     pnl_cls),
-        ("Best Trade",     html.escape(best_str),                     "pos"),
-        ("Worst Trade",    html.escape(worst_str),                    "neg"),
+        ("Best Trade",     html.escape(best_str),                     best_cls),
+        ("Worst Trade",    html.escape(worst_str),                    worst_cls),
     ]
     items = "".join(
         f'<div class="stat-card">'
@@ -723,6 +831,7 @@ _CHART_LAYOUT: list[tuple[str, bool]] = [
     ("dist",             False),
     ("duration",         False),
     ("actions",          False),
+    ("decision_mix",     True),
     ("agreement_rate",   False),
     ("provider_latency", False),
     ("total_cost",       False),
@@ -763,7 +872,7 @@ def _render_table_rows(recent: list[dict]) -> str:
     for r in recent:
         pnl_usd_td = _pnl_td(r["pnl_usd"], ".2f")
         pnl_pct_td = _pnl_td(r["pnl_pct"], ".1f", pct=True)
-        headline = html.escape((r["headline"] or "")[:72])
+        headline = html.escape(_display_text(r["headline"])[:72])
         ts = html.escape((r["ts"] or "")[:16])
         action = r["action"] or "hold"
         ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
@@ -794,6 +903,7 @@ def index() -> HTMLResponse:
     stats_bar = _render_stats_bar(stats)
     charts_html = _render_charts(charts)
     table_rows = _render_table_rows(recent)
+    loaded_events = f"{len(recent):,} events loaded"
 
     content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -809,7 +919,7 @@ def index() -> HTMLResponse:
 
   <header class="page-header">
     <h1>Trading Analytics</h1>
-    <span class="subtitle">Live · last 500 events</span>
+    <span class="subtitle">Live · {loaded_events}</span>
   </header>
 
   <p class="section-title">Overview</p>
@@ -818,7 +928,7 @@ def index() -> HTMLResponse:
   <p class="section-title">Charts</p>
   {charts_html}
 
-  <p class="section-title">Recent Trades</p>
+  <p class="section-title">Recent Decisions</p>
 
   <div class="filters">
     <div class="filter-group">
