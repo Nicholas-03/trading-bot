@@ -964,7 +964,7 @@ def get_decision(decision_id: int):
 if __name__ == "__main__":
     uvicorn.run(
         "analytics.server:app",
-        host=os.getenv("HOST", "0.0.0.0"),
+        host=os.getenv("HOST", "localhost"),
         port=int(os.getenv("PORT", "8080")),
         reload=False,
     )

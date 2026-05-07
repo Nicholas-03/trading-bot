@@ -173,8 +173,19 @@ class TelegramCommandListener:
         "/help — show this message"
     )
 
+    def _is_authorized_message(self, message: dict) -> bool:
+        chat = message.get("chat")
+        if not isinstance(chat, dict):
+            return False
+        return str(chat.get("id")) == str(self._chat_id)
+
     async def _handle_update(self, update: dict) -> None:
         message = update.get("message", {})
+        if not self._is_authorized_message(message):
+            chat_id = message.get("chat", {}).get("id") if isinstance(message.get("chat"), dict) else None
+            logger.warning("Ignoring Telegram command from unauthorized chat_id=%s", chat_id)
+            return
+
         text = message.get("text", "").strip()
 
         if self._awaiting_sellall_confirm:

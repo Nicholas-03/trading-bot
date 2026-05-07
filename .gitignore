@@ -19,9 +19,11 @@ build/
 *.egg
 .eggs/
 .claude
+.codex/
 TODO
 docs
 superpowers
+AGENTS.md
 data/trades.db
 CLAUDE.md
 data/*

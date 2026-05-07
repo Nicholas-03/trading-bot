@@ -1,7 +1,29 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, patch
-from notifications.telegram_notifier import TelegramNotifier, NoOpNotifier
+from notifications.telegram_notifier import TelegramCommandListener, TelegramNotifier, NoOpNotifier
+
+
+class _FakeExecutor:
+    def __init__(self) -> None:
+        self.trading_paused = False
+        self.held_tickers = frozenset({"AAPL"})
+        self.shorted_tickers = frozenset()
+        self.sell = AsyncMock()
+
+
+def _listener(chat_id: str = "123") -> TelegramCommandListener:
+    listener = TelegramCommandListener.__new__(TelegramCommandListener)
+    listener._chat_id = chat_id
+    listener._order_executor = _FakeExecutor()
+    listener._awaiting_sellall_confirm = False
+    listener._reply = AsyncMock()
+    listener._send_status = AsyncMock()
+    return listener
+
+
+def _update(text: str, chat_id: int | str) -> dict:
+    return {"message": {"text": text, "chat": {"id": chat_id}}}
 
 
 # --- NoOpNotifier ---
@@ -98,3 +120,34 @@ def test_send_failure_does_not_raise():
     n._client.post = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     # Should not raise
     asyncio.run(n._send("hello"))
+
+
+# --- TelegramCommandListener authorization ---
+
+def test_command_listener_accepts_configured_chat():
+    listener = _listener(chat_id="123")
+
+    asyncio.run(listener._handle_update(_update("/off", 123)))
+
+    assert listener._order_executor.trading_paused is True
+    listener._reply.assert_awaited_once()
+
+
+def test_command_listener_ignores_wrong_chat():
+    listener = _listener(chat_id="123")
+
+    asyncio.run(listener._handle_update(_update("/off", 999)))
+
+    assert listener._order_executor.trading_paused is False
+    listener._reply.assert_not_awaited()
+
+
+def test_command_listener_ignores_wrong_chat_confirmation():
+    listener = _listener(chat_id="123")
+    listener._awaiting_sellall_confirm = True
+
+    asyncio.run(listener._handle_update(_update("/confirm", 999)))
+
+    assert listener._awaiting_sellall_confirm is True
+    listener._order_executor.sell.assert_not_awaited()
+    listener._reply.assert_not_awaited()
