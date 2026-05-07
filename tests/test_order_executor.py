@@ -231,6 +231,18 @@ def test_buy_rolls_back_state_on_unconfirmed_fill():
     assert buys == 0
 
 
+def test_buy_exception_records_skip_reason():
+    import asyncio
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._client.get_buying_power = MagicMock(side_effect=RuntimeError("broker down"))
+
+    asyncio.run(ex.buy("AAPL", decision_id=77))
+
+    ex._db.record_skip.assert_called_once_with(77, "buy_exception")
+    ex._notifier.notify_error.assert_called_once()
+
+
 # --- short rollback on unconfirmed fill ---
 
 def test_short_rolls_back_state_on_unconfirmed_fill():
@@ -307,6 +319,27 @@ def test_buy_without_decision_monotonic_uses_submission_time():
     # Should be close to zero (no delay between submission and fill in this mock)
     assert fill_latency_sec is not None
     assert fill_latency_sec < 0.1
+
+
+def test_buy_records_bracket_order_id_in_db():
+    import asyncio
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._db.record_trade_open.return_value = 321
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (50.0, 49.0)})
+    ex._client.submit_otoco_order = MagicMock(return_value="otoco-321")
+    ex._client.get_order = MagicMock(return_value=("filled", 50.0))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=2.0, cost_basis=100.0)
+    ])
+
+    asyncio.run(ex.buy("AAPL", decision_id=7))
+
+    args = ex._db.record_trade_open.call_args.args
+    assert args[0] == 7
+    assert args[1] == "AAPL"
+    assert args[8] == "otoco-321"
 
 
 def test_short_with_decision_monotonic_calculates_correct_latency():
@@ -619,6 +652,96 @@ def test_handle_bracket_close_no_entry_price_skips_pnl():
     call_args = ex._notifier.notify_sell.call_args
     pnl_pct = call_args.args[1]
     assert pnl_pct is None
+
+
+def test_handle_bracket_close_writes_db_fields_from_exit_fill():
+    import asyncio
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._held_tickers.add("AAPL")
+    ex._position_book["AAPL"] = (100.0, 5, 123)
+    ex._hold_opened_at["AAPL"] = ex._parse_tradier_dt("2026-05-01T14:00:00Z")
+    ex._client.get_account_orders = MagicMock(return_value=[
+        TradierOrder(
+            symbol="AAPL",
+            side="sell",
+            status="filled",
+            order_type="limit",
+            avg_fill_price=103.0,
+            filled_at="2026-05-01T15:00:00Z",
+            quantity=5,
+        )
+    ])
+
+    asyncio.run(ex.handle_bracket_close("AAPL", 104.0))
+
+    ex._db.record_trade_close.assert_called_once_with(
+        123, 103.0, 15.0, 0.03, "take_profit", "2026-05-01T15:00:00Z"
+    )
+
+
+def test_seed_from_db_restores_expired_hold_window_after_restart():
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex.seed_from_db([
+        {
+            "id": 123,
+            "ticker": "AAPL",
+            "side": "buy",
+            "qty": 1,
+            "entry_price": 100.0,
+            "hold_hours": 1,
+            "opened_at": "2000-01-01T00:00:00Z",
+        }
+    ])
+
+    assert "AAPL" in ex.expired_hold_tickers()
+    assert "AAPL" in ex._hold_opened_at
+
+
+def test_seed_from_db_restores_bracket_order_id_after_restart():
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex.seed_from_db([
+        {
+            "id": 123,
+            "ticker": "AAPL",
+            "side": "buy",
+            "qty": 1,
+            "entry_price": 100.0,
+            "hold_hours": 0,
+            "opened_at": "2026-05-01T00:00:00Z",
+            "bracket_order_id": "otoco-123",
+        }
+    ])
+
+    assert ex._bracket_orders["AAPL"] == "otoco-123"
+
+
+def test_sell_does_not_submit_duplicate_when_market_close_pending():
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("DD")
+    ex._position_book["DD"] = (48.87, 1, 123)
+    ex._client.get_account_orders = MagicMock(return_value=[
+        TradierOrder(
+            symbol="DD",
+            side="sell",
+            status="pending",
+            order_type="market",
+            avg_fill_price=None,
+            filled_at=None,
+            quantity=1,
+            order_id="sell-1",
+        )
+    ])
+    ex._client.close_position = MagicMock(return_value="sell-2")
+
+    asyncio.run(ex.sell("DD", exit_reason="hold_hours"))
+
+    ex._client.close_position.assert_not_called()
+    assert "DD" in ex.pending_close
+    ex._notifier.notify_error.assert_called_once()
 
 
 def test_sell_unconfirmed_does_not_notify_or_close_db():

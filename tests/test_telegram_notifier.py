@@ -1,7 +1,8 @@
 import asyncio
+import inspect
 import pytest
 from unittest.mock import AsyncMock, patch
-from notifications.telegram_notifier import TelegramCommandListener, TelegramNotifier, NoOpNotifier
+from notifications.telegram_notifier import TelegramCommandListener, TelegramLogHandler, TelegramNotifier, NoOpNotifier
 
 
 class _FakeExecutor:
@@ -35,6 +36,22 @@ def test_noop_notifier_does_nothing():
     asyncio.run(notifier.notify_sell("AAPL"))
     asyncio.run(notifier.notify_short("AAPL", 1, "order-2"))
     asyncio.run(notifier.notify_error("buy AAPL", "some error"))
+    asyncio.run(notifier.notify_eod_report(1, 2, 3.0))
+    asyncio.run(notifier.notify_weekly_report(1, 2, 3.0))
+    asyncio.run(notifier.aclose())
+
+
+def test_notifier_method_signatures_match_noop():
+    for name in (
+        "notify_buy",
+        "notify_sell",
+        "notify_short",
+        "notify_error",
+        "notify_eod_report",
+        "notify_weekly_report",
+        "aclose",
+    ):
+        assert inspect.signature(getattr(TelegramNotifier, name)) == inspect.signature(getattr(NoOpNotifier, name))
 
 
 # --- TelegramNotifier message formatting ---
@@ -120,6 +137,29 @@ def test_send_failure_does_not_raise():
     n._client.post = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
     # Should not raise
     asyncio.run(n._send("hello"))
+
+
+def test_log_handler_caps_pending_tasks():
+    async def run_case():
+        loop = asyncio.get_running_loop()
+        handler = TelegramLogHandler("tok", "123", loop, max_pending=1)
+        handler._send = AsyncMock()
+        handler._pending.add(asyncio.Future())
+        record = logging_record("boom")
+
+        handler.emit(record)
+
+        handler._send.assert_not_called()
+        for fut in list(handler._pending):
+            fut.cancel()
+        await handler.aclose()
+
+    asyncio.run(run_case())
+
+
+def logging_record(message: str):
+    import logging
+    return logging.LogRecord("test", logging.ERROR, __file__, 1, message, (), None)
 
 
 # --- TelegramCommandListener authorization ---

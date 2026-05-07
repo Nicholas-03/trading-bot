@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from datetime import date
 from analytics.db import TradeDB
@@ -49,6 +51,20 @@ def test_record_trade_open_with_decision(db):
     assert abs(row[4] - 150.0) < 0.001
     assert row[5] is None
     assert abs(row[6] - 4.2) < 0.001
+
+
+def test_record_trade_open_stores_bracket_order_id(db):
+    tid = db.record_trade_open(
+        None,
+        "AAPL",
+        "buy",
+        1,
+        100.0,
+        "2026-01-01T00:00:00Z",
+        bracket_order_id="otoco-123",
+    )
+    row = db._conn.execute("SELECT bracket_order_id FROM trades WHERE id=?", (tid,)).fetchone()
+    assert row[0] == "otoco-123"
 
 
 def test_record_trade_open_without_decision(db):
@@ -123,6 +139,16 @@ def test_record_decision_stores_cost_usd(db):
     assert abs(row[0] - 0.0035) < 1e-9
 
 
+def test_record_decision_stores_primary_marker(db):
+    nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
+    did = db.record_decision(
+        nid, "2026-01-01T00:00:01Z", "buy", "AAPL", "reason",
+        provider="chatgpt", is_primary=True,
+    )
+    row = db._conn.execute("SELECT is_primary FROM llm_decisions WHERE id=?", (did,)).fetchone()
+    assert row[0] == 1
+
+
 def test_record_decision_cost_defaults_to_none(db):
     nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
     did = db.record_decision(nid, "2026-01-01T00:00:01Z", "hold", None, "reason")
@@ -146,3 +172,34 @@ def test_realized_summary_for_et_date_counts_real_fills_only(db):
     assert buys == 3
     assert sells == 2
     assert abs(pnl - (-4.02)) < 1e-9
+
+
+def test_record_skip_returns_false_for_missing_decision(db):
+    assert db.record_skip(999, "buy_exception") is False
+
+
+def test_record_trade_close_does_not_overwrite_closed_trade(db):
+    tid = db.record_trade_open(None, "AAPL", "buy", 1, 100.0, "2026-01-01T00:00:00Z")
+    assert db.record_trade_close(tid, 103.0, 3.0, 0.03, "take_profit", "2026-01-01T01:00:00Z")
+    assert not db.record_trade_close(tid, 98.0, -2.0, -0.02, "stop_loss", "2026-01-01T02:00:00Z")
+    row = db._conn.execute(
+        "SELECT exit_price, pnl_usd, pnl_pct, exit_reason, closed_at FROM trades WHERE id=?",
+        (tid,),
+    ).fetchone()
+    assert row[0] == 103.0
+    assert row[1] == 3.0
+    assert row[2] == 0.03
+    assert row[3] == "take_profit"
+    assert row[4] == "2026-01-01T01:00:00Z"
+
+
+def test_db_serializes_concurrent_writes(db):
+    def write_one(i: int) -> int:
+        return db.record_news(f"2026-01-01T00:00:{i:02d}Z", f"headline {i}", None, ["AAPL"])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(write_one, range(20)))
+
+    count = db._conn.execute("SELECT COUNT(*) FROM news_events").fetchone()[0]
+    assert len(set(ids)) == 20
+    assert count == 20

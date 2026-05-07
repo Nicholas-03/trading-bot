@@ -21,6 +21,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _parse_iso_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _make_tradier_client(config: Config) -> TradierClient:
     return TradierClient(
         access_token=config.tradier_access_token,
@@ -64,7 +73,9 @@ def _reconcile_stale_trades(
         trade_id = t["id"]
         entry_price = float(t.get("entry_price") or 0.0)
         qty = int(t.get("qty") or 0)
-        close_side = "buy_to_cover" if t.get("side") == "short" else "sell"
+        is_short = t.get("side") == "short"
+        close_side = "buy_to_cover" if is_short else "sell"
+        opened_at = _parse_iso_dt(t.get("opened_at"))
 
         fills = [
             o for o in orders
@@ -72,6 +83,11 @@ def _reconcile_stale_trades(
             and o.side == close_side
             and o.status == "filled"
             and o.avg_fill_price is not None
+            and (
+                opened_at is None
+                or (fill_dt := _parse_iso_dt(o.filled_at)) is None
+                or fill_dt >= opened_at
+            )
         ]
         fills.sort(key=lambda o: o.filled_at or "", reverse=True)
 
@@ -85,8 +101,13 @@ def _reconcile_stale_trades(
             else:
                 exit_reason = "bracket_order"
             closed_at = best.filled_at or now
-            pnl_usd = (exit_price - entry_price) * qty if entry_price and qty else None
-            pnl_pct = (exit_price - entry_price) / entry_price if entry_price else None
+            if entry_price and qty:
+                price_delta = entry_price - exit_price if is_short else exit_price - entry_price
+                pnl_usd = price_delta * qty
+                pnl_pct = price_delta / entry_price
+            else:
+                pnl_usd = None
+                pnl_pct = None
             logger.info(
                 "Reconciled %s (trade_id=%s): exit=$%.4f reason=%s closed_at=%s",
                 ticker, trade_id, exit_price, exit_reason, closed_at,

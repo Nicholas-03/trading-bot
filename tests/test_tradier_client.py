@@ -1,6 +1,16 @@
 # tests/test_tradier_client.py
+import httpx
 import pytest
-from trading.tradier_client import _parse_positions, _parse_quotes, _parse_buying_power, _parse_order_status, _parse_quotes_with_open, TradierPosition
+from trading.tradier_client import (
+    TradierClient,
+    TradierPosition,
+    _parse_account_orders,
+    _parse_buying_power,
+    _parse_order_status,
+    _parse_positions,
+    _parse_quotes,
+    _parse_quotes_with_open,
+)
 
 
 def test_parse_positions_null_string():
@@ -75,6 +85,14 @@ def test_parse_quotes_missing_key():
     assert _parse_quotes({}) == {}
 
 
+def test_parse_quotes_null_string():
+    assert _parse_quotes({"quotes": "null"}) == {}
+
+
+def test_parse_quotes_skips_string_null_last():
+    assert _parse_quotes({"quotes": {"quote": {"symbol": "AAPL", "last": "null"}}}) == {}
+
+
 def test_parse_buying_power_margin():
     data = {"balances": {"margin": {"buying_power": 5000.0}}}
     assert _parse_buying_power(data) == 5000.0
@@ -127,6 +145,13 @@ def test_parse_order_status_pending_no_price():
     assert price is None
 
 
+def test_parse_order_status_zero_fill_price_is_none():
+    data = {"order": {"status": "filled", "avg_fill_price": "0"}}
+    status, price = _parse_order_status(data)
+    assert status == "filled"
+    assert price is None
+
+
 def test_parse_order_status_rejected():
     data = {"order": {"status": "rejected"}}
     status, price = _parse_order_status(data)
@@ -171,3 +196,68 @@ def test_parse_quotes_with_open_empty():
 def test_parse_quotes_with_open_null_last_excluded():
     data = {"quotes": {"quote": {"symbol": "AAPL", "last": None, "open": 170.0}}}
     assert _parse_quotes_with_open(data) == {}
+
+
+def test_parse_account_orders_flattens_nested_otoco_legs():
+    data = {
+        "orders": {
+            "order": {
+                "symbol": "AAPL",
+                "side": "buy",
+                "status": "filled",
+                "type": "market",
+                "avg_fill_price": "100.00",
+                "quantity": "2",
+                "transaction_date": "2026-05-01T14:00:00Z",
+                "leg": [
+                    {
+                        "symbol": "AAPL",
+                        "side": "sell",
+                        "status": "open",
+                        "type": "limit",
+                        "avg_fill_price": None,
+                        "quantity": "2",
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "side": "sell",
+                        "status": "filled",
+                        "type": "stop",
+                        "avg_fill_price": "98.00",
+                        "quantity": "2",
+                        "transaction_date": "2026-05-01T15:00:00Z",
+                    },
+                ],
+            }
+        }
+    }
+
+    orders = _parse_account_orders(data)
+
+    assert [(o.side, o.status, o.order_type, o.avg_fill_price) for o in orders] == [
+        ("buy", "filled", "market", 100.0),
+        ("sell", "open", "limit", None),
+        ("sell", "filled", "stop", 98.0),
+    ]
+
+
+def test_request_retries_429_with_retry_after_zero():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    client = TradierClient("token", "acct")
+    client._http.close()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test")
+    try:
+        resp = client._request("GET", "/anything")
+    finally:
+        client.close()
+
+    assert resp.status_code == 200
+    assert calls == 2

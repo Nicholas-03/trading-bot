@@ -286,15 +286,19 @@ class TelegramCommandListener:
 class TelegramLogHandler(logging.Handler):
     """Logging handler that forwards ERROR+ records to a Telegram chat."""
 
-    def __init__(self, token: str, chat_id: str, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, token: str, chat_id: str, loop: asyncio.AbstractEventLoop, max_pending: int = 100) -> None:
         super().__init__(level=logging.ERROR)
         self._token = token
         self._chat_id = chat_id
         self._loop = loop
         self._client = httpx.AsyncClient(timeout=10.0)
+        self._max_pending = max_pending
+        self._pending: set[asyncio.Future] = set()
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            if self._loop.is_closed() or len(self._pending) >= self._max_pending:
+                return
             parts = [f"🚨 {record.levelname} [{record.name}]", record.getMessage()]
             if record.exc_info and record.exc_info[0]:
                 exc_val = str(record.exc_info[1]) if record.exc_info[1] else ""
@@ -303,7 +307,9 @@ class TelegramLogHandler(logging.Handler):
                     exc_line += f": {exc_val}"
                 parts.append(exc_line)
             text = "\n".join(parts)
-            asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._send(text), self._loop)
+            self._pending.add(future)
+            future.add_done_callback(self._pending.discard)
         except Exception:
             self.handleError(record)
 
@@ -317,6 +323,11 @@ class TelegramLogHandler(logging.Handler):
             pass  # never log from inside a log handler
 
     async def aclose(self) -> None:
+        if self._pending:
+            await asyncio.wait(
+                [asyncio.wrap_future(f) for f in list(self._pending)],
+                timeout=2.0,
+            )
         await self._client.aclose()
 
 

@@ -146,6 +146,7 @@ class NewsHandler:
                                 pr.decision.action, pr.decision.ticker, pr.decision.reasoning,
                                 pr.decision.confidence, pr.decision.hold_hours,
                                 pr.provider, pr.latency_sec, pr.cost_usd,
+                                pr.provider == result.primary_provider,
                             )
                             if pr.provider == result.primary_provider:
                                 decision_id = row_id
@@ -154,6 +155,7 @@ class NewsHandler:
                             self._db.record_decision,
                             news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
                             decision.confidence, decision.hold_hours,
+                            None, None, None, True,
                         )
                 except Exception as db_err:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)

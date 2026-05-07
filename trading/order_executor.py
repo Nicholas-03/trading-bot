@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _FILL_TIMEOUT = 60.0
 _FILL_POLL = 3.0
+_PENDING_CLOSE_STATUSES = {"open", "pending", "accepted", "queued", "partially_filled"}
 
 
 def _monday_of(d: date) -> date:
@@ -256,19 +257,24 @@ class OrderExecutor:
             entry_price = float(t.get("entry_price") or 0.0)
             qty = int(t.get("qty") or 0)
             self._position_book[ticker] = (entry_price, qty, trade_id)
+            bracket_order_id = t.get("bracket_order_id")
+            if bracket_order_id and t.get("side") == "buy":
+                self._bracket_orders[ticker] = str(bracket_order_id)
 
             hold_hours = int(t.get("hold_hours") or 0)
+            opened_at: datetime | None = None
+            opened_at_str = t.get("opened_at")
+            if opened_at_str:
+                try:
+                    opened_at = datetime.fromisoformat(opened_at_str.replace("Z", "+00:00"))
+                    if opened_at.tzinfo is None:
+                        opened_at = opened_at.replace(tzinfo=timezone.utc)
+                    self._hold_opened_at[ticker] = opened_at
+                except (ValueError, TypeError) as e:
+                    logger.warning("Could not parse opened_at=%r for %s: %s", opened_at_str, ticker, e)
             if hold_hours > 0:
-                opened_at_str = t.get("opened_at")
-                if opened_at_str:
-                    try:
-                        opened_at = datetime.fromisoformat(opened_at_str)
-                        if opened_at.tzinfo is None:
-                            opened_at = opened_at.replace(tzinfo=timezone.utc)
-                        self._hold_until[ticker] = opened_at + timedelta(hours=hold_hours)
-                        self._hold_opened_at[ticker] = opened_at
-                    except (ValueError, TypeError) as e:
-                        logger.warning("Could not parse opened_at=%r for %s: %s", opened_at_str, ticker, e)
+                if opened_at is not None:
+                    self._hold_until[ticker] = opened_at + timedelta(hours=hold_hours)
 
             logger.info(
                 "Seeded position %s: entry=%.4f qty=%d trade_id=%s hold_until=%s",
@@ -293,11 +299,11 @@ class OrderExecutor:
         pnl_pct: float | None,
         exit_reason: str,
         closed_at: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self._db is None or trade_id is None:
-            return
+            return False
         try:
-            await asyncio.to_thread(
+            ok = await asyncio.to_thread(
                 self._db.record_trade_close,
                 trade_id,
                 exit_price,
@@ -306,8 +312,13 @@ class OrderExecutor:
                 exit_reason,
                 closed_at or datetime.now(timezone.utc).isoformat(),
             )
+            if not ok:
+                await self._notifier.notify_error(f"close {ticker}", f"analytics DB did not close trade_id={trade_id}")
+            return bool(ok)
         except Exception as db_err:
             logger.warning("Failed to record close for %s in analytics DB: %s", ticker, db_err)
+            await self._notifier.notify_error(f"close {ticker}", f"analytics DB close failed: {db_err}")
+            return False
 
     @staticmethod
     def _parse_tradier_dt(value: str | None) -> datetime | None:
@@ -375,6 +386,24 @@ class OrderExecutor:
             return None
         return max(candidates, key=lambda item: item[0])[1]
 
+    async def _find_pending_market_close_order(self, ticker: str) -> TradierOrder | None:
+        """Return an existing pending market close order so we don't double-submit exits."""
+        close_side = "buy_to_cover" if ticker in self._shorted_tickers else "sell"
+        try:
+            orders = await asyncio.to_thread(self._client.get_account_orders)
+        except Exception as e:
+            logger.warning("Could not fetch Tradier orders before closing %s: %s", ticker, e)
+            return None
+        for order in orders:
+            if (
+                order.symbol == ticker
+                and order.side == close_side
+                and order.status in _PENDING_CLOSE_STATUSES
+                and order.order_type == "market"
+            ):
+                return order
+        return None
+
     async def _reconcile_fast_bracket_round_trip(
         self,
         ticker: str,
@@ -407,16 +436,17 @@ class OrderExecutor:
             try:
                 opened_at = entry_fill.filled_at or datetime.now(timezone.utc).isoformat()
                 trade_id = await asyncio.to_thread(
-                    self._db.record_trade_open,
-                    decision_id,
-                    ticker,
+                        self._db.record_trade_open,
+                        decision_id,
+                        ticker,
                     "buy",
                     qty,
                     entry_price,
-                    opened_at,
-                    fill_latency_sec,
-                    hold_hours,
-                )
+                        opened_at,
+                        fill_latency_sec,
+                        hold_hours,
+                        "reconciled",
+                    )
                 await self._record_close_safe(
                     trade_id,
                     ticker,
@@ -646,16 +676,18 @@ class OrderExecutor:
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
 
+            opened_at = datetime.now(timezone.utc).isoformat()
+            opened_at_utc = datetime.fromisoformat(opened_at)
+            self._hold_opened_at[ticker] = opened_at_utc
             if hold_hours > 0:
-                _opened_at_utc = datetime.now(timezone.utc)
-                self._hold_until[ticker] = _opened_at_utc + timedelta(hours=hold_hours)
-                self._hold_opened_at[ticker] = _opened_at_utc
+                self._hold_until[ticker] = opened_at_utc + timedelta(hours=hold_hours)
 
             if self._db is not None:
                 try:
-                    opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
-                        self._db.record_trade_open, decision_id, ticker, "buy", qty, actual_price, opened_at, fill_latency_sec, hold_hours
+                        self._db.record_trade_open,
+                        decision_id, ticker, "buy", qty, actual_price, opened_at,
+                        fill_latency_sec, hold_hours, order_id,
                     )
                     self._position_book[ticker] = (actual_price, qty, trade_id)
                     logger.info(
@@ -664,6 +696,7 @@ class OrderExecutor:
                     )
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
+                    await self._notifier.notify_error(f"buy {ticker}", f"analytics DB open failed: {db_err}")
 
             # Clear pending_fill only after position_book has the final trade_id.
             # Holding it through the DB insert prevents handle_bracket_close from
@@ -723,14 +756,14 @@ class OrderExecutor:
             actual_price = fill_price or 0.0
             self._position_book[ticker] = (actual_price, self._short_qty, None)
 
+            opened_at = datetime.now(timezone.utc).isoformat()
+            opened_at_utc = datetime.fromisoformat(opened_at)
+            self._hold_opened_at[ticker] = opened_at_utc
             if hold_hours > 0:
-                _opened_at_utc = datetime.now(timezone.utc)
-                self._hold_until[ticker] = _opened_at_utc + timedelta(hours=hold_hours)
-                self._hold_opened_at[ticker] = _opened_at_utc
+                self._hold_until[ticker] = opened_at_utc + timedelta(hours=hold_hours)
 
             if self._db is not None:
                 try:
-                    opened_at = datetime.now(timezone.utc).isoformat()
                     trade_id = await asyncio.to_thread(
                         self._db.record_trade_open,
                         decision_id, ticker, "short", self._short_qty, actual_price or None, opened_at, fill_latency_sec, hold_hours,
@@ -738,6 +771,7 @@ class OrderExecutor:
                     self._position_book[ticker] = (actual_price, self._short_qty, trade_id)
                 except Exception as db_err:
                     logger.warning("Failed to record short for %s in analytics DB: %s", ticker, db_err)
+                    await self._notifier.notify_error(f"short {ticker}", f"analytics DB open failed: {db_err}")
 
             logger.info("SHORT filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, self._short_qty, actual_price, fill_latency_sec, order_id)
             await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price, fill_latency_sec=fill_latency_sec)
@@ -766,6 +800,19 @@ class OrderExecutor:
                 logger.info("Cancelled bracket order %s for %s before manual close", bracket_id, ticker)
             except Exception as e:
                 logger.warning("Failed to cancel bracket %s for %s: %s", bracket_id, ticker, e)
+
+        existing_close = await self._find_pending_market_close_order(ticker)
+        if existing_close is not None:
+            self._pending_close.add(ticker)
+            logger.warning(
+                "Close already pending for %s via order %s — not submitting duplicate",
+                ticker, existing_close.order_id or "unknown",
+            )
+            await self._notifier.notify_error(
+                f"sell {ticker}",
+                f"close already pending via order {existing_close.order_id or 'unknown'}",
+            )
+            return
 
         entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
         exit_price: float | None = None

@@ -2,6 +2,8 @@
 import time
 import httpx
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 _RETRY_DELAYS = (1.0, 2.0, 4.0)  # seconds between attempts 1→2, 2→3, 3→4
@@ -28,6 +30,7 @@ class TradierOrder:
     avg_fill_price: float | None
     filled_at: str | None  # ISO timestamp from transaction_date, None if not filled
     quantity: float | None = None
+    order_id: str | None = None
 
 
 class TradierClient:
@@ -202,7 +205,7 @@ class TradierClient:
             )
             if delay is None:
                 break
-            time.sleep(delay)
+            time.sleep(_retry_delay(resp, delay))
         raise last_exc  # type: ignore[misc]
 
     def close(self) -> None:
@@ -222,71 +225,115 @@ def _raise_for_status(resp: httpx.Response) -> None:
         ) from exc
 
 
+def _is_nullish(value) -> bool:
+    return value is None or value == "null"
+
+
+def _as_list(value) -> list:
+    if _is_nullish(value):
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
+    return []
+
+
+def _to_positive_float(value) -> float | None:
+    if _is_nullish(value):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _retry_delay(resp: httpx.Response, fallback: float) -> float:
+    retry_after = resp.headers.get("Retry-After")
+    if resp.status_code != 429 or not retry_after:
+        return fallback
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError):
+            return fallback
+
+
 def _parse_positions(data: dict) -> list[TradierPosition]:
     """Parse Tradier positions response. Handles null, single object, and array."""
     raw = data.get("positions")
-    if raw is None or raw == "null":
+    if _is_nullish(raw) or not isinstance(raw, dict):
         return []
     pos_data = raw.get("position")
-    if pos_data is None:
-        return []
-    if isinstance(pos_data, dict):
-        pos_data = [pos_data]
-    return [
-        TradierPosition(
-            symbol=p["symbol"],
-            qty=float(p["quantity"]),
-            cost_basis=float(p["cost_basis"]),
+    result: list[TradierPosition] = []
+    for p in _as_list(pos_data):
+        symbol = p.get("symbol")
+        qty = p.get("quantity")
+        cost_basis = p.get("cost_basis")
+        if not symbol or _is_nullish(qty) or _is_nullish(cost_basis):
+            continue
+        result.append(
+            TradierPosition(
+                symbol=str(symbol),
+                qty=float(qty),
+                cost_basis=float(cost_basis),
+            )
         )
-        for p in pos_data
-    ]
+    return result
 
 
 def _parse_quotes(data: dict) -> dict[str, float]:
     """Parse Tradier quotes response. Handles single quote and array."""
     raw = data.get("quotes", {})
-    quote_data = raw.get("quote")
-    if quote_data is None:
+    if _is_nullish(raw) or not isinstance(raw, dict):
         return {}
-    if isinstance(quote_data, dict):
-        quote_data = [quote_data]
-    return {
-        q["symbol"]: float(q["last"])
-        for q in quote_data
-        if q.get("last") is not None
-    }
+    quote_data = raw.get("quote")
+    result: dict[str, float] = {}
+    for q in _as_list(quote_data):
+        symbol = q.get("symbol")
+        last = _to_positive_float(q.get("last"))
+        if symbol and last is not None:
+            result[str(symbol)] = last
+    return result
 
 
 def _parse_quotes_with_open(data: dict) -> dict[str, tuple[float, float | None]]:
     """Parse Tradier quotes response into {symbol: (last, open_price)} pairs."""
     raw = data.get("quotes", {})
-    quote_data = raw.get("quote")
-    if quote_data is None:
+    if _is_nullish(raw) or not isinstance(raw, dict):
         return {}
-    if isinstance(quote_data, dict):
-        quote_data = [quote_data]
+    quote_data = raw.get("quote")
     result: dict[str, tuple[float, float | None]] = {}
-    for q in quote_data:
-        last = q.get("last")
-        if last is None:
+    for q in _as_list(quote_data):
+        symbol = q.get("symbol")
+        last = _to_positive_float(q.get("last"))
+        if not symbol or last is None:
             continue
-        open_price = q.get("open")
-        result[q["symbol"]] = (float(last), float(open_price) if open_price is not None else None)
+        open_price = _to_positive_float(q.get("open"))
+        result[str(symbol)] = (last, open_price)
     return result
 
 
 def _parse_order_status(data: dict) -> tuple[str, float | None]:
     """Parse Tradier order response. Returns (status, avg_fill_price)."""
     order = data.get("order", {})
+    if _is_nullish(order) or not isinstance(order, dict):
+        return "unknown", None
     status = str(order.get("status", "unknown"))
-    avg_fill = order.get("avg_fill_price")
-    fill_price = float(avg_fill) if avg_fill else None
-    return status, fill_price
+    return status, _to_positive_float(order.get("avg_fill_price"))
 
 
 def _parse_buying_power(data: dict) -> float:
     """Parse Tradier balances response. Supports margin, PDT, and cash accounts."""
     balances = data.get("balances", {})
+    if _is_nullish(balances) or not isinstance(balances, dict):
+        raise ValueError("Cannot determine buying power from balances response")
     if "margin" in balances:
         m = balances["margin"]
         return float(m.get("buying_power") or m["stock_buying_power"])
@@ -301,15 +348,11 @@ def _parse_buying_power(data: dict) -> float:
 def _parse_account_orders(data: dict) -> list[TradierOrder]:
     """Parse GET /accounts/{id}/orders. Returns a flat list that includes OTOCO legs."""
     raw = data.get("orders")
-    if raw is None or raw == "null":
+    if _is_nullish(raw) or not isinstance(raw, dict):
         return []
     order_data = raw.get("order")
-    if order_data is None:
-        return []
-    if isinstance(order_data, dict):
-        order_data = [order_data]
     result: list[TradierOrder] = []
-    for o in order_data:
+    for o in _as_list(order_data):
         result.extend(_flatten_order(o))
     return result
 
@@ -321,8 +364,7 @@ def _flatten_order(o: dict) -> list[TradierOrder]:
     side = str(o.get("side") or "")
     status = str(o.get("status") or "")
     order_type = str(o.get("type") or "")
-    avg_fill = o.get("avg_fill_price")
-    avg_fill_price = float(avg_fill) if avg_fill else None
+    avg_fill_price = _to_positive_float(o.get("avg_fill_price"))
     quantity = o.get("quantity")
     filled_at = o.get("transaction_date") or o.get("last_fill_date")
     if symbol and side and status:
@@ -333,12 +375,14 @@ def _flatten_order(o: dict) -> list[TradierOrder]:
             order_type=order_type,
             avg_fill_price=avg_fill_price,
             filled_at=str(filled_at) if filled_at else None,
-            quantity=float(quantity) if quantity else None,
+            quantity=_to_positive_float(quantity),
+            order_id=str(o.get("id") or o.get("order_id") or o.get("orderId") or "") or None,
         ))
     legs = o.get("leg")
-    if legs:
-        if isinstance(legs, dict):
-            legs = [legs]
-        for leg in legs:
-            orders.extend(_flatten_order(leg))
+    for leg in _as_list(legs):
+        orders.extend(_flatten_order(leg))
+    nested_orders = o.get("orders")
+    if isinstance(nested_orders, dict):
+        for nested in _as_list(nested_orders.get("order")):
+            orders.extend(_flatten_order(nested))
     return orders

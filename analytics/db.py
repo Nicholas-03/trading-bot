@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,12 +20,16 @@ def _parse_iso_dt(value: str | None) -> datetime | None:
 
 class TradeDB:
     def __init__(self, path: str) -> None:
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, timeout=30.0, check_same_thread=False)
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._conn.execute("PRAGMA busy_timeout = 30000")
+        self._conn.execute("PRAGMA journal_mode = WAL")
         self._create_tables()
 
     def _create_tables(self) -> None:
-        self._conn.executescript("""
+        with self._lock:
+            self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS news_events (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts       TEXT NOT NULL,
@@ -41,6 +46,7 @@ class TradeDB:
                 reasoning     TEXT,
                 confidence    REAL DEFAULT 0.0,
                 hold_hours    INTEGER DEFAULT 0,
+                is_primary    INTEGER DEFAULT 0,
                 skip_reason   TEXT
             );
             CREATE TABLE IF NOT EXISTS trades (
@@ -56,34 +62,38 @@ class TradeDB:
                 exit_reason       TEXT,
                 fill_latency_sec  REAL,
                 hold_hours        INTEGER DEFAULT 0,
+                bracket_order_id  TEXT,
                 opened_at         TEXT NOT NULL,
                 closed_at         TEXT
             );
         """)
-        # Migrations for columns added after initial schema
-        for ddl in [
-            "ALTER TABLE trades ADD COLUMN fill_latency_sec REAL",
-            "ALTER TABLE llm_decisions ADD COLUMN confidence REAL DEFAULT 0.0",
-            "ALTER TABLE llm_decisions ADD COLUMN hold_hours INTEGER DEFAULT 0",
-            "ALTER TABLE trades ADD COLUMN hold_hours INTEGER DEFAULT 0",
-            "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
-            "ALTER TABLE llm_decisions ADD COLUMN latency_sec REAL",
-            "ALTER TABLE llm_decisions ADD COLUMN cost_usd REAL",
-            "ALTER TABLE llm_decisions ADD COLUMN skip_reason TEXT",
-        ]:
-            try:
-                self._conn.execute(ddl)
-                self._conn.commit()
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            # Migrations for columns added after initial schema
+            for ddl in [
+                "ALTER TABLE trades ADD COLUMN fill_latency_sec REAL",
+                "ALTER TABLE llm_decisions ADD COLUMN confidence REAL DEFAULT 0.0",
+                "ALTER TABLE llm_decisions ADD COLUMN hold_hours INTEGER DEFAULT 0",
+                "ALTER TABLE trades ADD COLUMN hold_hours INTEGER DEFAULT 0",
+                "ALTER TABLE llm_decisions ADD COLUMN provider TEXT",
+                "ALTER TABLE llm_decisions ADD COLUMN latency_sec REAL",
+                "ALTER TABLE llm_decisions ADD COLUMN cost_usd REAL",
+                "ALTER TABLE llm_decisions ADD COLUMN is_primary INTEGER DEFAULT 0",
+                "ALTER TABLE llm_decisions ADD COLUMN skip_reason TEXT",
+                "ALTER TABLE trades ADD COLUMN bracket_order_id TEXT",
+            ]:
+                try:
+                    self._conn.execute(ddl)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            self._conn.commit()
 
     def record_news(self, ts: str, headline: str, summary: str | None, symbols: list[str]) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO news_events (ts, headline, summary, symbols) VALUES (?, ?, ?, ?)",
-            (ts, headline, summary, ",".join(symbols) if symbols else ""),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO news_events (ts, headline, summary, symbols) VALUES (?, ?, ?, ?)",
+                (ts, headline, summary, ",".join(symbols) if symbols else ""),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def record_decision(
         self,
@@ -97,22 +107,32 @@ class TradeDB:
         provider: str | None = None,
         latency_sec: float | None = None,
         cost_usd: float | None = None,
+        is_primary: bool = False,
     ) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO llm_decisions "
-            "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO llm_decisions "
+                "(news_event_id, ts, action, ticker, reasoning, confidence, hold_hours, provider, latency_sec, cost_usd, is_primary) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    news_event_id, ts, action, ticker, reasoning, confidence, hold_hours,
+                    provider, latency_sec, cost_usd, 1 if is_primary else 0,
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
-    def record_skip(self, decision_id: int, reason: str) -> None:
-        self._conn.execute(
-            "UPDATE llm_decisions SET skip_reason=? WHERE id=?",
-            (reason, decision_id),
-        )
-        self._conn.commit()
+    def record_skip(self, decision_id: int, reason: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE llm_decisions SET skip_reason=? WHERE id=?",
+                (reason, decision_id),
+            )
+            self._conn.commit()
+        if cur.rowcount == 0:
+            logger.warning("record_skip: no decision row found for id=%s", decision_id)
+            return False
+        return True
 
     def record_trade_open(
         self,
@@ -124,14 +144,20 @@ class TradeDB:
         opened_at: str,
         fill_latency_sec: float | None = None,
         hold_hours: int = 0,
+        bracket_order_id: str | None = None,
     ) -> int:
-        cur = self._conn.execute(
-            "INSERT INTO trades (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec, hold_hours) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec, hold_hours),
-        )
-        self._conn.commit()
-        return cur.lastrowid  # type: ignore[return-value]
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO trades "
+                "(decision_id, ticker, side, qty, entry_price, opened_at, fill_latency_sec, hold_hours, bracket_order_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    decision_id, ticker, side, qty, entry_price, opened_at,
+                    fill_latency_sec, hold_hours, bracket_order_id,
+                ),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def record_trade_close(
         self,
@@ -141,30 +167,36 @@ class TradeDB:
         pnl_pct: float | None,
         exit_reason: str,
         closed_at: str,
-    ) -> None:
-        cur = self._conn.execute(
-            "UPDATE trades SET exit_price=?, pnl_usd=?, pnl_pct=?, exit_reason=?, closed_at=? WHERE id=?",
-            (exit_price, pnl_usd, pnl_pct, exit_reason, closed_at, trade_id),
-        )
-        self._conn.commit()
+    ) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE trades SET exit_price=?, pnl_usd=?, pnl_pct=?, exit_reason=?, closed_at=? "
+                "WHERE id=? AND closed_at IS NULL",
+                (exit_price, pnl_usd, pnl_pct, exit_reason, closed_at, trade_id),
+            )
+            self._conn.commit()
         if cur.rowcount == 0:
-            logger.warning("record_trade_close: no trade row found for id=%s", trade_id)
+            logger.warning("record_trade_close: no open trade row found for id=%s", trade_id)
+            return False
+        return True
 
     def get_open_trades(self) -> list[dict]:
         """Return all trades with no closed_at (i.e. positions still open per DB)."""
-        cur = self._conn.execute(
-            "SELECT id, ticker, side, qty, entry_price, hold_hours, opened_at "
-            "FROM trades WHERE closed_at IS NULL"
-        )
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, ticker, side, qty, entry_price, hold_hours, opened_at, bracket_order_id "
+                "FROM trades WHERE closed_at IS NULL"
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def realized_summary_for_et_date(self, target_date) -> tuple[int, int, float]:
         """Return successful entries, realized exits, and realized P&L for one ET date."""
         et = ZoneInfo("America/New_York")
-        rows = self._conn.execute(
-            "SELECT opened_at, closed_at, pnl_usd FROM trades"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT opened_at, closed_at, pnl_usd FROM trades"
+            ).fetchall()
         buys = 0
         sells = 0
         pnl = 0.0
@@ -185,9 +217,10 @@ class TradeDB:
     def realized_summary_for_et_week(self, week_monday) -> tuple[int, int, float]:
         """Return successful entries, realized exits, and realized P&L for one ET week."""
         et = ZoneInfo("America/New_York")
-        rows = self._conn.execute(
-            "SELECT opened_at, closed_at, pnl_usd FROM trades"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT opened_at, closed_at, pnl_usd FROM trades"
+            ).fetchall()
         buys = 0
         sells = 0
         pnl = 0.0
@@ -206,4 +239,5 @@ class TradeDB:
         return buys, sells, pnl
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

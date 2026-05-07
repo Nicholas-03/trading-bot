@@ -389,7 +389,8 @@ tr.detail-row td {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
+    c = sqlite3.connect(DB_PATH, timeout=30.0)
+    c.execute("PRAGMA busy_timeout = 30000")
     c.row_factory = sqlite3.Row
     return c
 
@@ -453,10 +454,10 @@ def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     ).fetchone()
 
     decision_rows = con.execute(
-        "SELECT provider, action, ticker, confidence, hold_hours, reasoning, latency_sec, cost_usd "
+        "SELECT provider, action, ticker, confidence, hold_hours, reasoning, latency_sec, cost_usd, "
+        "       is_primary, skip_reason "
         "FROM llm_decisions WHERE news_event_id = ? "
-        "ORDER BY CASE provider "
-        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 WHEN 'chatgpt' THEN 3 ELSE 4 END",
+        "ORDER BY is_primary DESC, id ASC",
         (news_event_id,),
     ).fetchall()
 
@@ -702,14 +703,16 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     # Recent news → decision → outcome
     recent = con.execute(
         "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
+        "       d.skip_reason, d.provider, d.is_primary, "
         "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
         "FROM news_events n "
         "JOIN llm_decisions d ON d.news_event_id = n.id "
         "    AND d.id = COALESCE("
         "        (SELECT t2.decision_id FROM trades t2"
-        "         JOIN llm_decisions d2 ON d2.id = t2.decision_id"
-        "         WHERE d2.news_event_id = n.id LIMIT 1),"
-        "        (SELECT id FROM llm_decisions WHERE news_event_id = n.id AND provider = 'claude' LIMIT 1),"
+         "         JOIN llm_decisions d2 ON d2.id = t2.decision_id"
+        "         WHERE d2.news_event_id = n.id ORDER BY t2.opened_at DESC LIMIT 1),"
+        "        (SELECT id FROM llm_decisions WHERE news_event_id = n.id AND is_primary = 1 ORDER BY id LIMIT 1),"
+        "        (SELECT id FROM llm_decisions WHERE news_event_id = n.id AND skip_reason IS NOT NULL ORDER BY id LIMIT 1),"
         "        (SELECT MIN(id) FROM llm_decisions WHERE news_event_id = n.id)"
         "    ) "
         "LEFT JOIN trades t ON t.decision_id = d.id "
@@ -734,7 +737,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     agree_rows = con.execute(
         "SELECT COUNT(DISTINCT action) AS unique_actions "
         "FROM llm_decisions WHERE provider IS NOT NULL "
-        "GROUP BY news_event_id HAVING COUNT(*) = 4"
+        "GROUP BY news_event_id HAVING COUNT(*) >= 2"
     ).fetchall()
     agreed = sum(1 for r in agree_rows if r["unique_actions"] == 1)
     disagreed = len(agree_rows) - agreed
@@ -744,7 +747,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         marker_color=[_COLOR_POS, _COLOR_NEG],
     ))
     _apply_theme(fig_agree, height=260)
-    fig_agree.update_layout(title="LLM Agreement Rate (4-provider events)", yaxis_title="News Events")
+    fig_agree.update_layout(title="LLM Agreement Rate (multi-provider events)", yaxis_title="News Events")
 
     # 13: Total cost per provider
     cost_rows = con.execute(
@@ -876,7 +879,7 @@ def _render_table_rows(recent: list[dict]) -> str:
         ts = html.escape((r["ts"] or "")[:16])
         action = r["action"] or "hold"
         ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
-        exit_reason = r["exit_reason"] or ""
+        exit_reason = r["exit_reason"] or r.get("skip_reason") or ""
         closed = "true" if r["closed_at"] is not None else "false"
         decision_id = r.get("decision_id") or ""
         rows += (
