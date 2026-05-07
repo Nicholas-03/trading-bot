@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from rich.logging import RichHandler
 from trading.tradier_client import TradierClient
 from config import load_config, Config
@@ -27,6 +28,85 @@ def _make_tradier_client(config: Config) -> TradierClient:
         paper=config.tradier_paper,
         quote_token=config.tradier_live_token or None,
     )
+
+
+def _reconcile_stale_trades(
+    client: TradierClient,
+    db: "TradeDB",  # type: ignore[name-defined]
+    stale_trades: list[dict],
+) -> None:
+    """Close DB trades whose broker position is gone but closed_at was never written.
+
+    Fetches account order history once, then for each stale trade looks for the most
+    recent filled close-side order matching the ticker.  Updates the DB with whatever
+    exit data is recoverable; if no fill is found, marks closed with a sentinel reason
+    so the row is not endlessly re-reconciled on future restarts.
+
+    What can be backfilled:
+    - closed_at      — from order transaction_date if found, else now()
+    - exit_price     — from avg_fill_price if found, else NULL
+    - pnl_usd/pct   — calculated from entry_price when exit_price is available
+    - exit_reason    — inferred from order type (limit→take_profit, stop→stop_loss)
+
+    What cannot be recovered:
+    - Exact fill timestamp if Tradier order history has already rolled off (sandbox: ~7 days)
+    - Partial fills (bot always uses qty=full position, so this should not occur)
+    """
+    try:
+        orders = client.get_account_orders()
+    except Exception as exc:
+        logger.warning("Reconciliation: failed to fetch account orders: %s", exc)
+        orders = []
+
+    now = datetime.now(timezone.utc).isoformat()
+    for t in stale_trades:
+        ticker = t["ticker"]
+        trade_id = t["id"]
+        entry_price = float(t.get("entry_price") or 0.0)
+        qty = int(t.get("qty") or 0)
+        close_side = "buy_to_cover" if t.get("side") == "short" else "sell"
+
+        fills = [
+            o for o in orders
+            if o.symbol == ticker
+            and o.side == close_side
+            and o.status == "filled"
+            and o.avg_fill_price is not None
+        ]
+        fills.sort(key=lambda o: o.filled_at or "", reverse=True)
+
+        if fills:
+            best = fills[0]
+            exit_price = best.avg_fill_price
+            if best.order_type == "limit":
+                exit_reason = "take_profit"
+            elif best.order_type in ("stop", "stop_limit"):
+                exit_reason = "stop_loss"
+            else:
+                exit_reason = "bracket_order"
+            closed_at = best.filled_at or now
+            pnl_usd = (exit_price - entry_price) * qty if entry_price and qty else None
+            pnl_pct = (exit_price - entry_price) / entry_price if entry_price else None
+            logger.info(
+                "Reconciled %s (trade_id=%s): exit=$%.4f reason=%s closed_at=%s",
+                ticker, trade_id, exit_price, exit_reason, closed_at,
+            )
+        else:
+            exit_price = None
+            pnl_usd = None
+            pnl_pct = None
+            exit_reason = "reconciled_unknown_exit"
+            closed_at = now
+            logger.warning(
+                "Reconciling %s (trade_id=%s): no filled close order in history — "
+                "marking closed with unknown exit; P&L not recoverable",
+                ticker, trade_id,
+            )
+
+        try:
+            db.record_trade_close(trade_id, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at)
+        except Exception as exc:
+            logger.warning("Failed to reconcile trade_id=%s for %s: %s", trade_id, ticker, exc)
 
 
 def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
@@ -66,6 +146,16 @@ async def main() -> None:
             logger.info("Analytics DB: %s", config.analytics_db_path)
 
         order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, db)
+        if db is not None:
+            open_trades = db.get_open_trades()
+            stale = [t for t in open_trades
+                     if t["ticker"] not in held_tickers and t["ticker"] not in shorted_tickers]
+            if stale:
+                logger.info("Found %d stale DB trade(s) with no live broker position — reconciling", len(stale))
+                _reconcile_stale_trades(client, db, stale)
+                open_trades = db.get_open_trades()  # re-fetch after reconciliation
+            order_executor.seed_from_db(open_trades)
+            logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
         if config.llm_provider == "multi":
             from llm.multi_advisor import MultiLLMAdvisor
             llm_advisor = MultiLLMAdvisor(config)

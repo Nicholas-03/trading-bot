@@ -19,6 +19,16 @@ class TradierPosition:
     cost_basis: float  # total cost basis (dollars), not per-share
 
 
+@dataclass
+class TradierOrder:
+    symbol: str
+    side: str        # buy | sell | sell_short | buy_to_cover
+    status: str      # filled | canceled | expired | pending | open | ...
+    order_type: str  # market | limit | stop | stop_limit
+    avg_fill_price: float | None
+    filled_at: str | None  # ISO timestamp from transaction_date, None if not filled
+
+
 class TradierClient:
     _LIVE_BASE = "https://api.tradier.com/v1"
     _SANDBOX_BASE = "https://sandbox.tradier.com/v1"
@@ -166,6 +176,15 @@ class TradierClient:
         resp = self._request("GET", f"/accounts/{self._account_id}/orders/{order_id}")
         return _parse_order_status(resp.json())
 
+    def get_account_orders(self) -> list[TradierOrder]:
+        """Return all recent account orders across all statuses.
+
+        Includes top-level orders and recursed OTOCO/OCO legs so that filled
+        bracket legs (TP limit sells, SL stop sells) are always discoverable.
+        """
+        resp = self._request("GET", f"/accounts/{self._account_id}/orders")
+        return _parse_account_orders(resp.json())
+
     def _request(self, method: str, path: str, *, http: httpx.Client | None = None, **kwargs) -> httpx.Response:
         """Execute an HTTP request with automatic retry on transient server errors."""
         client = http or self._http
@@ -276,3 +295,47 @@ def _parse_buying_power(data: dict) -> float:
     if "cash" in balances:
         return float(balances["cash"]["cash_available"])
     raise ValueError("Cannot determine buying power from balances response")
+
+
+def _parse_account_orders(data: dict) -> list[TradierOrder]:
+    """Parse GET /accounts/{id}/orders. Returns a flat list that includes OTOCO legs."""
+    raw = data.get("orders")
+    if raw is None or raw == "null":
+        return []
+    order_data = raw.get("order")
+    if order_data is None:
+        return []
+    if isinstance(order_data, dict):
+        order_data = [order_data]
+    result: list[TradierOrder] = []
+    for o in order_data:
+        result.extend(_flatten_order(o))
+    return result
+
+
+def _flatten_order(o: dict) -> list[TradierOrder]:
+    """Extract a TradierOrder from one entry; recurses into OTOCO/OCO legs."""
+    orders: list[TradierOrder] = []
+    symbol = str(o.get("symbol") or "")
+    side = str(o.get("side") or "")
+    status = str(o.get("status") or "")
+    order_type = str(o.get("type") or "")
+    avg_fill = o.get("avg_fill_price")
+    avg_fill_price = float(avg_fill) if avg_fill else None
+    filled_at = o.get("transaction_date") or o.get("last_fill_date")
+    if symbol and side and status:
+        orders.append(TradierOrder(
+            symbol=symbol,
+            side=side,
+            status=status,
+            order_type=order_type,
+            avg_fill_price=avg_fill_price,
+            filled_at=str(filled_at) if filled_at else None,
+        ))
+    legs = o.get("leg")
+    if legs:
+        if isinstance(legs, dict):
+            legs = [legs]
+        for leg in legs:
+            orders.extend(_flatten_order(leg))
+    return orders

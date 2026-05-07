@@ -139,5 +139,14 @@ class TradeDB:
         if cur.rowcount == 0:
             logger.warning("record_trade_close: no trade row found for id=%s", trade_id)
 
+    def get_open_trades(self) -> list[dict]:
+        """Return all trades with no closed_at (i.e. positions still open per DB)."""
+        cur = self._conn.execute(
+            "SELECT id, ticker, side, qty, entry_price, hold_hours, opened_at "
+            "FROM trades WHERE closed_at IS NULL"
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     def close(self) -> None:
         self._conn.close()

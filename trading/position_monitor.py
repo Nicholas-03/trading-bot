@@ -1,7 +1,7 @@
 # trading/position_monitor.py
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import pytz
 from trading.tradier_client import TradierClient
 from trading.order_executor import OrderExecutor
@@ -93,8 +93,10 @@ class PositionMonitor:
             self._executor.confirm_closed(ticker)
             logger.info("Confirmed closed: %s no longer in Tradier positions", ticker)
 
-        # Detect positions closed by OTOCO bracket (held but disappeared, not manually closed)
-        otoco_closed = self._executor.held_tickers - live_symbols - self._executor.pending_close
+        # Detect positions closed by OTOCO bracket (held but disappeared, not manually closed).
+        # Exclude pending_fill tickers: their OTOCO entry hasn't confirmed yet, so they're
+        # not in live_symbols by design — treating them as bracket-closed would be a false positive.
+        otoco_closed = self._executor.held_tickers - live_symbols - self._executor.pending_close - self._executor.pending_fill
         if otoco_closed:
             quotes = await asyncio.to_thread(self._client.get_quotes, list(otoco_closed))
             for ticker in otoco_closed:
@@ -107,8 +109,15 @@ class PositionMonitor:
             logger.warning("Short position %s disappeared from Tradier — reconciling state", ticker)
             await self._executor.sell(ticker, exit_reason="external_close")
 
-        # Close positions whose hold_hours window has elapsed
+        # Log current state of all hold windows, then close any expired ones
+        now_utc = datetime.now(timezone.utc)
+        for ticker, (opened_at, hold_hours, expiry) in self._executor.hold_windows.items():
+            age_hours = (now_utc - opened_at).total_seconds() / 3600
+            logger.info(
+                "TIMED EXIT CHECK: ticker=%s opened_at=%s hold_hours=%d age_hours=%.2f expires=%s",
+                ticker, opened_at.isoformat(), hold_hours, age_hours, expiry.isoformat(),
+            )
         for ticker in self._executor.expired_hold_tickers():
             if ticker not in self._executor.pending_close:
-                logger.info("Hold-hours expired for %s — closing position", ticker)
+                logger.info("TIMED EXIT TRIGGERED: ticker=%s", ticker)
                 await self._executor.sell(ticker, exit_reason="hold_hours")

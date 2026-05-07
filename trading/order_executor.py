@@ -46,6 +46,8 @@ class OrderExecutor:
         self._notifier = notifier
         self._db = db
         self._pending_close: set[str] = set()
+        # tickers currently inside _wait_for_position — position monitor must skip these
+        self._pending_fill: set[str] = set()
         self._trading_paused: bool = False
         # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
@@ -53,6 +55,8 @@ class OrderExecutor:
         self._bracket_orders: dict[str, str] = {}
         # ticker -> UTC datetime when the hold_hours window expires
         self._hold_until: dict[str, datetime] = {}
+        # ticker -> UTC datetime when the position was opened (for age calculation)
+        self._hold_opened_at: dict[str, datetime] = {}
         # same-day re-entry guard — reset at midnight
         self._daily_bought_tickers: set[str] = set()
         self._daily_stopped_tickers: set[str] = set()
@@ -80,6 +84,10 @@ class OrderExecutor:
         return frozenset(self._pending_close)
 
     @property
+    def pending_fill(self) -> frozenset[str]:
+        return frozenset(self._pending_fill)
+
+    @property
     def trading_paused(self) -> bool:
         return self._trading_paused
 
@@ -95,6 +103,17 @@ class OrderExecutor:
         """Return tickers whose hold_hours window has elapsed and are still tracked."""
         now = datetime.now(timezone.utc)
         return frozenset(t for t, exp in self._hold_until.items() if now >= exp)
+
+    @property
+    def hold_windows(self) -> dict[str, tuple[datetime, int, datetime]]:
+        """Return {ticker: (opened_at, hold_hours, expiry)} for all watched hold windows."""
+        result: dict[str, tuple[datetime, int, datetime]] = {}
+        for ticker, expiry in self._hold_until.items():
+            opened_at = self._hold_opened_at.get(ticker)
+            if opened_at is not None:
+                hold_hours_val = round((expiry - opened_at).total_seconds() / 3600)
+                result[ticker] = (opened_at, hold_hours_val, expiry)
+        return result
 
     async def _wait_for_fill(
         self,
@@ -189,6 +208,7 @@ class OrderExecutor:
         self._shorted_tickers.discard(ticker)
         self._position_book.pop(ticker, None)
         self._hold_until.pop(ticker, None)
+        self._hold_opened_at.pop(ticker, None)
         self._pending_close.add(ticker)
         if exit_reason == "stop_loss":
             self._daily_stopped_tickers.add(ticker)
@@ -199,6 +219,57 @@ class OrderExecutor:
         if pnl_usd is not None:
             self._daily_realized_pnl += pnl_usd
             self._weekly_realized_pnl += pnl_usd
+
+    def seed_from_db(self, open_trades: list[dict]) -> None:
+        """Re-populate position_book, hold_until, and hold_opened_at from DB open trades.
+
+        For tickers still alive at the broker: restore in-memory tracking state.
+        For tickers absent from the broker: their bracket fired while the bot was down —
+        auto-close the DB record so they don't stay open forever.
+        """
+        for t in open_trades:
+            ticker = t["ticker"]
+            trade_id = t.get("id")
+            if ticker not in self._held_tickers and ticker not in self._shorted_tickers:
+                logger.warning(
+                    "DB open trade for %s (trade_id=%s) has no live broker position — "
+                    "bracket likely fired offline; recording offline close",
+                    ticker, trade_id,
+                )
+                if self._db is not None and trade_id is not None:
+                    try:
+                        self._db.record_trade_close(
+                            trade_id, None, None, None,
+                            "offline_bracket_close",
+                            datetime.now(timezone.utc).isoformat(),
+                        )
+                        logger.info("Recorded offline close for %s trade_id=%s", ticker, trade_id)
+                    except Exception as db_err:
+                        logger.warning("Failed to record offline close for %s: %s", ticker, db_err)
+                continue
+
+            entry_price = float(t.get("entry_price") or 0.0)
+            qty = int(t.get("qty") or 0)
+            self._position_book[ticker] = (entry_price, qty, trade_id)
+
+            hold_hours = int(t.get("hold_hours") or 0)
+            if hold_hours > 0:
+                opened_at_str = t.get("opened_at")
+                if opened_at_str:
+                    try:
+                        opened_at = datetime.fromisoformat(opened_at_str)
+                        if opened_at.tzinfo is None:
+                            opened_at = opened_at.replace(tzinfo=timezone.utc)
+                        self._hold_until[ticker] = opened_at + timedelta(hours=hold_hours)
+                        self._hold_opened_at[ticker] = opened_at
+                    except (ValueError, TypeError) as e:
+                        logger.warning("Could not parse opened_at=%r for %s: %s", opened_at_str, ticker, e)
+
+            logger.info(
+                "Seeded position %s: entry=%.4f qty=%d trade_id=%s hold_until=%s",
+                ticker, entry_price, qty, trade_id,
+                self._hold_until.get(ticker, "none"),
+            )
 
     async def _record_skip_safe(self, decision_id: int | None, reason: str) -> None:
         if self._db is None or decision_id is None:
@@ -369,7 +440,10 @@ class OrderExecutor:
             self._daily_buys += 1
             self._weekly_buys += 1
 
-            # Wait for entry leg fill: poll positions (OTOCO parent stays 'open' while bracket is active)
+            # Wait for entry leg fill: poll positions (OTOCO parent stays 'open' while bracket is active).
+            # Guard pending_fill so the position monitor does not mistake a not-yet-filled entry as a
+            # bracket close (the race that caused false handle_bracket_close calls for KYIV/AMC/ZTEK).
+            self._pending_fill.add(ticker)
             filled, fill_price = await self._wait_for_position(ticker, order_id)
             # Measure latency from decision time when provided, otherwise from submission
             if decision_monotonic is not None:
@@ -377,25 +451,31 @@ class OrderExecutor:
             else:
                 fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
+                # Synchronously clean up all tracked state before any awaits so the position monitor
+                # cannot observe a partially-rolled-back entry during cancel_order.
+                self._held_tickers.discard(ticker)
+                self._position_book.pop(ticker, None)
+                self._bracket_orders.pop(ticker, None)
+                if ticker not in self._pending_close:
+                    # handle_bracket_close hasn't fired concurrently — safe to roll back day guards.
+                    self._daily_bought_tickers.discard(ticker)
+                    self._daily_buys -= 1
+                    self._weekly_buys -= 1
+                self._pending_fill.discard(ticker)
                 try:
                     await asyncio.to_thread(self._client.cancel_order, order_id)
                 except Exception:
                     pass
                 logger.warning("OTOCO %s for %s fill unconfirmed — rolling back state", order_id, ticker)
-                self._held_tickers.discard(ticker)
-                self._daily_bought_tickers.discard(ticker)
-                self._position_book.pop(ticker, None)
-                self._bracket_orders.pop(ticker, None)
-                self._daily_buys -= 1
-                self._weekly_buys -= 1
                 await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
                 return
-
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
 
             if hold_hours > 0:
-                self._hold_until[ticker] = datetime.now(timezone.utc) + timedelta(hours=hold_hours)
+                _opened_at_utc = datetime.now(timezone.utc)
+                self._hold_until[ticker] = _opened_at_utc + timedelta(hours=hold_hours)
+                self._hold_opened_at[ticker] = _opened_at_utc
 
             if self._db is not None:
                 try:
@@ -411,10 +491,16 @@ class OrderExecutor:
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
 
+            # Clear pending_fill only after position_book has the final trade_id.
+            # Holding it through the DB insert prevents handle_bracket_close from
+            # firing with trade_id=None if the bracket executes during that await (BLSH pattern).
+            self._pending_fill.discard(ticker)
+
             logger.info("BUY filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, qty, actual_price, fill_latency_sec, order_id)
             await self._notifier.notify_buy(ticker, actual_price * qty, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
+            await self._record_skip_safe(decision_id, "buy_exception")
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
     async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
@@ -464,7 +550,9 @@ class OrderExecutor:
             self._position_book[ticker] = (actual_price, self._short_qty, None)
 
             if hold_hours > 0:
-                self._hold_until[ticker] = datetime.now(timezone.utc) + timedelta(hours=hold_hours)
+                _opened_at_utc = datetime.now(timezone.utc)
+                self._hold_until[ticker] = _opened_at_utc + timedelta(hours=hold_hours)
+                self._hold_opened_at[ticker] = _opened_at_utc
 
             if self._db is not None:
                 try:
@@ -481,6 +569,7 @@ class OrderExecutor:
             await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to short %s: %s", ticker, e)
+            await self._record_skip_safe(decision_id, "short_exception")
             await self._notifier.notify_error(f"short {ticker}", str(e))
 
     async def sell(
@@ -548,6 +637,8 @@ class OrderExecutor:
 
         # Order submitted — update state immediately to prevent re-sell attempts
         self._update_close_state(ticker, pnl_usd, exit_reason)
+        if exit_reason == "hold_hours":
+            logger.info("TIMED EXIT SELL SUBMITTED: ticker=%s order_id=%s trade_id=%s", ticker, order_id, trade_id)
 
         filled, fill_price = await self._wait_for_fill(order_id)
         if not filled:
@@ -567,5 +658,8 @@ class OrderExecutor:
             exit_price = fill_price
 
         await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+        if exit_reason == "hold_hours":
+            logger.info("TIMED EXIT CLOSED TRADE: ticker=%s trade_id=%s exit_price=%s pnl_pct=%s",
+                        ticker, trade_id, exit_price, f"{pnl_pct * 100:.2f}%" if pnl_pct is not None else "unknown")
         logger.info("CLOSED position for %s", ticker)
         await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
