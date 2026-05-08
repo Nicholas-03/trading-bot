@@ -9,10 +9,6 @@ def test_recent_decisions_use_primary_without_trade_and_render_skip(tmp_path):
     db = TradeDB(str(db_path))
     try:
         news_id = db.record_news("2026-05-01T14:00:00Z", "AAPL headline", None, ["AAPL"])
-        db.record_decision(
-            news_id, "2026-05-01T14:00:01Z", "hold", None, "claude says hold",
-            provider="claude", is_primary=False,
-        )
         primary_id = db.record_decision(
             news_id, "2026-05-01T14:00:01Z", "buy", "AAPL", "chatgpt says buy",
             provider="chatgpt", confidence=0.5, is_primary=True,

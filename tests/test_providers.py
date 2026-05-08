@@ -1,29 +1,7 @@
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from llm.providers.base import CompletionResult
-from llm.providers.claude import ClaudeProvider
 from llm.providers.chatgpt import ChatGPTProvider
-
-
-def test_claude_returns_completion_result():
-    mock_msg = MagicMock()
-    mock_msg.content[0].text = "claude text"
-    mock_msg.usage.input_tokens = 100
-    mock_msg.usage.output_tokens = 50
-
-    provider = ClaudeProvider.__new__(ClaudeProvider)
-    provider._model = "claude-haiku-4-5"
-    provider._client = MagicMock()
-
-    async def run():
-        with patch("asyncio.to_thread", new_callable=AsyncMock, return_value=mock_msg):
-            return await provider.complete("prompt")
-
-    result = asyncio.run(run())
-    assert isinstance(result, CompletionResult)
-    assert result.text == "claude text"
-    assert result.input_tokens == 100
-    assert result.output_tokens == 50
 
 
 def test_chatgpt_returns_completion_result():

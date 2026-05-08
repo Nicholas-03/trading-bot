@@ -1,6 +1,7 @@
 # config.py
 import os
 from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 
@@ -12,8 +13,6 @@ class Config:
     tradier_account_id: str
     tradier_paper: bool
     tradier_live_token: str
-    anthropic_api_key: str
-    anthropic_model: str
     openai_api_key: str
     openai_model: str
     llm_provider: str
@@ -58,20 +57,17 @@ def load_config() -> Config:
     load_dotenv()
 
     provider = os.getenv("LLM_PROVIDER", "chatgpt").lower()
-    if provider not in ("claude", "chatgpt", "multi"):
-        raise ValueError(
-            f"LLM_PROVIDER must be 'claude', 'chatgpt', or 'multi', got {provider!r}"
-        )
+    if provider != "chatgpt":
+        raise ValueError(f"LLM_PROVIDER must be 'chatgpt', got {provider!r}")
 
-    # ALPACA_API_KEY/SECRET_KEY are still required — used by NewsDataStream (news feed only, not trading)
-    required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY", "TRADIER_ACCESS_TOKEN", "TRADIER_ACCOUNT_ID"]
-    if provider == "claude":
-        required.append("ANTHROPIC_API_KEY")
-    elif provider == "chatgpt":
-        required.append("OPENAI_API_KEY")
-    else:  # multi — claude + chatgpt
-        required.extend(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"])
-
+    # ALPACA_API_KEY/SECRET_KEY are used by NewsDataStream only, not trading.
+    required = [
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "TRADIER_ACCESS_TOKEN",
+        "TRADIER_ACCOUNT_ID",
+        "OPENAI_API_KEY",
+    ]
     missing = [k for k in required if not os.getenv(k)]
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -89,8 +85,6 @@ def load_config() -> Config:
         tradier_account_id=os.environ["TRADIER_ACCOUNT_ID"],
         tradier_paper=os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"),
         tradier_live_token=os.getenv("TRADIER_LIVE_TOKEN", ""),
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
         llm_provider=provider,

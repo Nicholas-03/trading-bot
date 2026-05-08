@@ -177,11 +177,7 @@ async def main() -> None:
                 open_trades = db.get_open_trades()  # re-fetch after reconciliation
             order_executor.seed_from_db(open_trades)
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
-        if config.llm_provider == "multi":
-            from llm.multi_advisor import MultiLLMAdvisor
-            llm_advisor = MultiLLMAdvisor(config)
-        else:
-            llm_advisor = LLMAdvisor(config)
+        llm_advisor = LLMAdvisor(config)
         news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
         position_monitor = PositionMonitor(client, config, order_executor, notifier)
 

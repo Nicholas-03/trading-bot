@@ -4,13 +4,14 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+
 from alpaca.data.live import NewsDataStream
-from trading.tradier_client import TradierClient
-from llm.llm_advisor import LLMAdvisor
-from llm.multi_advisor import MultiDecision, MultiLLMAdvisor
-from trading.order_executor import OrderExecutor
+
 from config import Config
-from news.filters import is_retrospective_headline, is_routine_news, compute_news_age_hours
+from llm.llm_advisor import LLMAdvisor
+from news.filters import compute_news_age_hours, is_retrospective_headline, is_routine_news
+from trading.order_executor import OrderExecutor
+from trading.tradier_client import TradierClient
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
@@ -23,7 +24,7 @@ class NewsHandler:
         self,
         client: TradierClient,
         config: Config,
-        llm_advisor: LLMAdvisor | MultiLLMAdvisor,
+        llm_advisor: LLMAdvisor,
         order_executor: OrderExecutor,
         db: "TradeDB | None" = None,
     ) -> None:
@@ -41,21 +42,21 @@ class NewsHandler:
                     secret_key=self._config.alpaca_secret_key,
                 )
                 stream.subscribe_news(self._handle_news, "*")
-                logger.info("News WebSocket connected — listening for news")
+                logger.info("News WebSocket connected - listening for news")
                 # alpaca-py's public stream.run() calls asyncio.run() internally,
                 # which conflicts with our event loop. We call _run_forever() directly
                 # so the stream runs inside the same asyncio.gather loop as the
                 # position monitor. Revisit if alpaca-py adds an async-native entry point.
                 await stream._run_forever()
             except Exception:
-                logger.exception("News stream error — reconnecting in 5s")
+                logger.exception("News stream error - reconnecting in 5s")
                 await asyncio.sleep(5)
 
     async def _handle_news(self, news) -> None:
         try:
             clock = await asyncio.to_thread(self._client.get_clock)
             if not clock.is_open:
-                logger.debug("Market closed — skipping news event")
+                logger.debug("Market closed - skipping news event")
                 return
             headline = getattr(news, "headline", "")
             summary = getattr(news, "summary", "")
@@ -64,20 +65,17 @@ class NewsHandler:
             logger.info("News received: %s | tickers: %s", headline, symbols)
 
             if not symbols:
-                logger.debug("No tickers in news event — skipping")
+                logger.debug("No tickers in news event - skipping")
                 return
 
-            # --- retrospective headline filter (pre-LLM) ---
             if is_retrospective_headline(headline):
                 logger.info("SKIP [retrospective_headline_block] %s", headline[:100])
                 return
 
-            # --- routine news filter (pre-LLM) ---
             if is_routine_news(headline):
                 logger.info("SKIP [routine_news_block] %s", headline[:100])
                 return
 
-            # --- staleness filter (pre-LLM) ---
             article_ts = getattr(news, "created_at", None)
             if not isinstance(article_ts, datetime):
                 article_ts = None
@@ -85,7 +83,7 @@ class NewsHandler:
             stale_threshold = self._config.news_stale_hours
             if age_hours > stale_threshold:
                 logger.info(
-                    "SKIP [stale_news_block] %s — news is %.1fh old (threshold %.1fh)",
+                    "SKIP [stale_news_block] %s - news is %.1fh old (threshold %.1fh)",
                     headline[:80], age_hours, stale_threshold,
                 )
                 return
@@ -99,13 +97,12 @@ class NewsHandler:
                     )
                 except Exception as db_err:
                     logger.warning(
-                        "Failed to record news event in analytics DB: %s — decision and trade will be unlinked",
+                        "Failed to record news event in analytics DB: %s - decision and trade will be unlinked",
                         db_err,
                     )
 
-            # Capture decision timestamp before analyzing
             decision_monotonic = time.monotonic()
-            result = await self._advisor.analyze(
+            decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
                 symbols=symbols,
@@ -114,55 +111,36 @@ class NewsHandler:
                 news_age_hours=age_hours,
             )
 
-            if isinstance(result, MultiDecision):
-                decision = result.primary
-            else:
-                decision = result
-
-            if isinstance(result, MultiDecision):
-                logger.info(
-                    "Primary [%s] LLM decision: %s %s confidence=%.2f — %s",
-                    result.primary_provider, decision.action, decision.ticker,
-                    decision.confidence, decision.reasoning,
-                )
-                for pr in result.all_results:
-                    logger.info(
-                        "  [%s] %s %s confidence=%.2f hold_hours=%d",
-                        pr.provider, pr.decision.action, pr.decision.ticker or "—",
-                        pr.decision.confidence, pr.decision.hold_hours,
-                    )
-            else:
-                logger.info("LLM decision: %s %s — %s", decision.action, decision.ticker, decision.reasoning)
+            logger.info(
+                "LLM decision [%s]: %s %s confidence=%.2f - %s",
+                decision.provider, decision.action, decision.ticker,
+                decision.confidence, decision.reasoning,
+            )
 
             decision_id: int | None = None
             if self._db is not None and news_event_id is not None:
                 try:
                     decision_ts = datetime.now(timezone.utc).isoformat()
-                    if isinstance(result, MultiDecision):
-                        for pr in result.all_results:
-                            row_id = await asyncio.to_thread(
-                                self._db.record_decision,
-                                news_event_id, decision_ts,
-                                pr.decision.action, pr.decision.ticker, pr.decision.reasoning,
-                                pr.decision.confidence, pr.decision.hold_hours,
-                                pr.provider, pr.latency_sec, pr.cost_usd,
-                                pr.provider == result.primary_provider,
-                            )
-                            if pr.provider == result.primary_provider:
-                                decision_id = row_id
-                    else:
-                        decision_id = await asyncio.to_thread(
-                            self._db.record_decision,
-                            news_event_id, decision_ts, decision.action, decision.ticker, decision.reasoning,
-                            decision.confidence, decision.hold_hours,
-                            None, None, None, True,
-                        )
+                    decision_id = await asyncio.to_thread(
+                        self._db.record_decision,
+                        news_event_id,
+                        decision_ts,
+                        decision.action,
+                        decision.ticker,
+                        decision.reasoning,
+                        decision.confidence,
+                        decision.hold_hours,
+                        decision.provider,
+                        decision.latency_sec,
+                        decision.cost_usd,
+                        True,
+                    )
                 except Exception as db_err:
                     logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
 
             if decision.action in ("buy", "short") and decision.confidence < self._config.min_confidence:
                 logger.info(
-                    "Skipping %s %s — confidence %.2f below threshold %.2f",
+                    "Skipping %s %s - confidence %.2f below threshold %.2f",
                     decision.action, decision.ticker, decision.confidence, self._config.min_confidence,
                 )
                 if self._db is not None and decision_id is not None:
@@ -175,15 +153,24 @@ class NewsHandler:
             if decision.action == "buy" and decision.ticker:
                 logger.info(
                     "EXECUTING BUY: provider=%s ticker=%s confidence=%.2f decision_id=%s",
-                    result.primary_provider if isinstance(result, MultiDecision) else "single",
-                    decision.ticker, decision.confidence, decision_id,
+                    decision.provider, decision.ticker, decision.confidence, decision_id,
                 )
-                await self._executor.buy(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
+                await self._executor.buy(
+                    decision.ticker,
+                    decision_id=decision_id,
+                    decision_monotonic=decision_monotonic,
+                    hold_hours=decision.hold_hours,
+                )
             elif decision.action == "short" and decision.ticker:
                 if self._config.allow_short:
-                    await self._executor.short(decision.ticker, decision_id=decision_id, decision_monotonic=decision_monotonic, hold_hours=decision.hold_hours)
+                    await self._executor.short(
+                        decision.ticker,
+                        decision_id=decision_id,
+                        decision_monotonic=decision_monotonic,
+                        hold_hours=decision.hold_hours,
+                    )
                 else:
-                    logger.info("Short selling disabled — skipping short for %s", decision.ticker)
+                    logger.info("Short selling disabled - skipping short for %s", decision.ticker)
                     if self._db is not None and decision_id is not None:
                         try:
                             await asyncio.to_thread(self._db.record_skip, decision_id, "short_disabled")

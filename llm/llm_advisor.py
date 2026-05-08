@@ -1,11 +1,12 @@
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Literal
 
 from config import Config
-from llm.providers import ChatGPTProvider, ClaudeProvider
-from llm.providers.base import LLMProvider
+from llm.pricing import compute_cost
+from llm.providers import ChatGPTProvider
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +28,12 @@ Actions available:
 - sell: close an open long OR short position. Only for tickers you currently hold.
 - hold: do nothing.
 
-Rules — evaluate each one before deciding:
+Rules - evaluate each one before deciding:
 1. Only act on tickers directly mentioned in the news.
 2. Do not open a long and short on the same ticker simultaneously.
 3. REQUIRE a specific, quantifiable catalyst: confirmed earnings beat vs consensus (with actual %), FDA approval/rejection, signed acquisition with deal value, regulatory decision. Do NOT act on analyst upgrades, price target changes, or vague positive sentiment.
-4. REJECT retrospective move-explanation articles. Headlines matching "Why is X stock surging/skyrocketing/jumping/rising/gaining/soaring" are written AFTER the move already happened — the opportunity is gone. Return hold.
-5. REJECT articles where the headline says shares are "trading higher after..." or "trading lower after..." — this describes a price that already moved. Return hold.
+4. REJECT retrospective move-explanation articles. Headlines matching "Why is X stock surging/skyrocketing/jumping/rising/gaining/soaring" are written AFTER the move already happened - the opportunity is gone. Return hold.
+5. REJECT articles where the headline says shares are "trading higher after..." or "trading lower after..." - this describes a price that already moved. Return hold.
 6. REJECT routine scheduled data releases: monthly auto sales reports, CEO/shareholder letters without specific new surprises, recurring supply/demand reports. These are already priced in by the market.
 7. STALE NEWS WARNING: if news_age_hours > 2.0, the market has likely already fully priced in this catalyst. Lower confidence significantly. If news_age_hours > 4.0, return hold unless the catalyst is an exceptionally rare binary event (e.g., FDA approval).
 8. MARKET DIRECTION CHECK: if the article text implies the price has already made a large move, be skeptical. Chasing an extended move has poor risk/reward. Lower confidence when the article implies "up 9%" or "surging 25%".
@@ -44,11 +45,12 @@ Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
 {{"action": "sell", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0, "hold_hours": 0}}
 {{"action": "hold", "ticker": null, "reasoning": "one sentence", "confidence": 0.0, "hold_hours": 0}}
 
-confidence: your estimated probability that the price moves in the intended direction within hold_hours. Be honest — if unsure, return hold.
+confidence: your estimated probability that the price moves in the intended direction within hold_hours. Be honest - if unsure, return hold.
 hold_hours: how many hours the catalyst is expected to remain relevant (1-48).
 """
 
 _VALID_ACTIONS = frozenset({"buy", "short", "sell", "hold"})
+_PROVIDER_NAME = "chatgpt"
 
 
 @dataclass
@@ -58,6 +60,9 @@ class Decision:
     reasoning: str
     confidence: float = 0.0
     hold_hours: int = 0
+    provider: str = _PROVIDER_NAME
+    latency_sec: float | None = None
+    cost_usd: float | None = None
 
 
 def _parse_response(text: str) -> Decision:
@@ -93,11 +98,8 @@ def _parse_response(text: str) -> Decision:
 
 class LLMAdvisor:
     def __init__(self, config: Config) -> None:
-        provider = config.llm_provider
-        if provider == "claude":
-            self._provider: LLMProvider = ClaudeProvider(config.anthropic_api_key, config.anthropic_model)
-        else:  # chatgpt
-            self._provider = ChatGPTProvider(config.openai_api_key, config.openai_model)
+        self._model = config.openai_model
+        self._provider = ChatGPTProvider(config.openai_api_key, config.openai_model)
 
     async def analyze(
         self,
@@ -116,12 +118,26 @@ class LLMAdvisor:
             shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
             news_age_hours=news_age_hours,
         )
+        start = time.monotonic()
         try:
             result = await self._provider.complete(prompt)
-            return _parse_response(result.text)
+            decision = _parse_response(result.text)
+            decision.latency_sec = time.monotonic() - start
+            decision.cost_usd = compute_cost(self._model, result.input_tokens, result.output_tokens)
+            return decision
         except ValueError as e:
             logger.error("LLM parse error: %s", e)
-            return Decision(action="hold", ticker=None, reasoning=f"parse error: {e}")
+            return Decision(
+                action="hold",
+                ticker=None,
+                reasoning=f"parse error: {e}",
+                latency_sec=time.monotonic() - start,
+            )
         except Exception as e:
             logger.error("LLM API error: %s", e)
-            return Decision(action="hold", ticker=None, reasoning=f"api error: {e}")
+            return Decision(
+                action="hold",
+                ticker=None,
+                reasoning=f"api error: {e}",
+                latency_sec=time.monotonic() - start,
+            )

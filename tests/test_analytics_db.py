@@ -108,12 +108,12 @@ def test_record_decision_stores_provider_and_latency(db):
     nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
     did = db.record_decision(
         nid, "2026-01-01T00:00:01Z", "buy", "AAPL", "reason", 0.9, 2,
-        provider="claude", latency_sec=1.23,
+        provider="chatgpt", latency_sec=1.23,
     )
     row = db._conn.execute(
         "SELECT provider, latency_sec FROM llm_decisions WHERE id=?", (did,)
     ).fetchone()
-    assert row[0] == "claude"
+    assert row[0] == "chatgpt"
     assert abs(row[1] - 1.23) < 0.001
 
 
@@ -131,7 +131,7 @@ def test_record_decision_stores_cost_usd(db):
     nid = db.record_news("2026-01-01T00:00:00Z", "headline", None, [])
     did = db.record_decision(
         nid, "2026-01-01T00:00:01Z", "buy", "AAPL", "reason", 0.9, 2,
-        provider="claude", latency_sec=1.23, cost_usd=0.0035,
+        provider="chatgpt", latency_sec=1.23, cost_usd=0.0035,
     )
     row = db._conn.execute(
         "SELECT cost_usd FROM llm_decisions WHERE id=?", (did,)

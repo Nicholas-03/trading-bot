@@ -725,8 +725,9 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "WHERE provider IS NOT NULL AND latency_sec IS NOT NULL"
     ).fetchall()
     fig_plat = go.Figure()
-    provider_colors = {"claude": "#8b5cf6", "gemini": "#2563eb", "deepseek": "#0891b2", "chatgpt": "#16a34a"}
-    for p in ["claude", "gemini", "deepseek", "chatgpt"]:
+    provider_colors = {"chatgpt": "#16a34a"}
+    providers = sorted({r["provider"] for r in plat_rows if r["provider"]})
+    for p in providers:
         vals = [r["latency_sec"] for r in plat_rows if r["provider"] == p]
         if vals:
             fig_plat.add_trace(go.Box(y=vals, name=p, marker_color=provider_colors.get(p, _COLOR_MAIN)))
@@ -755,8 +756,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "FROM llm_decisions "
         "WHERE provider IS NOT NULL AND cost_usd IS NOT NULL "
         "GROUP BY provider "
-        "ORDER BY CASE provider "
-        "WHEN 'claude' THEN 0 WHEN 'gemini' THEN 1 WHEN 'deepseek' THEN 2 WHEN 'chatgpt' THEN 3 ELSE 4 END"
+        "ORDER BY CASE provider WHEN 'chatgpt' THEN 0 ELSE 1 END, provider"
     ).fetchall()
     fig_cost = go.Figure(go.Bar(
         x=[r["provider"] for r in cost_rows],
