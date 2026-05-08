@@ -96,6 +96,14 @@ class PositionMonitor:
             self._executor.confirm_closed(ticker)
             logger.info("Confirmed closed: %s no longer in Tradier positions", ticker)
 
+        # A close may be deferred while Tradier settles bracket leg cancellations.
+        # Once those blocking orders disappear, clear the guard so expired timed
+        # exits can retry the manual market close.
+        for ticker in self._executor.pending_close & live_symbols:
+            if await self._executor.close_deferred_ready(ticker):
+                self._executor.confirm_closed(ticker)
+                logger.info("Deferred close ready to retry for %s", ticker)
+
         # Detect positions closed by OTOCO bracket (held but disappeared, not manually closed).
         # Exclude pending_fill tickers: their OTOCO entry hasn't confirmed yet, so they're
         # not in live_symbols by design — treating them as bracket-closed would be a false positive.
@@ -105,6 +113,20 @@ class PositionMonitor:
             for ticker in otoco_closed:
                 logger.info("Position %s no longer in Tradier — OTOCO bracket fired", ticker)
                 await self._executor.handle_bracket_close(ticker, quotes.get(ticker))
+
+        # Early exit for trades that fail immediately after entry without ever
+        # printing a meaningful favorable move.
+        live_longs = (
+            self._executor.held_tickers
+            & live_symbols
+            - self._executor.pending_close
+            - self._executor.pending_fill
+        )
+        if live_longs:
+            quotes = await asyncio.to_thread(self._client.get_quotes, list(live_longs))
+            for ticker, price in quotes.items():
+                if self._executor.update_price_for_fast_fail(ticker, price):
+                    await self._executor.sell(ticker, exit_reason="fast_fail")
 
         # Detect short positions closed externally (not via this bot's sell path)
         external_short_closed = self._executor.shorted_tickers - live_symbols - self._executor.pending_close

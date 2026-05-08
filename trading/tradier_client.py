@@ -33,6 +33,16 @@ class TradierOrder:
     order_id: str | None = None
 
 
+@dataclass
+class MarketBar:
+    time: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float | None = None
+
+
 class TradierClient:
     _LIVE_BASE = "https://api.tradier.com/v1"
     _SANDBOX_BASE = "https://sandbox.tradier.com/v1"
@@ -98,6 +108,34 @@ class TradierClient:
             params={"symbols": ",".join(symbols)},
         )
         return _parse_quotes_with_open(resp.json())
+
+    def get_intraday_bars(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        interval: str = "1min",
+    ) -> list[MarketBar]:
+        """Return intraday OHLCV bars from Tradier Time & Sales.
+
+        The timesales endpoint accepts 1min/5min/15min bars and is suitable for
+        short entry-confirmation windows without depending on a separate data
+        provider. In paper mode, use the live quote token when configured so
+        market-data checks are not based on delayed sandbox data.
+        """
+        resp = self._request(
+            "GET",
+            "/markets/timesales",
+            http=self._quote_http or self._http,
+            params={
+                "symbol": symbol,
+                "interval": interval,
+                "start": _format_timesales_dt(start),
+                "end": _format_timesales_dt(end),
+                "session_filter": "open",
+            },
+        )
+        return _parse_market_bars(resp.json())
 
     def get_buying_power(self) -> float:
         """Return available buying power for the account."""
@@ -249,6 +287,12 @@ def _to_positive_float(value) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def _format_timesales_dt(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat(timespec="seconds")
+
+
 def _retry_delay(resp: httpx.Response, fallback: float) -> float:
     retry_after = resp.headers.get("Retry-After")
     if resp.status_code != 429 or not retry_after:
@@ -317,6 +361,25 @@ def _parse_quotes_with_open(data: dict) -> dict[str, tuple[float, float | None]]
             continue
         open_price = _to_positive_float(q.get("open"))
         result[str(symbol)] = (last, open_price)
+    return result
+
+
+def _parse_market_bars(data: dict) -> list[MarketBar]:
+    """Parse Tradier timesales response. Handles null, single bar, and arrays."""
+    raw = data.get("series")
+    if _is_nullish(raw) or not isinstance(raw, dict):
+        return []
+    result: list[MarketBar] = []
+    for item in _as_list(raw.get("data")):
+        ts = item.get("time")
+        open_price = _to_positive_float(item.get("open"))
+        high = _to_positive_float(item.get("high"))
+        low = _to_positive_float(item.get("low"))
+        close = _to_positive_float(item.get("close"))
+        if not ts or open_price is None or high is None or low is None or close is None:
+            continue
+        volume = _to_positive_float(item.get("volume"))
+        result.append(MarketBar(str(ts), open_price, high, low, close, volume))
     return result
 
 

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import httpx
 from trading.tradier_client import TradierClient
 from trading.tradier_client import TradierOrder
+from trading.tradier_client import MarketBar
 from config import Config
 from notifications.telegram_notifier import Notifier
 
@@ -43,6 +44,15 @@ class OrderExecutor:
         self._max_slippage_pct: float = config.max_slippage_pct
         self._extended_move_low_price_pct: float = config.extended_move_low_price_pct
         self._extended_move_any_pct: float = config.extended_move_any_pct
+        self._entry_confirmation_enabled: bool = config.entry_confirmation_enabled
+        self._entry_confirmation_lookback_minutes: int = config.entry_confirmation_lookback_minutes
+        self._entry_confirmation_trend_minutes: int = config.entry_confirmation_trend_minutes
+        self._entry_confirmation_max_fade_pct: float = config.entry_confirmation_max_fade_pct
+        self._entry_confirmation_max_quote_premium_pct: float = config.entry_confirmation_max_quote_premium_pct
+        self._fast_fail_enabled: bool = config.fast_fail_enabled
+        self._fast_fail_minutes: int = config.fast_fail_minutes
+        self._fast_fail_loss_pct: float = config.fast_fail_loss_pct
+        self._fast_fail_min_favorable_pct: float = config.fast_fail_min_favorable_pct
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
@@ -53,6 +63,8 @@ class OrderExecutor:
         self._trading_paused: bool = False
         # ticker -> (avg_entry_price, qty, trade_id); trade_id is None when db is disabled
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
+        # ticker -> best favorable move seen by the position monitor after entry
+        self._max_favorable_move: dict[str, float] = {}
         # ticker -> OTOCO bracket group order ID (present only for long positions)
         self._bracket_orders: dict[str, str] = {}
         # ticker -> UTC datetime when the hold_hours window expires
@@ -213,6 +225,7 @@ class OrderExecutor:
         self._held_tickers.discard(ticker)
         self._shorted_tickers.discard(ticker)
         self._position_book.pop(ticker, None)
+        self._max_favorable_move.pop(ticker, None)
         self._hold_until.pop(ticker, None)
         self._hold_opened_at.pop(ticker, None)
         self._pending_close.add(ticker)
@@ -257,6 +270,7 @@ class OrderExecutor:
             entry_price = float(t.get("entry_price") or 0.0)
             qty = int(t.get("qty") or 0)
             self._position_book[ticker] = (entry_price, qty, trade_id)
+            self._max_favorable_move.setdefault(ticker, 0.0)
             bracket_order_id = t.get("bracket_order_id")
             if bracket_order_id and t.get("side") == "buy":
                 self._bracket_orders[ticker] = str(bracket_order_id)
@@ -404,6 +418,83 @@ class OrderExecutor:
                 return order
         return None
 
+    def _active_bracket_close_orders_from(self, ticker: str, orders: list[TradierOrder]) -> list[TradierOrder]:
+        close_side = "buy_to_cover" if ticker in self._shorted_tickers else "sell"
+        return [
+            order for order in orders
+            if (
+                order.symbol == ticker
+                and order.side == close_side
+                and order.status in _PENDING_CLOSE_STATUSES
+                and order.order_type in {"limit", "stop", "stop_limit"}
+            )
+        ]
+
+    async def _active_bracket_close_orders(self, ticker: str) -> list[TradierOrder]:
+        try:
+            orders = await asyncio.to_thread(self._client.get_account_orders)
+        except Exception as e:
+            logger.warning("Could not fetch Tradier orders for %s bracket close check: %s", ticker, e)
+            return []
+        return self._active_bracket_close_orders_from(ticker, orders)
+
+    async def close_deferred_ready(self, ticker: str) -> bool:
+        """Return True when a deferred close may be retried."""
+        existing_market = await self._find_pending_market_close_order(ticker)
+        if existing_market is not None:
+            return False
+        return not await self._active_bracket_close_orders(ticker)
+
+    async def _wait_for_bracket_close_orders_clear(
+        self,
+        ticker: str,
+        timeout_sec: float = 30.0,
+        poll_interval: float = 3.0,
+    ) -> list[TradierOrder]:
+        max_polls = max(1, int(timeout_sec / poll_interval))
+        active: list[TradierOrder] = []
+        for _ in range(max_polls):
+            active = await self._active_bracket_close_orders(ticker)
+            if not active:
+                return []
+            await asyncio.sleep(poll_interval)
+        return active
+
+    async def _cancel_active_bracket_close_orders(self, ticker: str) -> list[TradierOrder]:
+        """Cancel active TP/SL close legs before submitting a manual market close.
+
+        After a restart, older DB rows may not have the parent OTOCO id.  In that
+        case we can still find the active limit/stop close legs in broker order
+        history and cancel them directly, which prevents the manual sell from
+        being rejected because the same shares are already reserved.
+        """
+        try:
+            orders = await asyncio.to_thread(self._client.get_account_orders)
+        except Exception as e:
+            logger.warning("Could not fetch Tradier orders before cancelling brackets for %s: %s", ticker, e)
+            return []
+
+        active_orders = self._active_bracket_close_orders_from(ticker, orders)
+        canceled = 0
+        for order in active_orders:
+            if not order.order_id:
+                continue
+            try:
+                await asyncio.to_thread(self._client.cancel_order, order.order_id)
+                canceled += 1
+                logger.info(
+                    "Cancelled active bracket close order %s (%s) for %s before manual close",
+                    order.order_id, order.order_type, ticker,
+                )
+            except Exception as e:
+                logger.warning("Failed to cancel bracket close order %s for %s: %s", order.order_id, ticker, e)
+        if canceled == 0:
+            return active_orders
+        return await self._wait_for_bracket_close_orders_clear(ticker)
+
+    def defer_close(self, ticker: str) -> None:
+        self._pending_close.add(ticker)
+
     async def _reconcile_fast_bracket_round_trip(
         self,
         ticker: str,
@@ -525,6 +616,91 @@ class OrderExecutor:
                     ticker, current_price or 0, pnl_str, exit_reason)
         await self._notifier.notify_sell(ticker, pnl_pct, pnl_usd)
 
+    async def _recent_bars(self, ticker: str, minutes: int) -> list[MarketBar]:
+        end = datetime.now(timezone.utc)
+        # Ask for a little extra time because sparse names can skip minute bars.
+        start = end - timedelta(minutes=max(minutes + 4, 10))
+        try:
+            return await asyncio.to_thread(self._client.get_intraday_bars, ticker, start, end, "1min")
+        except Exception as e:
+            logger.warning("Could not fetch 1m confirmation bars for %s: %s", ticker, e)
+            return []
+
+    def _entry_confirmation_skip_reason(
+        self,
+        ticker: str,
+        quote_price: float,
+        bars: list[MarketBar],
+    ) -> str | None:
+        if not self._entry_confirmation_enabled:
+            return None
+        if len(bars) < self._entry_confirmation_trend_minutes + 1:
+            logger.warning(
+                "ENTRY CONFIRMATION unavailable for %s: only %d recent 1m bars",
+                ticker, len(bars),
+            )
+            return "entry_confirmation_unavailable"
+
+        recent = bars[-self._entry_confirmation_lookback_minutes:]
+        latest = recent[-1]
+        trend_reference = recent[-(self._entry_confirmation_trend_minutes + 1)]
+        recent_high = max(bar.high for bar in recent)
+        fade_from_high = (recent_high - latest.close) / recent_high if recent_high > 0 else 0.0
+        trend_move = (latest.close - trend_reference.close) / trend_reference.close
+        quote_premium = (quote_price - latest.close) / latest.close if latest.close > 0 else 0.0
+
+        if fade_from_high > self._entry_confirmation_max_fade_pct:
+            logger.info(
+                "SKIP [faded_spike_block] %s - latest 1m close $%.2f is %.1f%% below recent high $%.2f",
+                ticker, latest.close, fade_from_high * 100, recent_high,
+            )
+            return "faded_spike_block"
+        if trend_move <= 0:
+            logger.info(
+                "SKIP [weak_followthrough_block] %s - latest 1m close $%.2f is not above %dm-ago close $%.2f",
+                ticker, latest.close, self._entry_confirmation_trend_minutes, trend_reference.close,
+            )
+            return "weak_followthrough_block"
+        if quote_premium > self._entry_confirmation_max_quote_premium_pct:
+            logger.info(
+                "SKIP [quote_premium_block] %s - quote $%.2f is %.1f%% above latest 1m close $%.2f",
+                ticker, quote_price, quote_premium * 100, latest.close,
+            )
+            return "quote_premium_block"
+        return None
+
+    def update_price_for_fast_fail(self, ticker: str, current_price: float) -> bool:
+        """Track early trade progress; return True when an immediate-failure exit is warranted."""
+        if not self._fast_fail_enabled:
+            return False
+        entry = self._position_book.get(ticker)
+        opened_at = self._hold_opened_at.get(ticker)
+        if entry is None or opened_at is None:
+            return False
+        entry_price, qty, _ = entry
+        if entry_price <= 0 or qty <= 0:
+            return False
+
+        age = datetime.now(timezone.utc) - opened_at
+        if age > timedelta(minutes=self._fast_fail_minutes):
+            return False
+
+        pnl_pct = (current_price - entry_price) / entry_price
+        favorable = max(0.0, pnl_pct)
+        best_favorable = max(self._max_favorable_move.get(ticker, 0.0), favorable)
+        self._max_favorable_move[ticker] = best_favorable
+
+        if pnl_pct <= -self._fast_fail_loss_pct and best_favorable < self._fast_fail_min_favorable_pct:
+            logger.info(
+                "FAST FAIL EXIT for %s - age %.1fm pnl %.2f%% best favorable %.2f%%",
+                ticker,
+                age.total_seconds() / 60,
+                pnl_pct * 100,
+                best_favorable * 100,
+            )
+            return True
+        return False
+
     async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
@@ -590,6 +766,12 @@ class OrderExecutor:
                     await self._record_skip_safe(decision_id, "negative_price_confirmation_block")
                     return
 
+            bars = await self._recent_bars(ticker, self._entry_confirmation_lookback_minutes)
+            entry_skip_reason = self._entry_confirmation_skip_reason(ticker, price, bars)
+            if entry_skip_reason is not None:
+                await self._record_skip_safe(decision_id, entry_skip_reason)
+                return
+
             qty = math.floor(self._notional_usd / price)
             if qty == 0:
                 logger.info(
@@ -599,24 +781,17 @@ class OrderExecutor:
                 await self._record_skip_safe(decision_id, "budget_exceeded")
                 return
 
-            # --- limit entry for volatile / low-price stocks ---
-            entry_limit: float | None = None
-            if open_price is not None and open_price > 0:
-                intraday_move_pct = (price - open_price) / open_price
-                if price < 5.0 or intraday_move_pct > 0.10:
-                    entry_limit = price * (1 + self._max_slippage_pct)
-            else:
-                if price < 5.0:
-                    entry_limit = price * (1 + self._max_slippage_pct)
+            # Every news entry is capped with a limit so a fast tape cannot turn a
+            # good signal into a chase fill above the confirmation price.
+            entry_limit = price * (1 + self._max_slippage_pct)
 
             tp_price = round(price * (1 + self._take_profit_pct), 2)
             sl_price = round(price * (1 - self._stop_loss_pct), 2)
 
-            if entry_limit is not None:
-                logger.info(
-                    "OTOCO LIMIT entry for %s @ $%.4f (quote $%.2f + %.0f%% slippage), TP=$%.2f SL=$%.2f",
-                    ticker, entry_limit, price, self._max_slippage_pct * 100, tp_price, sl_price,
-                )
+            logger.info(
+                "OTOCO LIMIT entry for %s @ $%.4f (quote $%.2f + %.1f%% slippage cap), TP=$%.2f SL=$%.2f",
+                ticker, entry_limit, price, self._max_slippage_pct * 100, tp_price, sl_price,
+            )
 
             order_id = await asyncio.to_thread(
                 self._client.submit_otoco_order, ticker, qty, tp_price, sl_price, entry_limit
@@ -629,6 +804,7 @@ class OrderExecutor:
             self._held_tickers.add(ticker)
             self._daily_bought_tickers.add(ticker)
             self._position_book[ticker] = (price, qty, None)
+            self._max_favorable_move[ticker] = 0.0
             self._maybe_reset_day()
             self._maybe_reset_week()
             self._daily_buys += 1
@@ -659,6 +835,7 @@ class OrderExecutor:
                 # cannot observe a partially-rolled-back entry during cancel_order.
                 self._held_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
+                self._max_favorable_move.pop(ticker, None)
                 self._bracket_orders.pop(ticker, None)
                 if ticker not in self._pending_close:
                     # handle_bracket_close hasn't fired concurrently — safe to roll back day guards.
@@ -800,6 +977,20 @@ class OrderExecutor:
                 logger.info("Cancelled bracket order %s for %s before manual close", bracket_id, ticker)
             except Exception as e:
                 logger.warning("Failed to cancel bracket %s for %s: %s", bracket_id, ticker, e)
+
+        blocking_orders = await self._cancel_active_bracket_close_orders(ticker)
+        if blocking_orders:
+            self.defer_close(ticker)
+            order_ids = ", ".join(o.order_id or "unknown" for o in blocking_orders)
+            logger.warning(
+                "Close for %s deferred while bracket close order cancellation is pending: %s",
+                ticker, order_ids,
+            )
+            await self._notifier.notify_error(
+                f"sell {ticker}",
+                f"bracket cancellation pending; close deferred ({order_ids})",
+            )
+            return
 
         existing_close = await self._find_pending_market_close_order(ticker)
         if existing_close is not None:

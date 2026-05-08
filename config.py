@@ -30,6 +30,15 @@ class Config:
     max_slippage_pct: float
     extended_move_low_price_pct: float
     extended_move_any_pct: float
+    entry_confirmation_enabled: bool
+    entry_confirmation_lookback_minutes: int
+    entry_confirmation_trend_minutes: int
+    entry_confirmation_max_fade_pct: float
+    entry_confirmation_max_quote_premium_pct: float
+    fast_fail_enabled: bool
+    fast_fail_minutes: int
+    fast_fail_loss_pct: float
+    fast_fail_min_favorable_pct: float
     news_stale_hours: float
 
 
@@ -39,6 +48,10 @@ def _parse_float(key: str, default: str) -> float:
         return float(raw)
     except ValueError:
         raise ValueError(f"Environment variable {key}={raw!r} is not a valid float")
+
+
+def _parse_bool(key: str, default: str) -> bool:
+    return os.getenv(key, default).lower() in ("true", "1", "yes")
 
 
 def load_config() -> Config:
@@ -91,9 +104,18 @@ def load_config() -> Config:
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
         min_confidence=_parse_float("MIN_CONFIDENCE", "0.7"),
-        max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "1.0") / 100,
+        max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "0.5") / 100,
         extended_move_low_price_pct=_parse_float("EXTENDED_MOVE_LOW_PRICE_PCT", "15.0") / 100,
-        extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "20.0") / 100,
+        extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "10.0") / 100,
+        entry_confirmation_enabled=_parse_bool("ENTRY_CONFIRMATION_ENABLED", "true"),
+        entry_confirmation_lookback_minutes=int(os.getenv("ENTRY_CONFIRMATION_LOOKBACK_MINUTES", "8")),
+        entry_confirmation_trend_minutes=int(os.getenv("ENTRY_CONFIRMATION_TREND_MINUTES", "3")),
+        entry_confirmation_max_fade_pct=_parse_float("ENTRY_CONFIRMATION_MAX_FADE_PCT", "1.5") / 100,
+        entry_confirmation_max_quote_premium_pct=_parse_float("ENTRY_CONFIRMATION_MAX_QUOTE_PREMIUM_PCT", "1.0") / 100,
+        fast_fail_enabled=_parse_bool("FAST_FAIL_ENABLED", "true"),
+        fast_fail_minutes=int(os.getenv("FAST_FAIL_MINUTES", "5")),
+        fast_fail_loss_pct=_parse_float("FAST_FAIL_LOSS_PCT", "1.5") / 100,
+        fast_fail_min_favorable_pct=_parse_float("FAST_FAIL_MIN_FAVORABLE_PCT", "0.25") / 100,
         news_stale_hours=_parse_float("NEWS_STALE_HOURS", "2.0"),
     )
 
@@ -113,6 +135,20 @@ def load_config() -> Config:
         raise ValueError("EXTENDED_MOVE_LOW_PRICE_PCT must be between 0 and 100 exclusive")
     if not (0.0 < cfg.extended_move_any_pct < 1.0):
         raise ValueError("EXTENDED_MOVE_ANY_PCT must be between 0 and 100 exclusive")
+    if cfg.entry_confirmation_lookback_minutes < 3:
+        raise ValueError("ENTRY_CONFIRMATION_LOOKBACK_MINUTES must be at least 3")
+    if cfg.entry_confirmation_trend_minutes < 1:
+        raise ValueError("ENTRY_CONFIRMATION_TREND_MINUTES must be at least 1")
+    if not (0.0 < cfg.entry_confirmation_max_fade_pct < 1.0):
+        raise ValueError("ENTRY_CONFIRMATION_MAX_FADE_PCT must be between 0 and 100 exclusive")
+    if not (0.0 < cfg.entry_confirmation_max_quote_premium_pct < 1.0):
+        raise ValueError("ENTRY_CONFIRMATION_MAX_QUOTE_PREMIUM_PCT must be between 0 and 100 exclusive")
+    if cfg.fast_fail_minutes < 1:
+        raise ValueError("FAST_FAIL_MINUTES must be at least 1")
+    if not (0.0 < cfg.fast_fail_loss_pct < 1.0):
+        raise ValueError("FAST_FAIL_LOSS_PCT must be between 0 and 100 exclusive")
+    if not (0.0 <= cfg.fast_fail_min_favorable_pct < 1.0):
+        raise ValueError("FAST_FAIL_MIN_FAVORABLE_PCT must be between 0 and 100 exclusive")
     if cfg.news_stale_hours <= 0:
         raise ValueError("NEWS_STALE_HOURS must be positive")
 

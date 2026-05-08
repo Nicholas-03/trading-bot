@@ -6,6 +6,7 @@ from trading.tradier_client import (
     TradierPosition,
     _parse_account_orders,
     _parse_buying_power,
+    _parse_market_bars,
     _parse_order_status,
     _parse_positions,
     _parse_quotes,
@@ -196,6 +197,26 @@ def test_parse_quotes_with_open_empty():
 def test_parse_quotes_with_open_null_last_excluded():
     data = {"quotes": {"quote": {"symbol": "AAPL", "last": None, "open": 170.0}}}
     assert _parse_quotes_with_open(data) == {}
+
+
+def test_parse_market_bars_single():
+    data = {
+        "series": {
+            "data": {
+                "time": "2026-05-07T10:21:00",
+                "open": 13.52,
+                "high": 13.53,
+                "low": 13.45,
+                "close": 13.45,
+                "volume": 81843,
+            }
+        }
+    }
+
+    bars = _parse_market_bars(data)
+
+    assert len(bars) == 1
+    assert bars[0].close == 13.45
 
 
 def test_parse_account_orders_flattens_nested_otoco_legs():

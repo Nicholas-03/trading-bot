@@ -1,10 +1,10 @@
 # tests/test_order_executor.py
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, AsyncMock
 import time
 import pytest
 from trading.order_executor import OrderExecutor, _monday_of
-from trading.tradier_client import TradierOrder, TradierPosition
+from trading.tradier_client import MarketBar, TradierOrder, TradierPosition
 from config import Config
 
 
@@ -15,9 +15,18 @@ def _make_executor() -> OrderExecutor:
     config.short_qty = 1
     config.stop_loss_pct = 0.02
     config.take_profit_pct = 0.03
-    config.max_slippage_pct = 0.01
+    config.max_slippage_pct = 0.005
     config.extended_move_low_price_pct = 0.15
-    config.extended_move_any_pct = 0.20
+    config.extended_move_any_pct = 0.10
+    config.entry_confirmation_enabled = False
+    config.entry_confirmation_lookback_minutes = 8
+    config.entry_confirmation_trend_minutes = 3
+    config.entry_confirmation_max_fade_pct = 0.015
+    config.entry_confirmation_max_quote_premium_pct = 0.01
+    config.fast_fail_enabled = True
+    config.fast_fail_minutes = 5
+    config.fast_fail_loss_pct = 0.015
+    config.fast_fail_min_favorable_pct = 0.0025
     notifier = MagicMock()
     notifier.notify_buy = AsyncMock()
     notifier.notify_short = AsyncMock()
@@ -562,6 +571,82 @@ def test_buy_allowed_slight_pullback():
     ex._client.submit_otoco_order.assert_called_once()
 
 
+# --- 1-minute entry confirmation ---
+
+def _bars(closes: list[float], highs: list[float] | None = None) -> list[MarketBar]:
+    highs = highs or closes
+    return [
+        MarketBar(
+            time=f"2026-05-07T10:{idx:02d}:00",
+            open=close,
+            high=high,
+            low=min(close, high),
+            close=close,
+            volume=1000,
+        )
+        for idx, (close, high) in enumerate(zip(closes, highs), start=1)
+    ]
+
+
+def test_entry_confirmation_blocks_faded_spike():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+
+    reason = ex._entry_confirmation_skip_reason(
+        "GPGI",
+        13.45,
+        _bars(
+            [13.84, 13.83, 13.75, 13.72, 13.73, 13.62, 13.51, 13.45],
+            [13.90, 13.90, 13.84, 13.76, 13.75, 13.72, 13.62, 13.53],
+        ),
+    )
+
+    assert reason == "faded_spike_block"
+
+
+def test_entry_confirmation_blocks_weak_followthrough():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+
+    reason = ex._entry_confirmation_skip_reason(
+        "GPGI",
+        13.45,
+        _bars([13.50, 13.55, 13.52, 13.51, 13.48, 13.46, 13.45, 13.44]),
+    )
+
+    assert reason == "weak_followthrough_block"
+
+
+def test_entry_confirmation_blocks_quote_premium():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+
+    reason = ex._entry_confirmation_skip_reason(
+        "GPGI",
+        14.05,
+        _bars([13.50, 13.55, 13.57, 13.58, 13.60, 13.62, 13.64, 13.66]),
+    )
+
+    assert reason == "quote_premium_block"
+
+
+def test_fast_fail_triggers_only_before_meaningful_favorable_move():
+    ex = _make_executor()
+    ex._position_book["HIMX"] = (17.47, 28, None)
+    ex._hold_opened_at["HIMX"] = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    assert ex.update_price_for_fast_fail("HIMX", 17.18) is True
+
+
+def test_fast_fail_does_not_trigger_after_favorable_move():
+    ex = _make_executor()
+    ex._position_book["HIMX"] = (17.47, 28, None)
+    ex._hold_opened_at["HIMX"] = datetime.now(timezone.utc) - timedelta(minutes=2)
+
+    assert ex.update_price_for_fast_fail("HIMX", 17.55) is False
+    assert ex.update_price_for_fast_fail("HIMX", 17.18) is False
+
+
 # --- limit order dispatch ---
 
 def test_buy_uses_limit_entry_for_low_price_stock():
@@ -583,11 +668,11 @@ def test_buy_uses_limit_entry_for_low_price_stock():
     # submit_otoco_order(symbol, qty, tp_price, sl_price, entry_limit) — entry_limit is args[4]
     entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
     assert entry_limit is not None
-    assert entry_limit == pytest.approx(3.18 * 1.01, rel=1e-4)
+    assert entry_limit == pytest.approx(3.18 * 1.005, rel=1e-4)
 
 
-def test_buy_uses_market_entry_for_calm_large_cap():
-    """High-price stock with modest intraday move → OTOCO with market entry (entry_limit=None)."""
+def test_buy_uses_limit_entry_for_calm_large_cap():
+    """High-price stock with modest intraday move still uses a capped limit entry."""
     import asyncio
     ex = _make_executor()
     # IONQ: open $44.16, last $46.05 → +4.3%, price > $5
@@ -603,7 +688,7 @@ def test_buy_uses_market_entry_for_calm_large_cap():
 
     call_args = ex._client.submit_otoco_order.call_args
     entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
-    assert entry_limit is None
+    assert entry_limit == pytest.approx(46.05 * 1.005, rel=1e-4)
 
 
 # --- handle_bracket_close ---
@@ -744,6 +829,80 @@ def test_sell_does_not_submit_duplicate_when_market_close_pending():
     ex._notifier.notify_error.assert_called_once()
 
 
+def test_sell_cancels_active_bracket_close_legs_when_parent_id_missing():
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("KHC")
+    ex._position_book["KHC"] = (22.92, 2, 123)
+    ex._client.get_quotes = MagicMock(return_value={"KHC": 22.50})
+    ex._client.get_account_orders = MagicMock(side_effect=[
+        [
+            TradierOrder(
+                symbol="KHC",
+                side="sell",
+                status="open",
+                order_type="limit",
+                avg_fill_price=None,
+                filled_at=None,
+                quantity=2,
+                order_id="tp-1",
+            ),
+            TradierOrder(
+                symbol="KHC",
+                side="sell",
+                status="open",
+                order_type="stop",
+                avg_fill_price=None,
+                filled_at=None,
+                quantity=2,
+                order_id="sl-1",
+            ),
+        ],
+        [],
+        [],
+    ])
+    ex._client.cancel_order = MagicMock()
+    ex._client.close_position = MagicMock(return_value="sell-1")
+    ex._wait_for_fill = AsyncMock(return_value=(True, 22.50))
+
+    asyncio.run(ex.sell("KHC", exit_reason="hold_hours"))
+
+    ex._client.cancel_order.assert_any_call("tp-1")
+    ex._client.cancel_order.assert_any_call("sl-1")
+    ex._client.close_position.assert_called_once_with("KHC")
+    assert "KHC" not in ex.held_tickers
+    ex._notifier.notify_sell.assert_called_once()
+
+
+def test_sell_defers_when_bracket_cancel_is_still_pending():
+    import asyncio
+    ex = _make_executor()
+    ex._held_tickers.add("KHC")
+    ex._position_book["KHC"] = (22.92, 2, 123)
+    blocking = TradierOrder(
+        symbol="KHC",
+        side="sell",
+        status="pending",
+        order_type="stop",
+        avg_fill_price=None,
+        filled_at=None,
+        quantity=2,
+        order_id="sl-1",
+    )
+    ex._client.get_quotes = MagicMock(return_value={"KHC": 22.50})
+    ex._client.get_account_orders = MagicMock(return_value=[blocking])
+    ex._client.cancel_order = MagicMock()
+    ex._client.close_position = MagicMock(return_value="sell-1")
+    ex._wait_for_bracket_close_orders_clear = AsyncMock(return_value=[blocking])
+
+    asyncio.run(ex.sell("KHC", exit_reason="hold_hours"))
+
+    ex._client.cancel_order.assert_called_once_with("sl-1")
+    ex._client.close_position.assert_not_called()
+    assert "KHC" in ex.pending_close
+    ex._notifier.notify_error.assert_called_once()
+
+
 def test_sell_unconfirmed_does_not_notify_or_close_db():
     import asyncio
     ex = _make_executor()
@@ -768,7 +927,7 @@ def test_buy_fast_bracket_round_trip_uses_tradier_fills():
     ex._db = MagicMock()
     ex._db.record_trade_open.return_value = 42
     ex._client.get_buying_power = MagicMock(return_value=500.0)
-    ex._client.get_quotes_with_open = MagicMock(return_value={"ZTEK": (0.56, 0.50)})
+    ex._client.get_quotes_with_open = MagicMock(return_value={"ZTEK": (0.56, 0.53)})
     ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
     ex._wait_for_position = AsyncMock(return_value=(False, None))
     ex._client.cancel_order = MagicMock()
