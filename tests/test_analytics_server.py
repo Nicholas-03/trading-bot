@@ -31,13 +31,11 @@ def test_recent_decisions_use_primary_without_trade_and_render_skip(tmp_path):
     assert "confidence_below_threshold" in server._render_table_rows(recent)
 
 
-def test_index_reads_fresh_db_rows_and_auto_refreshes(tmp_path):
+def test_index_reads_fresh_db_rows_without_browser_cache(tmp_path):
     db_path = tmp_path / "trades.db"
     db = TradeDB(str(db_path))
     old_db_path = server.DB_PATH
-    old_refresh_seconds = server.REFRESH_SECONDS
     server.DB_PATH = str(db_path)
-    server.REFRESH_SECONDS = 1
     try:
         news_id = db.record_news("2026-05-01T14:00:00Z", "AAA first headline", None, ["AAA"])
         db.record_decision(news_id, "2026-05-01T14:00:01Z", "hold", "AAA", "first")
@@ -46,7 +44,7 @@ def test_index_reads_fresh_db_rows_and_auto_refreshes(tmp_path):
         first_body = first.body.decode()
         assert "AAA first headline" in first_body
         assert "BBB second headline" not in first_body
-        assert "window.location.reload()" in first_body
+        assert "window.location.reload()" not in first_body
         assert first.headers["cache-control"] == "no-store, max-age=0"
 
         news_id = db.record_news("2026-05-01T14:01:00Z", "BBB second headline", None, ["BBB"])
@@ -58,4 +56,3 @@ def test_index_reads_fresh_db_rows_and_auto_refreshes(tmp_path):
     finally:
         db.close()
         server.DB_PATH = old_db_path
-        server.REFRESH_SECONDS = old_refresh_seconds

@@ -118,9 +118,7 @@ python analytics/export_db.py
 
 ### Railway dashboard
 
-The Docker image starts both the trading bot and the FastAPI analytics dashboard on Railway. Attach a Railway volume at `/app/data`, set `ANALYTICS_DB_PATH=/app/data/trades.db`, then generate a public Railway domain for the service. The dashboard is served from that generated URL and auto-refreshes every 15 seconds so new SQLite rows written by the bot appear without a manual reload.
-
-Set `DASHBOARD_REFRESH_SECONDS=0` to disable auto-refresh, or use another integer value to change the interval.
+The Docker image starts both the trading bot and the FastAPI analytics dashboard on Railway. Attach a Railway volume at `/app/data`, set `ANALYTICS_DB_PATH=/app/data/trades.db`, then generate a public Railway domain for the service. The dashboard is served from that generated URL and reads the latest SQLite rows whenever you load or refresh the page.
 
 ## Testing
 
