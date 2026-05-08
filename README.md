@@ -21,7 +21,7 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 
 - [Alpaca](https://alpaca.markets) account — used for the real-time news feed only (not for trading); a free account works
 - [Tradier](https://developer.tradier.com) account — used for all trading; sandbox is free
-- An LLM API key — [Anthropic](https://console.anthropic.com) (Claude), [Google AI](https://aistudio.google.com) (Gemini), or [DeepSeek](https://platform.deepseek.com)
+- An OpenAI API key for ChatGPT decisions
 
 ## Local development
 
@@ -57,13 +57,9 @@ Edit `.env` with your API keys and settings:
 | `TRADIER_ACCOUNT_ID` | Tradier account ID | required |
 | `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
 | `TRADIER_LIVE_TOKEN` | Live account token for real-time quotes while paper trading (sandbox quotes are 15-min delayed) | optional |
-| `LLM_PROVIDER` | LLM to use: `claude`, `gemini`, or `deepseek` | required |
-| `ANTHROPIC_API_KEY` | Anthropic API key (if `LLM_PROVIDER=claude`) | conditional |
-| `ANTHROPIC_MODEL` | Claude model ID | `claude-opus-4-6` |
-| `GOOGLE_API_KEY` | Google API key (if `LLM_PROVIDER=gemini`) | conditional |
-| `GEMINI_MODEL` | Gemini model ID | `gemini-2.0-flash` |
-| `DEEPSEEK_API_KEY` | DeepSeek API key (if `LLM_PROVIDER=deepseek`) | conditional |
-| `DEEPSEEK_MODEL` | DeepSeek model ID | `deepseek-chat` |
+| `LLM_PROVIDER` | LLM provider to use | `chatgpt` |
+| `OPENAI_API_KEY` | OpenAI API key | required |
+| `OPENAI_MODEL` | OpenAI model ID | `gpt-5.4-mini` |
 | `TRADE_AMOUNT_USD` | Dollar amount per buy order | `5.0` |
 | `ALLOW_SHORT` | Enable short selling | `false` |
 | `SHORT_QTY` | Shares per short sell order | `1` |

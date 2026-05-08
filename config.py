@@ -57,7 +57,7 @@ def _parse_bool(key: str, default: str) -> bool:
 def load_config() -> Config:
     load_dotenv()
 
-    provider = os.getenv("LLM_PROVIDER", "claude").lower()
+    provider = os.getenv("LLM_PROVIDER", "chatgpt").lower()
     if provider not in ("claude", "chatgpt", "multi"):
         raise ValueError(
             f"LLM_PROVIDER must be 'claude', 'chatgpt', or 'multi', got {provider!r}"
@@ -92,7 +92,7 @@ def load_config() -> Config:
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
