@@ -986,10 +986,6 @@ class OrderExecutor:
                 "Close for %s deferred while bracket close order cancellation is pending: %s",
                 ticker, order_ids,
             )
-            await self._notifier.notify_error(
-                f"sell {ticker}",
-                f"bracket cancellation pending; close deferred ({order_ids})",
-            )
             return
 
         existing_close = await self._find_pending_market_close_order(ticker)

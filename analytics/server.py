@@ -15,11 +15,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from analytics.db import TradeDB
 
 DB_PATH = os.getenv("ANALYTICS_DB_PATH", "data/trades.db")
+REFRESH_SECONDS = max(0, int(os.getenv("DASHBOARD_REFRESH_SECONDS", "15")))
 
 app = FastAPI()
 
 
 def _ensure_schema() -> None:
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     db = TradeDB(DB_PATH)
     db.close()
 
@@ -389,6 +391,7 @@ tr.detail-row td {
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     c = sqlite3.connect(DB_PATH, timeout=30.0)
     c.execute("PRAGMA busy_timeout = 30000")
     c.row_factory = sqlite3.Row
@@ -900,6 +903,19 @@ def _render_table_rows(recent: list[dict]) -> str:
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
 
+def _render_refresh_script() -> str:
+    if REFRESH_SECONDS <= 0:
+        return ""
+    return f"""
+  const refreshMs = {REFRESH_SECONDS * 1000};
+  setInterval(() => {{
+    if (!document.hidden) {{
+      window.location.reload();
+    }}
+  }}, refreshMs);
+"""
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     charts, stats, recent = _build_page_data()
@@ -907,12 +923,19 @@ def index() -> HTMLResponse:
     charts_html = _render_charts(charts)
     table_rows = _render_table_rows(recent)
     loaded_events = f"{len(recent):,} events loaded"
+    refresh_note = (
+        f"Auto-refresh every {REFRESH_SECONDS}s"
+        if REFRESH_SECONDS > 0
+        else "Auto-refresh off"
+    )
+    refresh_script = _render_refresh_script()
 
     content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-store">
 <title>Trading Analytics</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <style>{_CSS}</style>
@@ -922,7 +945,7 @@ def index() -> HTMLResponse:
 
   <header class="page-header">
     <h1>Trading Analytics</h1>
-    <span class="subtitle">Live · {loaded_events}</span>
+    <span class="subtitle">Live · {loaded_events} · {refresh_note}</span>
   </header>
 
   <p class="section-title">Overview</p>
@@ -970,6 +993,7 @@ def index() -> HTMLResponse:
 <script>
   let currentAction = 'all';
   let closedOnly = false;
+{refresh_script}
 
   function filterTrades(filter, btn) {{
     if (filter === 'closed') {{
@@ -1059,7 +1083,10 @@ def index() -> HTMLResponse:
 </script>
 </body>
 </html>"""
-    return HTMLResponse(content=content)
+    return HTMLResponse(
+        content=content,
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.get("/api/decision/{decision_id}")

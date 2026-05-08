@@ -900,7 +900,7 @@ def test_sell_defers_when_bracket_cancel_is_still_pending():
     ex._client.cancel_order.assert_called_once_with("sl-1")
     ex._client.close_position.assert_not_called()
     assert "KHC" in ex.pending_close
-    ex._notifier.notify_error.assert_called_once()
+    ex._notifier.notify_error.assert_not_called()
 
 
 def test_sell_unconfirmed_does_not_notify_or_close_db():

@@ -23,11 +23,13 @@ ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 
 # Copy only the source needed at runtime
-COPY main.py config.py ./
+COPY main.py config.py railway_start.py ./
 COPY trading/ trading/
 COPY llm/ llm/
 COPY news/ news/
 COPY notifications/ notifications/
 COPY analytics/ analytics/
 
-CMD ["python", "main.py"]
+EXPOSE 8080
+
+CMD ["python", "railway_start.py"]
