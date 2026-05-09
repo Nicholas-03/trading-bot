@@ -110,3 +110,24 @@ def test_recent_closed_trade_uses_closed_time_for_sort_and_display(tmp_path):
     assert recent[0]["ticker"] == "MSFT"
     assert recent[0]["ts"] == "2026-05-08T15:00:00Z"
     assert 'data-closed="true"' in server._render_table_rows([recent[0]])
+
+
+def test_account_value_chart_uses_snapshots(tmp_path):
+    db_path = tmp_path / "trades.db"
+    db = TradeDB(str(db_path))
+    try:
+        db.record_account_value("2026-05-09T10:00:00Z", 25000.0)
+        db.record_account_value("2026-05-09T10:30:00Z", 25075.5)
+    finally:
+        db.close()
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        charts, _ = server._query_charts(con)
+    finally:
+        con.close()
+
+    assert "account_value" in charts
+    assert charts["account_value"]["data"][0]["y"] == [25000.0, 25075.5]
+    assert charts["account_value"]["layout"]["title"]["text"] == "Account Total Value Trend"

@@ -178,6 +178,16 @@ def test_record_skip_returns_false_for_missing_decision(db):
     assert db.record_skip(999, "buy_exception") is False
 
 
+def test_record_account_value_snapshot(db):
+    sid = db.record_account_value("2026-05-09T10:00:00Z", 25123.45)
+    row = db._conn.execute(
+        "SELECT ts, value_usd FROM account_value_snapshots WHERE id=?",
+        (sid,),
+    ).fetchone()
+
+    assert row == ("2026-05-09T10:00:00Z", 25123.45)
+
+
 def test_record_trade_close_does_not_overwrite_closed_trade(db):
     tid = db.record_trade_open(None, "AAPL", "buy", 1, 100.0, "2026-01-01T00:00:00Z")
     assert db.record_trade_close(tid, 103.0, 3.0, 0.03, "take_profit", "2026-01-01T01:00:00Z")

@@ -2,11 +2,15 @@
 import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 import pytz
 from trading.tradier_client import TradierClient
 from trading.order_executor import OrderExecutor
 from notifications.telegram_notifier import Notifier
 from config import Config
+
+if TYPE_CHECKING:
+    from analytics.db import TradeDB
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +40,12 @@ class PositionMonitor:
         config: Config,
         order_executor: OrderExecutor,
         notifier: Notifier,
+        db: "TradeDB | None" = None,
     ) -> None:
         self._client = client
         self._executor = order_executor
         self._notifier = notifier
+        self._db = db
         self._last_report_date: date | None = None
 
     async def run(self) -> None:
@@ -117,6 +123,7 @@ class PositionMonitor:
             return fallback_buys, fallback_sells, fallback_pnl
 
     async def _check_positions(self) -> None:
+        await self._record_account_value_snapshot()
         positions = await asyncio.to_thread(self._client.get_all_positions)
         live_symbols = {pos.symbol for pos in positions}
 
@@ -175,3 +182,13 @@ class PositionMonitor:
             if ticker not in self._executor.pending_close:
                 logger.info("TIMED EXIT TRIGGERED: ticker=%s", ticker)
                 await self._executor.sell(ticker, exit_reason="hold_hours")
+
+    async def _record_account_value_snapshot(self) -> None:
+        if self._db is None:
+            return
+        try:
+            value = await asyncio.to_thread(self._client.get_account_total_value)
+            ts = datetime.now(timezone.utc).isoformat()
+            await asyncio.to_thread(self._db.record_account_value, ts, value)
+        except Exception as exc:
+            logger.warning("Account value snapshot unavailable: %s", exc)

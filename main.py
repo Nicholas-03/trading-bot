@@ -142,6 +142,15 @@ def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
     return held, shorted
 
 
+def _record_account_value_snapshot(client: TradierClient, db) -> None:
+    try:
+        value = client.get_account_total_value()
+        db.record_account_value(datetime.now(timezone.utc).isoformat(), value)
+        logger.info("Recorded account value snapshot: $%.2f", value)
+    except Exception as exc:
+        logger.warning("Initial account value snapshot unavailable: %s", exc)
+
+
 async def main() -> None:
     config = load_config()
     client = _make_tradier_client(config)
@@ -171,6 +180,7 @@ async def main() -> None:
             os.makedirs(os.path.dirname(config.analytics_db_path) or ".", exist_ok=True)
             db = TradeDB(config.analytics_db_path)
             logger.info("Analytics DB: %s", config.analytics_db_path)
+            _record_account_value_snapshot(client, db)
 
         order_executor = OrderExecutor(
             client,
@@ -193,7 +203,7 @@ async def main() -> None:
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
         llm_advisor = LLMAdvisor(config)
         news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
-        position_monitor = PositionMonitor(client, config, order_executor, notifier)
+        position_monitor = PositionMonitor(client, config, order_executor, notifier, db)
 
         coroutines = [news_handler.run(), position_monitor.run()]
         command_listener = None

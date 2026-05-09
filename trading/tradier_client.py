@@ -167,6 +167,11 @@ class TradierClient:
         resp = self._request("GET", f"/accounts/{self._account_id}/balances")
         return _parse_buying_power(resp.json())
 
+    def get_account_total_value(self) -> float:
+        """Return total account value/equity from the balances endpoint."""
+        resp = self._request("GET", f"/accounts/{self._account_id}/balances")
+        return _parse_account_total_value(resp.json())
+
     def submit_order(self, symbol: str, side: str, qty: int, limit_price: float | None = None) -> str:
         """Side: buy | sell | sell_short | buy_to_cover. limit_price=None uses a market order."""
         data: dict[str, str] = {
@@ -602,6 +607,45 @@ def _parse_buying_power(data: dict) -> float:
     if "cash" in balances:
         return float(balances["cash"]["cash_available"])
     raise ValueError("Cannot determine buying power from balances response")
+
+
+def _parse_account_total_value(data: dict) -> float:
+    """Parse total account value from Tradier balances response.
+
+    Tradier account types expose slightly different balance fields. Prefer
+    explicit equity/account-value fields, then fall back to cash totals.
+    """
+    balances = data.get("balances", {})
+    if _is_nullish(balances) or not isinstance(balances, dict):
+        raise ValueError("Cannot determine account total value from balances response")
+
+    explicit_value_keys = (
+        "total_equity",
+        "equity",
+        "account_value",
+        "total_account_value",
+    )
+    for section in (balances, balances.get("margin"), balances.get("pdt"), balances.get("cash")):
+        if not isinstance(section, dict):
+            continue
+        for key in explicit_value_keys:
+            value = _to_float(section.get(key))
+            if value is not None:
+                return value
+
+    total_cash = _to_float(balances.get("total_cash"))
+    market_value = _to_float(balances.get("market_value"))
+    if total_cash is not None and market_value is not None:
+        return total_cash + market_value
+
+    cash = balances.get("cash")
+    if isinstance(cash, dict):
+        for key in ("total_cash", "cash_available"):
+            value = _to_float(cash.get(key))
+            if value is not None:
+                return value
+
+    raise ValueError("Cannot determine account total value from balances response")
 
 
 def _parse_account_orders(data: dict) -> list[TradierOrder]:

@@ -525,7 +525,29 @@ def _query_stats(con: sqlite3.Connection) -> dict:
 
 
 def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
-    # 1 & 2: Cumulative and daily P&L
+    # 1: Account total value trend
+    acct_rows = con.execute(
+        "SELECT ts, value_usd FROM account_value_snapshots ORDER BY ts"
+    ).fetchall()
+    fig_acct = go.Figure(go.Scatter(
+        x=[r["ts"] for r in acct_rows],
+        y=[r["value_usd"] for r in acct_rows],
+        mode="lines+markers",
+        line=dict(color=_COLOR_MAIN, width=2),
+        marker=dict(size=5, color=_COLOR_MAIN),
+        fill="tozeroy",
+        fillcolor="rgba(37,99,235,0.08)",
+        hovertemplate="%{x}<br>$%{y:,.2f}<extra></extra>",
+    ))
+    _apply_theme(fig_acct, height=280)
+    fig_acct.update_layout(
+        title="Account Total Value Trend",
+        xaxis_title="Time",
+        yaxis_title="USD",
+        yaxis=dict(tickprefix="$", separatethousands=True),
+    )
+
+    # 2 & 3: Cumulative and daily P&L
     rows = con.execute(
         "SELECT date(closed_at) as day, SUM(pnl_usd) as dpnl "
         "FROM trades WHERE pnl_usd IS NOT NULL AND closed_at IS NOT NULL "
@@ -770,6 +792,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     fig_cost.update_layout(title="Total Cost per Provider (USD)", xaxis_title="Provider", yaxis_title="USD")
 
     charts = {
+        "account_value":   _fig_json(fig_acct),
         "cumulative":       _fig_json(fig_cum),
         "daily":            _fig_json(fig_daily),
         "exit":             _fig_json(fig_exit),
@@ -831,6 +854,7 @@ def _render_stats_bar(stats: dict) -> str:
 
 # Charts layout: (key, full_width)
 _CHART_LAYOUT: list[tuple[str, bool]] = [
+    ("account_value",    True),
     ("cumulative",       True),
     ("daily",            False),
     ("exit",             False),

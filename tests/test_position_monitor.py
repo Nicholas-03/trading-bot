@@ -1,4 +1,5 @@
 import pytest
+import asyncio
 import pytz
 from datetime import date, datetime
 from unittest.mock import MagicMock
@@ -100,3 +101,16 @@ def test_fetch_eod_data_falls_back_to_db_when_gain_loss_unavailable():
     monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
 
     assert monitor._fetch_eod_data() == (14, 14, 17.27)
+
+
+def test_record_account_value_snapshot_writes_to_db():
+    client = MagicMock()
+    client.get_account_total_value.return_value = 25075.5
+    db = MagicMock()
+    monitor = PositionMonitor(client, MagicMock(), MagicMock(), MagicMock(), db)
+
+    asyncio.run(monitor._record_account_value_snapshot())
+
+    db.record_account_value.assert_called_once()
+    _, value = db.record_account_value.call_args.args
+    assert value == 25075.5

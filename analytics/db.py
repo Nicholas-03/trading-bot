@@ -66,6 +66,13 @@ class TradeDB:
                 opened_at         TEXT NOT NULL,
                 closed_at         TEXT
             );
+            CREATE TABLE IF NOT EXISTS account_value_snapshots (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        TEXT NOT NULL,
+                value_usd REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_account_value_snapshots_ts
+                ON account_value_snapshots(ts);
         """)
             # Migrations for columns added after initial schema
             for ddl in [
@@ -189,6 +196,16 @@ class TradeDB:
             )
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def record_account_value(self, ts: str, value_usd: float) -> int:
+        """Record a point-in-time total account value snapshot."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO account_value_snapshots (ts, value_usd) VALUES (?, ?)",
+                (ts, float(value_usd)),
+            )
+            self._conn.commit()
+            return cur.lastrowid  # type: ignore[return-value]
 
     def realized_summary_for_et_date(self, target_date) -> tuple[int, int, float]:
         """Return successful entries, realized exits, and realized P&L for one ET date."""

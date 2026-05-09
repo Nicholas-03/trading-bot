@@ -7,6 +7,7 @@ from trading.tradier_client import (
     TradierActivity,
     TradierGainLoss,
     TradierPosition,
+    _parse_account_total_value,
     _parse_account_history,
     _parse_account_orders,
     _parse_buying_power,
@@ -133,6 +134,26 @@ def test_parse_buying_power_pdt_stock_buying_power():
 def test_parse_buying_power_unrecognised_structure():
     with pytest.raises(ValueError, match="buying power"):
         _parse_buying_power({"balances": {"something_else": {}}})
+
+
+def test_parse_account_total_value_prefers_total_equity():
+    data = {"balances": {"total_equity": 25123.45, "margin": {"stock_buying_power": 100000.0}}}
+    assert _parse_account_total_value(data) == 25123.45
+
+
+def test_parse_account_total_value_nested_cash_account():
+    data = {"balances": {"cash": {"cash_available": 1488.25}}}
+    assert _parse_account_total_value(data) == 1488.25
+
+
+def test_parse_account_total_value_falls_back_to_cash_plus_market_value():
+    data = {"balances": {"total_cash": 20000.0, "market_value": 5075.5}}
+    assert _parse_account_total_value(data) == 25075.5
+
+
+def test_parse_account_total_value_unrecognised_structure():
+    with pytest.raises(ValueError, match="account total value"):
+        _parse_account_total_value({"balances": {"something_else": {}}})
 
 
 # --- _parse_order_status ---
