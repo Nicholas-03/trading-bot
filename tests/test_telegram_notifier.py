@@ -1,8 +1,12 @@
 import asyncio
 import inspect
 import pytest
+import pytz
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 from notifications.telegram_notifier import TelegramCommandListener, TelegramLogHandler, TelegramNotifier, NoOpNotifier
+
+_ET = pytz.timezone("America/New_York")
 
 
 class _FakeExecutor:
@@ -69,6 +73,23 @@ def test_format_sell():
     msg = n._format_sell("AAPL")
     assert "🔴 SELL executed" in msg
     assert "AAPL" in msg
+
+
+def test_format_sell_labels_pnl_as_bot_estimate_not_broker_realized():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    msg = n._format_sell("USO", 0.0395, 15.36)
+    assert "Bot round-trip est." in msg
+    assert "+3.95%" in msg
+    assert "+$15.36" in msg
+    assert "Broker realized P&L" not in msg
+    assert "📊 P&L:" not in msg
+
+
+def test_eod_report_labels_pnl_as_broker_realized():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    msg = n._format_eod_report(0, 10, 28.07, _ET.localize(datetime(2026, 5, 8, 16, 0)))
+    assert "Broker realized P&L: +$28.07" in msg
+    assert "Day P&L" not in msg
 
 
 def test_format_short():

@@ -74,7 +74,7 @@ class TelegramNotifier:
         msg = f"🔴 SELL executed\n📌 Ticker: {ticker}"
         if pnl_pct is not None and pnl_usd is not None:
             sign = "+" if pnl_usd >= 0 else ""
-            msg += f"\n📊 P&L: {sign}{pnl_pct * 100:.2f}% ({sign}${pnl_usd:.2f})"
+            msg += f"\n📊 Bot round-trip est.: {sign}{pnl_pct * 100:.2f}% ({sign}${pnl_usd:.2f})"
         return msg
 
     def _format_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> str:
@@ -104,7 +104,7 @@ class TelegramNotifier:
             f"📊 End of Day Report — {day_str}\n"
             f"🟢 Buys: {buys}\n"
             f"🔴 Sells: {sells}\n"
-            f"💰 Day P&L: {sign}${pnl:.2f}"
+            f"💰 Broker realized P&L: {sign}${pnl:.2f}"
         )
 
     def _format_weekly_report(self, buys: int, sells: int, pnl: float, now_et: datetime) -> str:
@@ -114,7 +114,7 @@ class TelegramNotifier:
             f"📅 Weekly Report — Week of {day_str}\n"
             f"🟢 Buys: {buys}\n"
             f"🔴 Sells: {sells}\n"
-            f"💰 Week P&L: {sign}${pnl:.2f}"
+            f"💰 Broker realized P&L: {sign}${pnl:.2f}"
         )
 
     # --- HTTP transport ---

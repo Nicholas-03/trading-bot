@@ -56,3 +56,57 @@ def test_index_reads_fresh_db_rows_without_browser_cache(tmp_path):
     finally:
         db.close()
         server.DB_PATH = old_db_path
+
+
+def test_recent_closed_trade_uses_closed_time_for_sort_and_display(tmp_path):
+    db_path = tmp_path / "trades.db"
+    db = TradeDB(str(db_path))
+    try:
+        older_news_id = db.record_news("2026-05-07T14:00:00Z", "MSFT older headline", None, ["MSFT"])
+        decision_id = db.record_decision(
+            older_news_id,
+            "2026-05-07T14:00:01Z",
+            "buy",
+            "MSFT",
+            "buy before close",
+            is_primary=True,
+        )
+        trade_id = db.record_trade_open(
+            decision_id,
+            "MSFT",
+            "buy",
+            1,
+            100.0,
+            "2026-05-07T14:01:00Z",
+        )
+        db.record_trade_close(
+            trade_id,
+            101.0,
+            1.0,
+            0.01,
+            "llm",
+            "2026-05-08T15:00:00Z",
+        )
+
+        newer_news_id = db.record_news("2026-05-08T14:00:00Z", "AAPL newer headline", None, ["AAPL"])
+        db.record_decision(
+            newer_news_id,
+            "2026-05-08T14:00:01Z",
+            "hold",
+            "AAPL",
+            "hold after open",
+            is_primary=True,
+        )
+    finally:
+        db.close()
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        _, recent = server._query_charts(con)
+    finally:
+        con.close()
+
+    assert recent[0]["ticker"] == "MSFT"
+    assert recent[0]["ts"] == "2026-05-08T15:00:00Z"
+    assert 'data-closed="true"' in server._render_table_rows([recent[0]])

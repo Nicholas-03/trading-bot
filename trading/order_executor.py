@@ -14,6 +14,7 @@ from notifications.telegram_notifier import Notifier
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
+    from trading.alpaca_data_client import AlpacaMarketDataClient
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,10 @@ class OrderExecutor:
         shorted_tickers: set[str],
         notifier: Notifier,
         db: "TradeDB | None" = None,
+        market_data_client: "AlpacaMarketDataClient | None" = None,
     ) -> None:
         self._client = client
+        self._market_data_client = market_data_client
         self._notional_usd = config.trade_amount_usd
         self._short_qty = config.short_qty
         self._stop_loss_pct: float = config.stop_loss_pct
@@ -620,6 +623,25 @@ class OrderExecutor:
         end = datetime.now(timezone.utc)
         # Ask for a little extra time because sparse names can skip minute bars.
         start = end - timedelta(minutes=max(minutes + 4, 10))
+        if self._market_data_client is not None:
+            try:
+                bars = await asyncio.to_thread(
+                    self._market_data_client.get_intraday_bars,
+                    ticker,
+                    start,
+                    end,
+                    "1Min",
+                )
+                min_bars = self._entry_confirmation_trend_minutes + 1
+                if len(bars) >= min_bars:
+                    logger.debug("Fetched %d Alpaca 1m confirmation bars for %s", len(bars), ticker)
+                    return bars
+                logger.warning(
+                    "Alpaca returned only %d 1m confirmation bars for %s; falling back to Tradier",
+                    len(bars), ticker,
+                )
+            except Exception as e:
+                logger.warning("Could not fetch Alpaca 1m confirmation bars for %s: %s", ticker, e)
         try:
             return await asyncio.to_thread(self._client.get_intraday_bars, ticker, start, end, "1min")
         except Exception as e:

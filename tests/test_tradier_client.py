@@ -1,11 +1,16 @@
 # tests/test_tradier_client.py
 import httpx
 import pytest
+from datetime import date
 from trading.tradier_client import (
     TradierClient,
+    TradierActivity,
+    TradierGainLoss,
     TradierPosition,
+    _parse_account_history,
     _parse_account_orders,
     _parse_buying_power,
+    _parse_gain_loss,
     _parse_market_bars,
     _parse_order_status,
     _parse_positions,
@@ -260,6 +265,135 @@ def test_parse_account_orders_flattens_nested_otoco_legs():
         ("sell", "open", "limit", None),
         ("sell", "filled", "stop", 98.0),
     ]
+
+
+def test_parse_gain_loss_single_object():
+    data = {
+        "gainloss": {
+            "closed_position": {
+                "close_date": "2026-05-08T00:00:00.000Z",
+                "cost": 491.15,
+                "gain_loss": -1.71,
+                "gain_loss_percent": -0.35,
+                "open_date": "2026-05-07T00:00:00.000Z",
+                "proceeds": 489.44,
+                "quantity": 19.0,
+                "symbol": "MCFT",
+                "term": 1,
+            }
+        }
+    }
+
+    rows = _parse_gain_loss(data)
+
+    assert rows == [
+        TradierGainLoss(
+            symbol="MCFT",
+            quantity=19.0,
+            cost=491.15,
+            proceeds=489.44,
+            gain_loss=-1.71,
+            gain_loss_percent=-0.35,
+            open_date="2026-05-07T00:00:00.000Z",
+            close_date="2026-05-08T00:00:00.000Z",
+            term=1,
+        )
+    ]
+
+
+def test_parse_gain_loss_null():
+    assert _parse_gain_loss({"gainloss": "null"}) == []
+
+
+def test_gain_loss_summary_uses_broker_close_date_without_et_shift():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["sortBy"] == "closeDate"
+        return httpx.Response(
+            200,
+            json={
+                "gainloss": {
+                    "closed_position": {
+                        "close_date": "2026-05-08T00:00:00.000Z",
+                        "cost": 45.84,
+                        "gain_loss": 1.34,
+                        "gain_loss_percent": 2.92,
+                        "open_date": "2026-05-06T00:00:00.000Z",
+                        "proceeds": 47.18,
+                        "quantity": 2.0,
+                        "symbol": "KHC",
+                        "term": 2,
+                    }
+                }
+            },
+            request=request,
+        )
+
+    client = TradierClient("token", "acct")
+    client._http.close()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test")
+    try:
+        count, pnl = client.gain_loss_summary_for_close_date(date(2026, 5, 8))
+    finally:
+        client.close()
+
+    assert count == 1
+    assert pnl == 1.34
+
+
+def test_parse_account_history_trade_events():
+    data = {
+        "history": {
+            "event": [
+                {
+                    "amount": -26.24,
+                    "date": "2026-05-05T00:00:00Z",
+                    "type": "trade",
+                    "trade": {
+                        "commission": 0.0,
+                        "description": "PFIZER INC",
+                        "price": 26.24,
+                        "quantity": 1.0,
+                        "symbol": "PFE",
+                        "trade_type": "Equity",
+                    },
+                },
+                {
+                    "amount": 26.53,
+                    "date": "2026-05-06T00:00:00Z",
+                    "type": "trade",
+                    "trade": {
+                        "commission": 0.0,
+                        "description": "PFIZER INC",
+                        "price": 26.53,
+                        "quantity": -1.0,
+                        "symbol": "PFE",
+                        "trade_type": "Equity",
+                    },
+                },
+            ]
+        }
+    }
+
+    rows = _parse_account_history(data)
+
+    assert rows[0] == TradierActivity(
+        amount=-26.24,
+        date="2026-05-05T00:00:00Z",
+        type="trade",
+        trade={
+            "commission": 0.0,
+            "description": "PFIZER INC",
+            "price": 26.24,
+            "quantity": 1.0,
+            "symbol": "PFE",
+            "trade_type": "Equity",
+        },
+    )
+    assert rows[1].trade["quantity"] == -1.0
+
+
+def test_parse_account_history_null():
+    assert _parse_account_history({"history": "null"}) == []
 
 
 def test_request_retries_429_with_retry_after_zero():

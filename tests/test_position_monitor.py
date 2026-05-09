@@ -1,7 +1,8 @@
 import pytest
 import pytz
 from datetime import date, datetime
-from trading.position_monitor import compute_pnl_pct, _should_fire_report
+from unittest.mock import MagicMock
+from trading.position_monitor import PositionMonitor, compute_pnl_pct, _should_fire_report
 
 
 def test_pnl_at_stop_loss_boundary():
@@ -73,3 +74,29 @@ def test_should_not_fire_on_weekend():
     # April 18, 2026 is a Saturday
     now = _ET.localize(datetime(2026, 4, 18, 16, 0, 0))
     assert _should_fire_report(now, None) is False
+
+
+def test_fetch_eod_data_prefers_tradier_gain_loss_for_pnl():
+    client = MagicMock()
+    client.trade_activity_summary_for_date.return_value = (4, 10)
+    client.gain_loss_summary_for_close_date.return_value = (10, 28.07)
+    executor = MagicMock()
+    executor.daily_summary.return_value = (14, 14, 17.27)
+    monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
+
+    buys, sells, pnl = monitor._fetch_eod_data()
+
+    assert buys == 4
+    assert sells == 10
+    assert pnl == 28.07
+
+
+def test_fetch_eod_data_falls_back_to_db_when_gain_loss_unavailable():
+    client = MagicMock()
+    client.trade_activity_summary_for_date.side_effect = RuntimeError("sandbox history unavailable")
+    client.gain_loss_summary_for_close_date.side_effect = RuntimeError("gainloss unavailable")
+    executor = MagicMock()
+    executor.daily_summary.return_value = (14, 14, 17.27)
+    monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
+
+    assert monitor._fetch_eod_data() == (14, 14, 17.27)

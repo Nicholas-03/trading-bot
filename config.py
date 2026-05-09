@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 class Config:
     alpaca_api_key: str
     alpaca_secret_key: str
+    alpaca_data_feed: str
     tradier_access_token: str
     tradier_account_id: str
     tradier_paper: bool
@@ -81,6 +82,7 @@ def load_config() -> Config:
     cfg = Config(
         alpaca_api_key=os.environ["ALPACA_API_KEY"],
         alpaca_secret_key=os.environ["ALPACA_SECRET_KEY"],
+        alpaca_data_feed=os.getenv("ALPACA_DATA_FEED", "iex").lower(),
         tradier_access_token=os.environ["TRADIER_ACCESS_TOKEN"],
         tradier_account_id=os.environ["TRADIER_ACCOUNT_ID"],
         tradier_paper=os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"),
@@ -145,5 +147,7 @@ def load_config() -> Config:
         raise ValueError("FAST_FAIL_MIN_FAVORABLE_PCT must be between 0 and 100 exclusive")
     if cfg.news_stale_hours <= 0:
         raise ValueError("NEWS_STALE_HOURS must be positive")
+    if cfg.alpaca_data_feed not in ("iex", "sip", "delayed_sip", "otc"):
+        raise ValueError("ALPACA_DATA_FEED must be one of: iex, sip, delayed_sip, otc")
 
     return cfg

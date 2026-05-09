@@ -1,4 +1,5 @@
 # tests/test_order_executor.py
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, AsyncMock
 import time
@@ -8,7 +9,7 @@ from trading.tradier_client import MarketBar, TradierOrder, TradierPosition
 from config import Config
 
 
-def _make_executor() -> OrderExecutor:
+def _make_executor(market_data_client=None) -> OrderExecutor:
     client = MagicMock()
     config = MagicMock(spec=Config)
     config.trade_amount_usd = 100.0
@@ -32,7 +33,7 @@ def _make_executor() -> OrderExecutor:
     notifier.notify_short = AsyncMock()
     notifier.notify_sell = AsyncMock()
     notifier.notify_error = AsyncMock()
-    return OrderExecutor(client, config, set(), set(), notifier)
+    return OrderExecutor(client, config, set(), set(), notifier, market_data_client=market_data_client)
 
 
 # --- _monday_of ---
@@ -628,6 +629,32 @@ def test_entry_confirmation_blocks_quote_premium():
     )
 
     assert reason == "quote_premium_block"
+
+
+def test_recent_bars_prefers_alpaca_market_data():
+    alpaca = MagicMock()
+    alpaca.get_intraday_bars.return_value = _bars([100, 101, 102, 103])
+    ex = _make_executor(market_data_client=alpaca)
+    ex._client.get_intraday_bars.return_value = _bars([90, 91, 92, 93])
+
+    bars = asyncio.run(ex._recent_bars("AAPL", 8))
+
+    assert [bar.close for bar in bars] == [100, 101, 102, 103]
+    alpaca.get_intraday_bars.assert_called_once()
+    ex._client.get_intraday_bars.assert_not_called()
+
+
+def test_recent_bars_falls_back_to_tradier_when_alpaca_has_too_few_bars():
+    alpaca = MagicMock()
+    alpaca.get_intraday_bars.return_value = _bars([100, 101])
+    ex = _make_executor(market_data_client=alpaca)
+    ex._client.get_intraday_bars.return_value = _bars([90, 91, 92, 93])
+
+    bars = asyncio.run(ex._recent_bars("AAPL", 8))
+
+    assert [bar.close for bar in bars] == [90, 91, 92, 93]
+    alpaca.get_intraday_bars.assert_called_once()
+    ex._client.get_intraday_bars.assert_called_once()
 
 
 def test_fast_fail_triggers_only_before_meaningful_favorable_move():

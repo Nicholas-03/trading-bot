@@ -3,7 +3,7 @@ import time
 import httpx
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
 _RETRY_DELAYS = (1.0, 2.0, 4.0)  # seconds between attempts 1→2, 2→3, 3→4
@@ -31,6 +31,31 @@ class TradierOrder:
     filled_at: str | None  # ISO timestamp from transaction_date, None if not filled
     quantity: float | None = None
     order_id: str | None = None
+
+
+@dataclass
+class TradierGainLoss:
+    symbol: str
+    quantity: float
+    cost: float
+    proceeds: float
+    gain_loss: float
+    gain_loss_percent: float
+    open_date: str
+    close_date: str
+    term: int | None = None
+
+
+@dataclass
+class TradierActivity:
+    amount: float | None
+    date: str
+    type: str
+    trade: dict | None = None
+    option: dict | None = None
+    journal: dict | None = None
+    dividend: dict | None = None
+    adjustment: dict | None = None
 
 
 @dataclass
@@ -227,6 +252,144 @@ class TradierClient:
         resp = self._request("GET", f"/accounts/{self._account_id}/orders")
         return _parse_account_orders(resp.json())
 
+    def get_gain_loss(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 100,
+        sort_by: str = "closeDate",
+        sort: str = "desc",
+    ) -> list[TradierGainLoss]:
+        """Return one page of closed-position gain/loss rows from Tradier.
+
+        Tradier computes this from broker cost basis, so it can differ from the
+        bot's round-trip DB P&L when older tax lots exist for the same symbol.
+        """
+        resp = self._request(
+            "GET",
+            f"/accounts/{self._account_id}/gainloss",
+            params={
+                "page": page,
+                "limit": limit,
+                "sortBy": sort_by,
+                "sort": sort,
+            },
+        )
+        return _parse_gain_loss(resp.json())
+
+    def get_gain_loss_for_close_date_range(
+        self,
+        start: date,
+        end: date,
+        *,
+        limit: int = 100,
+        max_pages: int = 50,
+    ) -> list[TradierGainLoss]:
+        """Return closed gain/loss rows whose broker close date is in range."""
+        rows: list[TradierGainLoss] = []
+        for page in range(1, max_pages + 1):
+            page_rows = self.get_gain_loss(page=page, limit=limit, sort_by="closeDate", sort="desc")
+            if not page_rows:
+                break
+            stop_after_page = False
+            for row in page_rows:
+                close_date = _parse_tradier_date(row.close_date)
+                if close_date is None:
+                    continue
+                if start <= close_date <= end:
+                    rows.append(row)
+                elif close_date < start:
+                    stop_after_page = True
+            if stop_after_page or len(page_rows) < limit:
+                break
+        return rows
+
+    def gain_loss_summary_for_close_date(self, target_date: date) -> tuple[int, float]:
+        """Return (closed_positions, realized_pnl) for a broker close date."""
+        return self.gain_loss_summary_for_close_date_range(target_date, target_date)
+
+    def gain_loss_summary_for_close_date_range(self, start: date, end: date) -> tuple[int, float]:
+        """Return (closed_positions, realized_pnl) for broker close dates."""
+        rows = self.get_gain_loss_for_close_date_range(start, end)
+        return len(rows), sum(row.gain_loss for row in rows)
+
+    def get_account_history(
+        self,
+        *,
+        page: int = 1,
+        limit: int = 100,
+        activity_type: str | None = None,
+        start: date | str | None = None,
+        end: date | str | None = None,
+        symbol: str | None = None,
+        exact_match: bool | None = None,
+    ) -> list[TradierActivity]:
+        """Return one page of account activity rows.
+
+        The history endpoint can be unavailable for sandbox accounts; callers
+        should be ready to fall back to local accounting when it returns no rows.
+        """
+        params: dict[str, str | int] = {"page": page, "limit": limit}
+        if activity_type:
+            params["type"] = activity_type
+        if start is not None:
+            params["start"] = start.isoformat() if isinstance(start, date) else start
+        if end is not None:
+            params["end"] = end.isoformat() if isinstance(end, date) else end
+        if symbol:
+            params["symbol"] = symbol
+        if exact_match is not None:
+            params["exact_match"] = "true" if exact_match else "false"
+        resp = self._request("GET", f"/accounts/{self._account_id}/history", params=params)
+        return _parse_account_history(resp.json())
+
+    def get_account_history_for_date_range(
+        self,
+        start: date,
+        end: date,
+        *,
+        activity_type: str | None = None,
+        limit: int = 100,
+        max_pages: int = 50,
+    ) -> list[TradierActivity]:
+        """Return account activity rows for a date range."""
+        rows: list[TradierActivity] = []
+        for page in range(1, max_pages + 1):
+            page_rows = self.get_account_history(
+                page=page,
+                limit=limit,
+                activity_type=activity_type,
+                start=start,
+                end=end,
+            )
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            if len(page_rows) < limit:
+                break
+        return rows
+
+    def trade_activity_summary_for_date(self, target_date: date) -> tuple[int, int]:
+        """Return (buy_events, sell_events) for trade activity on one date."""
+        return self.trade_activity_summary_for_date_range(target_date, target_date)
+
+    def trade_activity_summary_for_date_range(self, start: date, end: date) -> tuple[int, int]:
+        """Return (buy_events, sell_events) for trade activity in a date range."""
+        rows = self.get_account_history_for_date_range(start, end, activity_type="trade", limit=1000)
+        buys = 0
+        sells = 0
+        for row in rows:
+            if row.type != "trade" or not row.trade:
+                continue
+            qty = _to_float(row.trade.get("quantity"))
+            if qty is None:
+                continue
+            if qty > 0:
+                buys += 1
+            elif qty < 0:
+                sells += 1
+        return buys, sells
+
     def _request(self, method: str, path: str, *, http: httpx.Client | None = None, **kwargs) -> httpx.Response:
         """Execute an HTTP request with automatic retry on transient server errors."""
         client = http or self._http
@@ -285,6 +448,39 @@ def _to_positive_float(value) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _to_float(value) -> float | None:
+    if _is_nullish(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(value) -> int | None:
+    if _is_nullish(value):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_tradier_date(value: str | None) -> date | None:
+    """Parse Tradier date/datetime strings as broker calendar dates.
+
+    Gain/loss dates are returned as midnight UTC date stamps. Treating those as
+    instants and converting to ET would shift them to the prior evening, so use
+    the leading YYYY-MM-DD broker date directly.
+    """
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def _format_timesales_dt(value: datetime) -> str:
@@ -417,6 +613,74 @@ def _parse_account_orders(data: dict) -> list[TradierOrder]:
     result: list[TradierOrder] = []
     for o in _as_list(order_data):
         result.extend(_flatten_order(o))
+    return result
+
+
+def _parse_gain_loss(data: dict) -> list[TradierGainLoss]:
+    """Parse Tradier gain/loss response. Handles null, single object, and array."""
+    raw = data.get("gainloss")
+    if _is_nullish(raw) or not isinstance(raw, dict):
+        return []
+    result: list[TradierGainLoss] = []
+    for item in _as_list(raw.get("closed_position")):
+        symbol = item.get("symbol")
+        quantity = _to_float(item.get("quantity"))
+        cost = _to_float(item.get("cost"))
+        proceeds = _to_float(item.get("proceeds"))
+        gain_loss = _to_float(item.get("gain_loss"))
+        gain_loss_percent = _to_float(item.get("gain_loss_percent"))
+        open_date = item.get("open_date")
+        close_date = item.get("close_date")
+        if (
+            not symbol
+            or quantity is None
+            or cost is None
+            or proceeds is None
+            or gain_loss is None
+            or gain_loss_percent is None
+            or not open_date
+            or not close_date
+        ):
+            continue
+        result.append(
+            TradierGainLoss(
+                symbol=str(symbol),
+                quantity=quantity,
+                cost=cost,
+                proceeds=proceeds,
+                gain_loss=gain_loss,
+                gain_loss_percent=gain_loss_percent,
+                open_date=str(open_date),
+                close_date=str(close_date),
+                term=_to_int(item.get("term")),
+            )
+        )
+    return result
+
+
+def _parse_account_history(data: dict) -> list[TradierActivity]:
+    """Parse Tradier account history response. Handles null, single object, and array."""
+    raw = data.get("history")
+    if _is_nullish(raw) or not isinstance(raw, dict):
+        return []
+    result: list[TradierActivity] = []
+    for item in _as_list(raw.get("event")):
+        event_type = item.get("type")
+        event_date = item.get("date")
+        if not event_type or not event_date:
+            continue
+        result.append(
+            TradierActivity(
+                amount=_to_float(item.get("amount")),
+                date=str(event_date),
+                type=str(event_type),
+                trade=item.get("trade") if isinstance(item.get("trade"), dict) else None,
+                option=item.get("option") if isinstance(item.get("option"), dict) else None,
+                journal=item.get("journal") if isinstance(item.get("journal"), dict) else None,
+                dividend=item.get("dividend") if isinstance(item.get("dividend"), dict) else None,
+                adjustment=item.get("adjustment") if isinstance(item.get("adjustment"), dict) else None,
+            )
+        )
     return result
 
 

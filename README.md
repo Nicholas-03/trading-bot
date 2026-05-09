@@ -57,6 +57,7 @@ Edit `.env` with your API keys and settings:
 | `TRADIER_ACCOUNT_ID` | Tradier account ID | required |
 | `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
 | `TRADIER_LIVE_TOKEN` | Live account token for real-time quotes while paper trading (sandbox quotes are 15-min delayed) | optional |
+| `ALPACA_DATA_FEED` | Alpaca stock-data feed for entry-confirmation 1-minute bars (`iex`, `sip`, `delayed_sip`, `otc`) | `iex` |
 | `LLM_PROVIDER` | LLM provider to use | `chatgpt` |
 | `OPENAI_API_KEY` | OpenAI API key | required |
 | `OPENAI_MODEL` | OpenAI model ID | `gpt-5.4-mini` |

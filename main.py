@@ -7,6 +7,7 @@ from rich.logging import RichHandler
 from trading.tradier_client import TradierClient
 from config import load_config, Config
 from trading.order_executor import OrderExecutor
+from trading.alpaca_data_client import AlpacaMarketDataClient
 from llm.llm_advisor import LLMAdvisor
 from news.news_handler import NewsHandler
 from trading.position_monitor import PositionMonitor
@@ -144,6 +145,12 @@ def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
 async def main() -> None:
     config = load_config()
     client = _make_tradier_client(config)
+    market_data_client = AlpacaMarketDataClient(
+        config.alpaca_api_key,
+        config.alpaca_secret_key,
+        config.alpaca_data_feed,
+    )
+    db = None
     try:
         held_tickers, shorted_tickers = _load_open_positions(client)
 
@@ -159,14 +166,21 @@ async def main() -> None:
         else:
             notifier = NoOpNotifier()
 
-        db = None
         if config.analytics_db_path:
             from analytics.db import TradeDB
             os.makedirs(os.path.dirname(config.analytics_db_path) or ".", exist_ok=True)
             db = TradeDB(config.analytics_db_path)
             logger.info("Analytics DB: %s", config.analytics_db_path)
 
-        order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, db)
+        order_executor = OrderExecutor(
+            client,
+            config,
+            held_tickers,
+            shorted_tickers,
+            notifier,
+            db,
+            market_data_client,
+        )
         if db is not None:
             open_trades = db.get_open_trades()
             stale = [t for t in open_trades
@@ -209,6 +223,7 @@ async def main() -> None:
     finally:
         if db is not None:
             db.close()
+        market_data_client.close()
         client.close()
 
 

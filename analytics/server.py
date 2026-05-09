@@ -704,7 +704,8 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
 
     # Recent news → decision → outcome
     recent = con.execute(
-        "SELECT n.ts, n.headline, d.action, d.ticker, d.reasoning, "
+        "SELECT COALESCE(t.closed_at, t.opened_at, n.ts) AS ts, "
+        "       n.headline, d.action, d.ticker, d.reasoning, "
         "       d.skip_reason, d.provider, d.is_primary, "
         "       t.pnl_usd, t.pnl_pct, t.exit_reason, t.closed_at, d.id AS decision_id "
         "FROM news_events n "
@@ -718,7 +719,7 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "        (SELECT MIN(id) FROM llm_decisions WHERE news_event_id = n.id)"
         "    ) "
         "LEFT JOIN trades t ON t.decision_id = d.id "
-        "ORDER BY n.ts DESC"
+        "ORDER BY COALESCE(t.closed_at, t.opened_at, n.ts) DESC"
     ).fetchall()
 
     # 11: Provider response latency
