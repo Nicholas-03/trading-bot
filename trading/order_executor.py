@@ -143,10 +143,19 @@ class OrderExecutor:
         Returns (filled, avg_fill_price).
         """
         max_polls = max(1, int(timeout_sec / poll_interval))
-        for _ in range(max_polls):
+        logger.info(
+            "ORDER POLLING STARTED: order_id=%s timeout=%.0fs interval=%.1fs max_polls=%d",
+            order_id, timeout_sec, poll_interval, max_polls,
+        )
+        for attempt in range(1, max_polls + 1):
             try:
                 status, fill_price = await asyncio.to_thread(self._client.get_order, order_id)
+                logger.info(
+                    "ORDER POLL RESULT: order_id=%s attempt=%d/%d status=%s fill_price=%s",
+                    order_id, attempt, max_polls, status, fill_price,
+                )
                 if status == "filled":
+                    logger.info("ORDER TERMINAL FILLED: order_id=%s fill_price=%s", order_id, fill_price)
                     return True, fill_price
                 if status in ("canceled", "expired", "rejected", "error"):
                     logger.warning("Order %s reached terminal state: %s", order_id, status)
@@ -171,9 +180,17 @@ class OrderExecutor:
         position list is the reliable signal that leg 0 filled.
         """
         max_polls = max(1, int(timeout_sec / poll_interval))
-        for _ in range(max_polls):
+        logger.info(
+            "BUY POLLING STARTED: ticker=%s order_id=%s timeout=%.0fs interval=%.1fs max_polls=%d",
+            ticker, order_id, timeout_sec, poll_interval, max_polls,
+        )
+        for attempt in range(1, max_polls + 1):
             try:
                 status, _ = await asyncio.to_thread(self._client.get_order, order_id)
+                logger.info(
+                    "BUY ORDER POLL RESULT: ticker=%s order_id=%s attempt=%d/%d status=%s",
+                    ticker, order_id, attempt, max_polls, status,
+                )
                 if status in ("canceled", "expired", "rejected", "error"):
                     logger.warning("OTOCO %s reached terminal state: %s", order_id, status)
                     return False, None
@@ -182,8 +199,17 @@ class OrderExecutor:
             try:
                 positions = await asyncio.to_thread(self._client.get_all_positions)
                 pos = next((p for p in positions if p.symbol == ticker), None)
-                if pos is not None and abs(pos.qty) > 0:
+                position_found = pos is not None and abs(pos.qty) > 0
+                logger.info(
+                    "BUY POSITION POLL RESULT: ticker=%s order_id=%s attempt=%d/%d position_found=%s",
+                    ticker, order_id, attempt, max_polls, position_found,
+                )
+                if position_found:
                     avg_price = pos.cost_basis / abs(pos.qty) if pos.qty != 0 else None
+                    logger.info(
+                        "BUY POSITION CONFIRMED: ticker=%s order_id=%s qty=%s avg_price=%s",
+                        ticker, order_id, pos.qty, avg_price,
+                    )
                     return True, avg_price
             except Exception as e:
                 logger.warning("Error polling position for %s: %s", ticker, e)
@@ -301,9 +327,14 @@ class OrderExecutor:
 
     async def _record_skip_safe(self, decision_id: int | None, reason: str) -> None:
         if self._db is None or decision_id is None:
+            logger.info(
+                "SKIP NOT RECORDED: decision_id=%s reason=%s db_enabled=%s",
+                decision_id, reason, self._db is not None,
+            )
             return
         try:
-            await asyncio.to_thread(self._db.record_skip, decision_id, reason)
+            ok = await asyncio.to_thread(self._db.record_skip, decision_id, reason)
+            logger.info("SKIP RECORDED: decision_id=%s reason=%s ok=%s", decision_id, reason, ok)
         except Exception as db_err:
             logger.warning("Failed to record skip reason for decision %s: %s", decision_id, db_err)
 
@@ -634,18 +665,23 @@ class OrderExecutor:
                 )
                 min_bars = self._entry_confirmation_trend_minutes + 1
                 if len(bars) >= min_bars:
-                    logger.debug("Fetched %d Alpaca 1m confirmation bars for %s", len(bars), ticker)
+                    logger.info("ENTRY DATA: provider=alpaca ticker=%s bars=%d required=%d", ticker, len(bars), min_bars)
                     return bars
                 logger.warning(
-                    "Alpaca returned only %d 1m confirmation bars for %s; falling back to Tradier",
-                    len(bars), ticker,
+                    "ENTRY DATA INSUFFICIENT: provider=alpaca ticker=%s bars=%d required=%d; falling back to Tradier",
+                    ticker, len(bars), min_bars,
                 )
             except Exception as e:
-                logger.warning("Could not fetch Alpaca 1m confirmation bars for %s: %s", ticker, e)
+                logger.warning("ENTRY DATA ERROR: provider=alpaca ticker=%s error=%s; falling back to Tradier", ticker, e)
         try:
-            return await asyncio.to_thread(self._client.get_intraday_bars, ticker, start, end, "1min")
+            bars = await asyncio.to_thread(self._client.get_intraday_bars, ticker, start, end, "1min")
+            logger.info(
+                "ENTRY DATA: provider=tradier ticker=%s bars=%d required=%d",
+                ticker, len(bars), self._entry_confirmation_trend_minutes + 1,
+            )
+            return bars
         except Exception as e:
-            logger.warning("Could not fetch 1m confirmation bars for %s: %s", ticker, e)
+            logger.warning("ENTRY DATA ERROR: provider=tradier ticker=%s error=%s", ticker, e)
             return []
 
     def _entry_confirmation_skip_reason(
@@ -724,6 +760,10 @@ class OrderExecutor:
         return False
 
     async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
+        logger.info(
+            "BUY TRIGGERED: ticker=%s decision_id=%s hold_hours=%s",
+            ticker, decision_id, hold_hours,
+        )
         if self._trading_paused:
             logger.info("Trading paused — skipping buy for %s", ticker)
             await self._record_skip_safe(decision_id, "trading_paused")
@@ -744,6 +784,7 @@ class OrderExecutor:
             logger.info("SKIP [same_day_reentry_block] %s — already bought and closed today", ticker)
             await self._record_skip_safe(decision_id, "same_day_reentry_block")
             return
+        order_id: str | None = None
         try:
             buying_power = await asyncio.to_thread(self._client.get_buying_power)
             if buying_power < self._notional_usd:
@@ -760,6 +801,10 @@ class OrderExecutor:
                 await self._record_skip_safe(decision_id, "no_quote")
                 return
             price, open_price = quote
+            logger.info(
+                "BUY PRECHECK: ticker=%s buying_power=%.2f quote=%s open=%s",
+                ticker, buying_power, price, open_price,
+            )
 
             # --- intraday extension filter ---
             if open_price is not None and open_price > 0:
@@ -791,6 +836,10 @@ class OrderExecutor:
             bars = await self._recent_bars(ticker, self._entry_confirmation_lookback_minutes)
             entry_skip_reason = self._entry_confirmation_skip_reason(ticker, price, bars)
             if entry_skip_reason is not None:
+                logger.info(
+                    "BUY PRE-ORDER SKIP: ticker=%s decision_id=%s reason=%s bars=%d",
+                    ticker, decision_id, entry_skip_reason, len(bars),
+                )
                 await self._record_skip_safe(decision_id, entry_skip_reason)
                 return
 
@@ -811,8 +860,8 @@ class OrderExecutor:
             sl_price = round(price * (1 - self._stop_loss_pct), 2)
 
             logger.info(
-                "OTOCO LIMIT entry for %s @ $%.4f (quote $%.2f + %.1f%% slippage cap), TP=$%.2f SL=$%.2f",
-                ticker, entry_limit, price, self._max_slippage_pct * 100, tp_price, sl_price,
+                "BUY ORDER SUBMITTING: ticker=%s decision_id=%s qty=%d entry_limit=$%.4f quote=$%.2f tp=$%.2f sl=$%.2f",
+                ticker, decision_id, qty, entry_limit, price, tp_price, sl_price,
             )
 
             order_id = await asyncio.to_thread(
@@ -820,6 +869,10 @@ class OrderExecutor:
             )
             submitted_at_utc = datetime.now(timezone.utc)
             _submitted_at = time.monotonic()
+            logger.info(
+                "BUY ORDER SUBMITTED: ticker=%s decision_id=%s order_id=%s submitted_at=%s",
+                ticker, decision_id, order_id, submitted_at_utc.isoformat(),
+            )
             self._bracket_orders[ticker] = order_id
 
             # Guard against duplicate buys immediately — broker accepted the order
@@ -837,6 +890,10 @@ class OrderExecutor:
             # bracket close (the race that caused false handle_bracket_close calls for KYIV/AMC/ZTEK).
             self._pending_fill.add(ticker)
             filled, fill_price = await self._wait_for_position(ticker, order_id)
+            logger.info(
+                "BUY POLLING FINISHED: ticker=%s order_id=%s filled=%s fill_price=%s",
+                ticker, order_id, filled, fill_price,
+            )
             # Measure latency from decision time when provided, otherwise from submission
             if decision_monotonic is not None:
                 fill_latency_sec = time.monotonic() - decision_monotonic
@@ -852,7 +909,12 @@ class OrderExecutor:
                     hold_hours,
                 )
                 if reconciled:
+                    logger.info("BUY RECONCILED AFTER UNCONFIRMED POLL: ticker=%s order_id=%s", ticker, order_id)
                     return
+                logger.warning(
+                    "BUY BROKER STATE AMBIGUOUS: ticker=%s order_id=%s no position confirmed and no fast bracket fill found; canceling order",
+                    ticker, order_id,
+                )
                 # Synchronously clean up all tracked state before any awaits so the position monitor
                 # cannot observe a partially-rolled-back entry during cancel_order.
                 self._held_tickers.discard(ticker)
@@ -866,9 +928,11 @@ class OrderExecutor:
                     self._weekly_buys -= 1
                 self._pending_fill.discard(ticker)
                 try:
+                    logger.info("BUY CANCEL ORDER: ticker=%s order_id=%s", ticker, order_id)
                     await asyncio.to_thread(self._client.cancel_order, order_id)
-                except Exception:
-                    pass
+                    logger.info("BUY CANCEL ORDER DONE: ticker=%s order_id=%s", ticker, order_id)
+                except Exception as cancel_err:
+                    logger.warning("BUY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
                 logger.warning("OTOCO %s for %s fill unconfirmed — rolling back state", order_id, ticker)
                 await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
                 return
@@ -896,6 +960,8 @@ class OrderExecutor:
                 except Exception as db_err:
                     logger.warning("Failed to record buy for %s in analytics DB: %s", ticker, db_err)
                     await self._notifier.notify_error(f"buy {ticker}", f"analytics DB open failed: {db_err}")
+            else:
+                logger.info("TRADE NOT INSERTED: ticker=%s decision_id=%s db_enabled=False", ticker, decision_id)
 
             # Clear pending_fill only after position_book has the final trade_id.
             # Holding it through the DB insert prevents handle_bracket_close from
@@ -906,7 +972,13 @@ class OrderExecutor:
             await self._notifier.notify_buy(ticker, actual_price * qty, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
-            await self._record_skip_safe(decision_id, "buy_exception")
+            if order_id is not None:
+                logger.warning(
+                    "BUY EXCEPTION AFTER ORDER SUBMITTED: ticker=%s decision_id=%s order_id=%s; not recording skip_reason because broker state may have changed",
+                    ticker, decision_id, order_id,
+                )
+            else:
+                await self._record_skip_safe(decision_id, "buy_exception")
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
     async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:

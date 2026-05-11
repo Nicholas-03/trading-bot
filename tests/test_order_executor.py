@@ -218,7 +218,62 @@ def test_wait_for_fill_returns_false_on_timeout():
     assert price is None
 
 
+def test_wait_for_position_accepts_delayed_fill():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("open", None))
+    ex._client.get_all_positions = MagicMock(side_effect=[
+        [],
+        [TradierPosition(symbol="AAPL", qty=2.0, cost_basis=101.0)],
+    ])
+
+    filled, price = asyncio.run(ex._wait_for_position("AAPL", "otoco-1", timeout_sec=0.2, poll_interval=0.01))
+
+    assert filled is True
+    assert price == 50.5
+    assert ex._client.get_all_positions.call_count == 2
+
+
+def test_wait_for_position_survives_transient_status_read_failure():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(side_effect=[RuntimeError("temporary status read failure")])
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=1.0, cost_basis=100.0)
+    ])
+
+    filled, price = asyncio.run(ex._wait_for_position("AAPL", "otoco-1", timeout_sec=0.1, poll_interval=0.01))
+
+    assert filled is True
+    assert price == 100.0
+
+
+def test_wait_for_position_times_out_without_position_or_terminal_order():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("open", None))
+    ex._client.get_all_positions = MagicMock(return_value=[])
+
+    filled, price = asyncio.run(ex._wait_for_position("AAPL", "otoco-1", timeout_sec=0.03, poll_interval=0.01))
+
+    assert filled is False
+    assert price is None
+
+
 # --- buy rollback on unconfirmed fill ---
+
+def test_entry_confirmation_unavailable_records_skip_before_order_submission():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+    ex._db = MagicMock()
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"EEX": (20.0, 19.5)})
+    ex._client.get_intraday_bars = MagicMock(return_value=[])
+    ex._client.submit_otoco_order = MagicMock(return_value="should-not-submit")
+
+    asyncio.run(ex.buy("EEX", decision_id=406))
+
+    ex._db.record_skip.assert_called_once_with(406, "entry_confirmation_unavailable")
+    ex._client.submit_otoco_order.assert_not_called()
+    ex._db.record_trade_open.assert_not_called()
+
 
 def test_buy_rolls_back_state_on_unconfirmed_fill():
     """If a buy order fails to confirm, the ticker must be removed from held_tickers
@@ -239,6 +294,37 @@ def test_buy_rolls_back_state_on_unconfirmed_fill():
     assert "AAPL" not in ex._daily_bought_tickers
     buys, _, _ = ex.daily_summary()
     assert buys == 0
+
+
+def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 95.0)})
+    ex._client.submit_otoco_order = MagicMock(return_value="otoco-ambiguous")
+    ex._wait_for_position = AsyncMock(return_value=(False, None))
+    ex._client.get_account_orders = MagicMock(return_value=[])
+    ex._client.cancel_order = MagicMock()
+
+    asyncio.run(ex.buy("AAPL", decision_id=77))
+
+    ex._db.record_skip.assert_not_called()
+    ex._db.record_trade_open.assert_not_called()
+    ex._client.cancel_order.assert_called_once_with("otoco-ambiguous")
+
+
+def test_buy_exception_after_order_submission_does_not_record_skip_reason():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 95.0)})
+    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
+    ex._wait_for_position = AsyncMock(side_effect=RuntimeError("polling crashed"))
+
+    asyncio.run(ex.buy("AAPL", decision_id=88))
+
+    ex._db.record_skip.assert_not_called()
+    ex._notifier.notify_error.assert_called_once()
 
 
 def test_buy_exception_records_skip_reason():
