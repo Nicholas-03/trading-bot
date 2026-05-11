@@ -491,7 +491,7 @@ def _parse_tradier_date(value: str | None) -> date | None:
 def _format_timesales_dt(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat(timespec="seconds")
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 def _retry_delay(resp: httpx.Response, fallback: float) -> float:

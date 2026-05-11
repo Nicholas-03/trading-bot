@@ -1,12 +1,13 @@
 # tests/test_tradier_client.py
 import httpx
 import pytest
-from datetime import date
+from datetime import date, datetime, timezone
 from trading.tradier_client import (
     TradierClient,
     TradierActivity,
     TradierGainLoss,
     TradierPosition,
+    _format_timesales_dt,
     _parse_account_total_value,
     _parse_account_history,
     _parse_account_orders,
@@ -243,6 +244,49 @@ def test_parse_market_bars_single():
 
     assert len(bars) == 1
     assert bars[0].close == 13.45
+
+
+def test_format_timesales_dt_uses_tradier_minute_format():
+    ts = datetime(2026, 5, 11, 13, 21, 27, tzinfo=timezone.utc)
+
+    assert _format_timesales_dt(ts) == "2026-05-11 13:21"
+
+
+def test_get_intraday_bars_sends_tradier_timesales_minute_format():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/markets/timesales"
+        assert request.url.params["start"] == "2026-05-11 13:21"
+        assert request.url.params["end"] == "2026-05-11 13:33"
+        return httpx.Response(
+            200,
+            json={
+                "series": {
+                    "data": {
+                        "time": "2026-05-11T13:33:00",
+                        "open": 23.1,
+                        "high": 23.2,
+                        "low": 23.0,
+                        "close": 23.15,
+                    }
+                }
+            },
+        )
+
+    client = TradierClient("token", "acct")
+    client._http = httpx.Client(
+        base_url=client._SANDBOX_BASE,
+        transport=httpx.MockTransport(handler),
+        headers={"Accept": "application/json"},
+    )
+
+    bars = client.get_intraday_bars(
+        "B",
+        datetime(2026, 5, 11, 13, 21, 27, tzinfo=timezone.utc),
+        datetime(2026, 5, 11, 13, 33, 27, tzinfo=timezone.utc),
+    )
+
+    assert bars[0].close == 23.15
+    client.close()
 
 
 def test_parse_account_orders_flattens_nested_otoco_legs():
