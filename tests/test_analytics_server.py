@@ -110,6 +110,8 @@ def test_recent_closed_trade_uses_closed_time_for_sort_and_display(tmp_path):
     assert recent[0]["ticker"] == "MSFT"
     assert recent[0]["ts"] == "2026-05-08T15:00:00Z"
     assert 'data-closed="true"' in server._render_table_rows([recent[0]])
+    assert 'data-date="2026-05-08"' in server._render_table_rows([recent[0]])
+    assert "08/05/2026 15:00" in server._render_table_rows([recent[0]])
 
 
 def test_account_value_chart_uses_snapshots(tmp_path):
@@ -131,3 +133,29 @@ def test_account_value_chart_uses_snapshots(tmp_path):
     assert "account_value" in charts
     assert charts["account_value"]["data"][0]["y"] == [25000.0, 25075.5]
     assert charts["account_value"]["layout"]["title"]["text"] == "Account Total Value Trend"
+    assert charts["account_value"]["layout"]["yaxis"]["range"][0] > 24900
+    assert charts["account_value"]["layout"]["yaxis"]["range"][1] < 25150
+    assert charts["account_value"]["layout"]["xaxis"]["tickformat"] == "%d/%m/%Y"
+    assert "provider_latency" not in charts
+    assert "agreement_rate" not in charts
+    assert "total_cost" not in charts
+
+
+def test_index_renders_date_filter(tmp_path):
+    db_path = tmp_path / "trades.db"
+    db = TradeDB(str(db_path))
+    old_db_path = server.DB_PATH
+    server.DB_PATH = str(db_path)
+    try:
+        news_id = db.record_news("2026-05-01T14:00:00Z", "AAA headline", None, ["AAA"])
+        db.record_decision(news_id, "2026-05-01T14:00:01Z", "hold", "AAA", "first")
+
+        body = server.index().body.decode()
+    finally:
+        db.close()
+        server.DB_PATH = old_db_path
+
+    assert 'id="decision-date" type="date"' in body
+    assert "setDateFilter" in body
+    assert "clearDateFilter" in body
+    assert "01/05/2026 14:00" in body

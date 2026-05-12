@@ -207,6 +207,31 @@ body {
   border-color: var(--accent);
   box-shadow: 0 6px 14px rgba(37,99,235,.18);
 }
+.date-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.date-filter label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.date-filter input {
+  min-height: 29px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+}
+.date-filter input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(37,99,235,.12);
+}
 
 /* ── Table ── */
 .table-wrap {
@@ -419,6 +444,33 @@ def _parse_iso_dt(value: str | None) -> datetime | None:
         return None
 
 
+def _format_dashboard_dt(value: str | None) -> str:
+    dt = _parse_iso_dt(value)
+    if dt is None:
+        return value or ""
+    return dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _dashboard_date_value(value: str | None) -> str:
+    dt = _parse_iso_dt(value)
+    if dt is None:
+        return ""
+    return dt.strftime("%Y-%m-%d")
+
+
+def _padded_value_range(values: list[float]) -> list[float] | None:
+    if not values:
+        return None
+    lo = min(values)
+    hi = max(values)
+    span = hi - lo
+    if span <= 0:
+        pad = max(abs(hi) * 0.0005, 10.0)
+    else:
+        pad = max(span * 0.15, 1.0)
+    return [lo - pad, hi + pad]
+
+
 def _action_badge(action: str) -> str:
     cls = {"buy": "badge-buy", "sell": "badge-sell", "short": "badge-short"}.get(action.lower(), "badge-hold")
     return f'<span class="badge {cls}">{html.escape(action)}</span>'
@@ -466,6 +518,7 @@ def _query_decision(con: sqlite3.Connection, decision_id: int) -> dict | None:
     return {
         "headline": _display_text(headline_row["headline"]) if headline_row else None,
         "ts": headline_row["ts"] if headline_row else None,
+        "display_ts": _format_dashboard_dt(headline_row["ts"]) if headline_row else None,
         "decisions": [dict(d) for d in decision_rows],
     }
 
@@ -529,22 +582,26 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
     acct_rows = con.execute(
         "SELECT ts, value_usd FROM account_value_snapshots ORDER BY ts"
     ).fetchall()
+    account_values = [r["value_usd"] for r in acct_rows]
     fig_acct = go.Figure(go.Scatter(
         x=[r["ts"] for r in acct_rows],
-        y=[r["value_usd"] for r in acct_rows],
+        y=account_values,
         mode="lines+markers",
         line=dict(color=_COLOR_MAIN, width=2),
         marker=dict(size=5, color=_COLOR_MAIN),
-        fill="tozeroy",
-        fillcolor="rgba(37,99,235,0.08)",
-        hovertemplate="%{x}<br>$%{y:,.2f}<extra></extra>",
+        hovertemplate="%{x|%d/%m/%Y %H:%M}<br>$%{y:,.2f}<extra></extra>",
     ))
     _apply_theme(fig_acct, height=280)
     fig_acct.update_layout(
         title="Account Total Value Trend",
         xaxis_title="Time",
         yaxis_title="USD",
-        yaxis=dict(tickprefix="$", separatethousands=True),
+        xaxis=dict(tickformat="%d/%m/%Y"),
+        yaxis=dict(
+            tickprefix="$",
+            separatethousands=True,
+            range=_padded_value_range(account_values),
+        ),
     )
 
     # 2 & 3: Cumulative and daily P&L
@@ -566,14 +623,30 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         line=dict(color=_COLOR_MAIN, width=2),
         marker=dict(size=5, color=_COLOR_MAIN),
         fill="tozeroy", fillcolor="rgba(37,99,235,0.08)",
+        hovertemplate="%{x|%d/%m/%Y}<br>$%{y:,.2f}<extra></extra>",
     ))
     _apply_theme(fig_cum, height=280)
-    fig_cum.update_layout(title="Cumulative P&L", xaxis_title="Date", yaxis_title="USD")
+    fig_cum.update_layout(
+        title="Cumulative P&L",
+        xaxis_title="Date",
+        yaxis_title="USD",
+        xaxis=dict(tickformat="%d/%m/%Y"),
+    )
 
     bar_colors = [_COLOR_POS if v >= 0 else _COLOR_NEG for v in daily_pnl]
-    fig_daily = go.Figure(go.Bar(x=days, y=daily_pnl, marker_color=bar_colors))
+    fig_daily = go.Figure(go.Bar(
+        x=days,
+        y=daily_pnl,
+        marker_color=bar_colors,
+        hovertemplate="%{x|%d/%m/%Y}<br>$%{y:,.2f}<extra></extra>",
+    ))
     _apply_theme(fig_daily, height=260)
-    fig_daily.update_layout(title="Daily P&L", xaxis_title="Date", yaxis_title="USD")
+    fig_daily.update_layout(
+        title="Daily P&L",
+        xaxis_title="Date",
+        yaxis_title="USD",
+        xaxis=dict(tickformat="%d/%m/%Y"),
+    )
 
     # 3: Exit reason donut
     exit_rows = con.execute(
@@ -644,12 +717,14 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
                 y=values,
                 name=action,
                 marker_color=mix_colors[action],
+                hovertemplate="%{x|%d/%m/%Y}<br>%{y} decisions<extra></extra>",
             ))
     _apply_theme(fig_mix, height=280)
     fig_mix.update_layout(
         title="Decision Mix Over Time",
         xaxis_title="Date",
         yaxis_title="LLM decisions",
+        xaxis=dict(tickformat="%d/%m/%Y"),
         barmode="stack",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
@@ -720,9 +795,15 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         mode="lines+markers",
         line=dict(color=_COLOR_MAIN, width=1.5),
         marker=dict(size=4),
+        hovertemplate="%{x|%d/%m/%Y %H:%M}<br>%{y:.2f}s<extra></extra>",
     ))
     _apply_theme(fig_lat, height=260)
-    fig_lat.update_layout(title="Fill Latency Trend", xaxis_title="Time", yaxis_title="Seconds")
+    fig_lat.update_layout(
+        title="Fill Latency Trend",
+        xaxis_title="Time",
+        yaxis_title="Seconds",
+        xaxis=dict(tickformat="%d/%m/%Y"),
+    )
 
     # Recent news → decision → outcome
     recent = con.execute(
@@ -744,53 +825,6 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "ORDER BY COALESCE(t.closed_at, t.opened_at, n.ts) DESC"
     ).fetchall()
 
-    # 11: Provider response latency
-    plat_rows = con.execute(
-        "SELECT provider, latency_sec FROM llm_decisions "
-        "WHERE provider IS NOT NULL AND latency_sec IS NOT NULL"
-    ).fetchall()
-    fig_plat = go.Figure()
-    provider_colors = {"chatgpt": "#16a34a"}
-    providers = sorted({r["provider"] for r in plat_rows if r["provider"]})
-    for p in providers:
-        vals = [r["latency_sec"] for r in plat_rows if r["provider"] == p]
-        if vals:
-            fig_plat.add_trace(go.Box(y=vals, name=p, marker_color=provider_colors.get(p, _COLOR_MAIN)))
-    _apply_theme(fig_plat, height=260)
-    fig_plat.update_layout(title="Provider Response Latency", yaxis_title="Seconds")
-
-    # 12: LLM agreement rate
-    agree_rows = con.execute(
-        "SELECT COUNT(DISTINCT action) AS unique_actions "
-        "FROM llm_decisions WHERE provider IS NOT NULL "
-        "GROUP BY news_event_id HAVING COUNT(*) >= 2"
-    ).fetchall()
-    agreed = sum(1 for r in agree_rows if r["unique_actions"] == 1)
-    disagreed = len(agree_rows) - agreed
-    fig_agree = go.Figure(go.Bar(
-        x=["Agreed", "Disagreed"],
-        y=[agreed, disagreed],
-        marker_color=[_COLOR_POS, _COLOR_NEG],
-    ))
-    _apply_theme(fig_agree, height=260)
-    fig_agree.update_layout(title="LLM Agreement Rate (multi-provider events)", yaxis_title="News Events")
-
-    # 13: Total cost per provider
-    cost_rows = con.execute(
-        "SELECT provider, SUM(cost_usd) AS total_cost "
-        "FROM llm_decisions "
-        "WHERE provider IS NOT NULL AND cost_usd IS NOT NULL "
-        "GROUP BY provider "
-        "ORDER BY CASE provider WHEN 'chatgpt' THEN 0 ELSE 1 END, provider"
-    ).fetchall()
-    fig_cost = go.Figure(go.Bar(
-        x=[r["provider"] for r in cost_rows],
-        y=[r["total_cost"] for r in cost_rows],
-        marker_color=[provider_colors.get(r["provider"], _COLOR_BAR) for r in cost_rows],
-    ))
-    _apply_theme(fig_cost, height=260)
-    fig_cost.update_layout(title="Total Cost per Provider (USD)", xaxis_title="Provider", yaxis_title="USD")
-
     charts = {
         "account_value":   _fig_json(fig_acct),
         "cumulative":       _fig_json(fig_cum),
@@ -804,9 +838,6 @@ def _query_charts(con: sqlite3.Connection) -> tuple[dict, list[dict]]:
         "pnl_hour":         _fig_json(fig_hour),
         "conf_outcome":     _fig_json(fig_conf),
         "latency_trend":    _fig_json(fig_lat),
-        "provider_latency": _fig_json(fig_plat),
-        "agreement_rate":   _fig_json(fig_agree),
-        "total_cost":       _fig_json(fig_cost),
     }
     return charts, [dict(r) for r in recent]
 
@@ -862,9 +893,6 @@ _CHART_LAYOUT: list[tuple[str, bool]] = [
     ("duration",         False),
     ("actions",          False),
     ("decision_mix",     True),
-    ("agreement_rate",   False),
-    ("provider_latency", False),
-    ("total_cost",       False),
     ("win_rate",         True),
     ("pnl_hour",         False),
     ("conf_outcome",     False),
@@ -903,7 +931,8 @@ def _render_table_rows(recent: list[dict]) -> str:
         pnl_usd_td = _pnl_td(r["pnl_usd"], ".2f")
         pnl_pct_td = _pnl_td(r["pnl_pct"], ".1f", pct=True)
         headline = html.escape(_display_text(r["headline"])[:72])
-        ts = html.escape((r["ts"] or "")[:16])
+        ts = html.escape(_format_dashboard_dt(r["ts"]))
+        date_value = html.escape(_dashboard_date_value(r["ts"]))
         action = r["action"] or "hold"
         ticker = html.escape(r["ticker"]) if r["ticker"] else "—"
         exit_reason = r["exit_reason"] or r.get("skip_reason") or ""
@@ -911,7 +940,7 @@ def _render_table_rows(recent: list[dict]) -> str:
         decision_id = r.get("decision_id") or ""
         rows += (
             f'<tr class="trade-row" data-action="{html.escape(action)}" '
-            f'data-closed="{closed}" data-decision-id="{decision_id}">'
+            f'data-closed="{closed}" data-date="{date_value}" data-decision-id="{decision_id}">'
             f'<td class="expand-btn">&#9658;</td>'
             f'<td class="col-time">{ts}</td>'
             f'<td class="col-headline" title="{headline}">{headline}</td>'
@@ -971,6 +1000,11 @@ def index() -> HTMLResponse:
     <div class="filter-group">
       <button id="btn-closed" onclick="filterTrades('closed',this)">Closed only</button>
     </div>
+    <div class="filter-group date-filter">
+      <label for="decision-date">Date</label>
+      <input id="decision-date" type="date" onchange="setDateFilter(this.value)">
+      <button type="button" onclick="clearDateFilter()">All dates</button>
+    </div>
   </div>
 
   <div class="table-wrap">
@@ -998,6 +1032,7 @@ def index() -> HTMLResponse:
 <script>
   let currentAction = 'all';
   let closedOnly = false;
+  let currentDate = '';
 
   function filterTrades(filter, btn) {{
     if (filter === 'closed') {{
@@ -1016,8 +1051,21 @@ def index() -> HTMLResponse:
       if (row.classList.contains('detail-row')) return;
       const actionMatch = currentAction === 'all' || row.dataset.action === currentAction;
       const closedMatch = !closedOnly || row.dataset.closed === 'true';
-      row.style.display = (actionMatch && closedMatch) ? '' : 'none';
+      const dateMatch = !currentDate || row.dataset.date === currentDate;
+      row.style.display = (actionMatch && closedMatch && dateMatch) ? '' : 'none';
     }});
+  }}
+
+  function setDateFilter(value) {{
+    currentDate = value || '';
+    applyFilters();
+  }}
+
+  function clearDateFilter() {{
+    const input = document.getElementById('decision-date');
+    input.value = '';
+    currentDate = '';
+    applyFilters();
   }}
 
   document.querySelector('#trades-table tbody').addEventListener('click', function(e) {{
@@ -1077,7 +1125,7 @@ def index() -> HTMLResponse:
         detail.innerHTML =
           '<td colspan="8">' +
           '<div class="detail-headline">' + esc(d.headline) + '</div>' +
-          '<div class="detail-ts">' + esc(d.ts) + '</div>' +
+          '<div class="detail-ts">' + esc(d.display_ts || d.ts) + '</div>' +
           providerHtml +
           '</td>';
         row.after(detail);
