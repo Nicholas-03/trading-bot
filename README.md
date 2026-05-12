@@ -117,9 +117,9 @@ All news events, LLM decisions, and trade executions are stored in a local SQLit
 python analytics/export_db.py
 ```
 
-### Railway dashboard
+### DigitalOcean dashboard
 
-The Docker image starts both the trading bot and the FastAPI analytics dashboard on Railway. Attach a Railway volume at `/app/data`, set `ANALYTICS_DB_PATH=/app/data/trades.db`, then generate a public Railway domain for the service. The dashboard is served from that generated URL and reads the latest SQLite rows whenever you load or refresh the page.
+Production runs on a DigitalOcean Droplet with Docker Compose. The live checkout is in `/opt/trading-bot/app`, and the parent Compose stack in `/opt/trading-bot/docker-compose.yml` builds the app image, mounts the persistent analytics database at `/mnt/trading-bot-data`, and serves the FastAPI dashboard through Caddy with Basic Auth. Deploy by pulling `origin/master` on the Droplet, then rebuilding the `trading-bot` service from `/opt/trading-bot`.
 
 ## Testing
 
