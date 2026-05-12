@@ -168,6 +168,36 @@ def test_sell_accumulates_realized_pnl():
     assert abs(pnl - 20.0) < 0.01
 
 
+def test_sell_refines_long_pnl_with_actual_fill_without_double_counting():
+    ex = _make_executor()
+    ex._held_tickers.add("AAPL")
+    ex._client.close_position = MagicMock(return_value="order-1")
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 155.0})
+    ex._client.get_order = MagicMock(return_value=("filled", 154.0))
+    ex._position_book["AAPL"] = (150.0, 1, None)
+
+    asyncio.run(ex.sell("AAPL"))
+
+    _, _, pnl = ex.daily_summary()
+    assert pnl == pytest.approx(4.0)
+    ex._notifier.notify_sell.assert_called_once_with("AAPL", pytest.approx(4.0 / 150.0), pytest.approx(4.0))
+
+
+def test_sell_short_computes_pnl_from_cover_fill():
+    ex = _make_executor()
+    ex._shorted_tickers.add("AAPL")
+    ex._client.close_position = MagicMock(return_value="order-1")
+    ex._client.get_quotes = MagicMock(return_value={"AAPL": 97.0})
+    ex._client.get_order = MagicMock(return_value=("filled", 96.0))
+    ex._position_book["AAPL"] = (100.0, 2, None)
+
+    asyncio.run(ex.sell("AAPL"))
+
+    _, _, pnl = ex.daily_summary()
+    assert pnl == pytest.approx(8.0)
+    ex._notifier.notify_sell.assert_called_once_with("AAPL", pytest.approx(0.04), pytest.approx(8.0))
+
+
 def test_sell_skips_pnl_when_already_provided():
     """When pnl_usd is provided by caller (e.g. PositionMonitor), use it directly."""
     ex = _make_executor()
@@ -231,6 +261,19 @@ def test_wait_for_position_accepts_delayed_fill():
     assert filled is True
     assert price == 50.5
     assert ex._client.get_all_positions.call_count == 2
+
+
+def test_wait_for_position_normalizes_negative_short_cost_basis():
+    ex = _make_executor()
+    ex._client.get_order = MagicMock(return_value=("open", None))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=-1.0, cost_basis=-293.61)
+    ])
+
+    filled, price = asyncio.run(ex._wait_for_position("AAPL", "order-1", timeout_sec=0.1, poll_interval=0.01))
+
+    assert filled is True
+    assert price == 293.61
 
 
 def test_wait_for_position_survives_transient_status_read_failure():

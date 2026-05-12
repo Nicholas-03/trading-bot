@@ -205,7 +205,7 @@ class OrderExecutor:
                     ticker, order_id, attempt, max_polls, position_found,
                 )
                 if position_found:
-                    avg_price = pos.cost_basis / abs(pos.qty) if pos.qty != 0 else None
+                    avg_price = abs(pos.cost_basis) / abs(pos.qty) if pos.qty != 0 else None
                     logger.info(
                         "BUY POSITION CONFIRMED: ticker=%s order_id=%s qty=%s avg_price=%s",
                         ticker, order_id, pos.qty, avg_price,
@@ -1095,19 +1095,21 @@ class OrderExecutor:
             )
             return
 
+        is_short_position = ticker in self._shorted_tickers
         entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
         exit_price: float | None = None
         pnl_was_computed = False
 
         try:
-            # Estimate P&L for long positions when not provided by caller
-            if pnl_usd is None and ticker in self._held_tickers and entry_price > 0 and qty_held > 0:
+            # Estimate P&L when not provided by caller; refine with the actual fill below.
+            if pnl_usd is None and entry_price > 0 and qty_held > 0:
                 quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
                 current = quotes.get(ticker, 0.0)
                 if current:
                     exit_price = current
-                    pnl_usd = (current - entry_price) * qty_held
-                    pnl_pct = (current - entry_price) / entry_price
+                    price_delta = entry_price - current if is_short_position else current - entry_price
+                    pnl_usd = price_delta * qty_held
+                    pnl_pct = price_delta / entry_price
                     pnl_was_computed = True
 
             order_id = await asyncio.to_thread(self._client.close_position, ticker)
@@ -1151,12 +1153,10 @@ class OrderExecutor:
 
         # Refine P&L with actual fill price when available
         if fill_price and pnl_was_computed and entry_price > 0 and qty_held > 0:
-            actual_pnl_usd = (fill_price - entry_price) * qty_held
-            pnl_delta = actual_pnl_usd - (pnl_usd or 0.0)
-            self._daily_realized_pnl += pnl_delta
-            self._weekly_realized_pnl += pnl_delta
+            price_delta = entry_price - fill_price if is_short_position else fill_price - entry_price
+            actual_pnl_usd = price_delta * qty_held
             pnl_usd = actual_pnl_usd
-            pnl_pct = (fill_price - entry_price) / entry_price
+            pnl_pct = price_delta / entry_price
             exit_price = fill_price
 
         self._update_close_state(ticker, pnl_usd, exit_reason)
