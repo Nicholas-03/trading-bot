@@ -1,11 +1,13 @@
 # trading/tradier_client.py
 import time
 import httpx
+import pytz
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from datetime import date, datetime, timezone
 
 _RETRYABLE_STATUSES = {429, 502, 503, 504}
+_MARKET_TZ = pytz.timezone("America/New_York")
 _RETRY_DELAYS = (1.0, 2.0, 4.0)  # seconds between attempts 1→2, 2→3, 3→4
 
 
@@ -489,9 +491,14 @@ def _parse_tradier_date(value: str | None) -> date | None:
 
 
 def _format_timesales_dt(value: datetime) -> str:
+    """Format Tradier timesales params in US market time.
+
+    Tradier's timesales endpoint documents start/end as bare ``YYYY-MM-DD HH:MM``
+    values, so sending UTC clock times can query the wrong intraday window.
+    """
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        value = _MARKET_TZ.localize(value)
+    return value.astimezone(_MARKET_TZ).strftime("%Y-%m-%d %H:%M")
 
 
 def _retry_delay(resp: httpx.Response, fallback: float) -> float:

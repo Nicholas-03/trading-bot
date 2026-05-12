@@ -246,17 +246,17 @@ def test_parse_market_bars_single():
     assert bars[0].close == 13.45
 
 
-def test_format_timesales_dt_uses_tradier_minute_format():
+def test_format_timesales_dt_uses_tradier_market_time_minute_format():
     ts = datetime(2026, 5, 11, 13, 21, 27, tzinfo=timezone.utc)
 
-    assert _format_timesales_dt(ts) == "2026-05-11 13:21"
+    assert _format_timesales_dt(ts) == "2026-05-11 09:21"
 
 
 def test_get_intraday_bars_sends_tradier_timesales_minute_format():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/markets/timesales"
-        assert request.url.params["start"] == "2026-05-11 13:21"
-        assert request.url.params["end"] == "2026-05-11 13:33"
+        assert request.url.params["start"] == "2026-05-11 09:21"
+        assert request.url.params["end"] == "2026-05-11 09:33"
         return httpx.Response(
             200,
             json={
