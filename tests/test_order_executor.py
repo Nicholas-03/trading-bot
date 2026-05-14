@@ -41,6 +41,7 @@ def _make_executor(market_data_client=None) -> OrderExecutor:
     notifier.notify_buy = AsyncMock()
     notifier.notify_short = AsyncMock()
     notifier.notify_sell = AsyncMock()
+    notifier.notify_order_skip = AsyncMock()
     notifier.notify_error = AsyncMock()
     return OrderExecutor(client, config, set(), set(), notifier, market_data_client=market_data_client)
 
@@ -347,6 +348,8 @@ def test_buy_rolls_back_state_on_unconfirmed_fill():
     assert "AAPL" not in ex._daily_bought_tickers
     buys, _, _ = ex.daily_summary()
     assert buys == 0
+    ex._notifier.notify_order_skip.assert_called_once()
+    ex._notifier.notify_error.assert_not_called()
 
 
 def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
@@ -364,6 +367,8 @@ def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
     ex._db.record_skip.assert_not_called()
     ex._db.record_trade_open.assert_not_called()
     ex._client.cancel_order.assert_called_once_with("otoco-ambiguous")
+    ex._notifier.notify_order_skip.assert_called_once()
+    ex._notifier.notify_error.assert_not_called()
 
 
 def test_buy_exception_after_order_submission_does_not_record_skip_reason():

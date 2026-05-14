@@ -17,6 +17,7 @@ class Notifier(Protocol):
     async def notify_buy(self, ticker: str, notional: float, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None: ...
     async def notify_sell(self, ticker: str, pnl_pct: float | None = None, pnl_usd: float | None = None) -> None: ...
     async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None: ...
+    async def notify_order_skip(self, action: str, detail: str) -> None: ...
     async def notify_error(self, action: str, detail: str) -> None: ...
     async def notify_eod_report(self, buys: int, sells: int, pnl: float) -> None: ...
     async def notify_weekly_report(self, buys: int, sells: int, pnl: float) -> None: ...
@@ -43,6 +44,9 @@ class TelegramNotifier:
 
     async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
         await self._send(self._format_short(ticker, qty, order_id, fill_price, fill_latency_sec))
+
+    async def notify_order_skip(self, action: str, detail: str) -> None:
+        await self._send(self._format_order_skip(action, detail))
 
     async def notify_error(self, action: str, detail: str) -> None:
         await self._send(self._format_error(action, detail))
@@ -95,6 +99,13 @@ class TelegramNotifier:
             f"❌ ERROR\n"
             f"📌 Action: {action}\n"
             f"⚠️ Detail: {detail}"
+        )
+
+    def _format_order_skip(self, action: str, detail: str) -> str:
+        return (
+            f"ORDER skipped\n"
+            f"Action: {action}\n"
+            f"Detail: {detail}"
         )
 
     def _format_eod_report(self, buys: int, sells: int, pnl: float, now_et: datetime) -> str:
@@ -341,6 +352,9 @@ class NoOpNotifier:
         pass
 
     async def notify_short(self, ticker: str, qty: int, order_id: str, fill_price: float | None = None, fill_latency_sec: float | None = None) -> None:
+        pass
+
+    async def notify_order_skip(self, action: str, detail: str) -> None:
         pass
 
     async def notify_error(self, action: str, detail: str) -> None:

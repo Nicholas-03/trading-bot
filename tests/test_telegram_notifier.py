@@ -39,6 +39,7 @@ def test_noop_notifier_does_nothing():
     asyncio.run(notifier.notify_buy("AAPL", 5.0, "order-1"))
     asyncio.run(notifier.notify_sell("AAPL"))
     asyncio.run(notifier.notify_short("AAPL", 1, "order-2"))
+    asyncio.run(notifier.notify_order_skip("buy AAPL", "not filled"))
     asyncio.run(notifier.notify_error("buy AAPL", "some error"))
     asyncio.run(notifier.notify_eod_report(1, 2, 3.0))
     asyncio.run(notifier.notify_weekly_report(1, 2, 3.0))
@@ -50,6 +51,7 @@ def test_notifier_method_signatures_match_noop():
         "notify_buy",
         "notify_sell",
         "notify_short",
+        "notify_order_skip",
         "notify_error",
         "notify_eod_report",
         "notify_weekly_report",
@@ -109,6 +111,14 @@ def test_format_error():
     assert "Connection refused" in msg
 
 
+def test_format_order_skip():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    msg = n._format_order_skip("buy CSX", "order 1 status=canceled")
+    assert "ORDER skipped" in msg
+    assert "buy CSX" in msg
+    assert "status=canceled" in msg
+
+
 def test_notify_buy_calls_send_with_formatted_message():
     n = TelegramNotifier.__new__(TelegramNotifier)
     n._send = AsyncMock()
@@ -146,6 +156,16 @@ def test_notify_error_calls_send_with_formatted_message():
     message = n._send.call_args[0][0]
     assert "buy AAPL" in message
     assert "Connection refused" in message
+
+
+def test_notify_order_skip_calls_send_with_formatted_message():
+    n = TelegramNotifier.__new__(TelegramNotifier)
+    n._send = AsyncMock()
+    asyncio.run(n.notify_order_skip("buy CSX", "entry limit did not fill"))
+    n._send.assert_called_once()
+    message = n._send.call_args[0][0]
+    assert "buy CSX" in message
+    assert "entry limit did not fill" in message
 
 
 def test_send_failure_does_not_raise():

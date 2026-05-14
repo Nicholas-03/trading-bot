@@ -201,6 +201,15 @@ class OrderExecutor:
     def _order_error_message(self, order_id: str, fallback: str = "fill unconfirmed") -> str:
         return f"order {order_id} {self._order_detail(order_id, fallback)}"
 
+    async def _refresh_order_detail_safe(self, order_id: str, fallback_status: str = "unknown") -> None:
+        try:
+            status, _, reason = await self._read_order_status(order_id)
+            self._remember_order_detail(order_id, status, reason)
+        except Exception as exc:
+            logger.warning("Could not refresh order %s detail after cancel: %s", order_id, exc)
+            if order_id not in self._order_terminal_details:
+                self._remember_order_detail(order_id, fallback_status)
+
     async def _wait_for_position(
         self,
         ticker: str,
@@ -1096,10 +1105,11 @@ class OrderExecutor:
                     logger.info("BUY CANCEL ORDER: ticker=%s order_id=%s", ticker, order_id)
                     await asyncio.to_thread(self._client.cancel_order, order_id)
                     logger.info("BUY CANCEL ORDER DONE: ticker=%s order_id=%s", ticker, order_id)
+                    await self._refresh_order_detail_safe(order_id, "canceled")
                 except Exception as cancel_err:
                     logger.warning("BUY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
                 logger.warning("OTOCO %s for %s did not fill (%s) — rolling back state", order_id, ticker, self._order_detail(order_id))
-                await self._notifier.notify_error(f"buy {ticker}", self._order_error_message(order_id))
+                await self._notifier.notify_order_skip(f"buy {ticker}", self._order_error_message(order_id))
                 return
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
