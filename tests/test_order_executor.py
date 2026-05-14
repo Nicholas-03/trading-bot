@@ -19,6 +19,8 @@ def _make_executor(market_data_client=None) -> OrderExecutor:
     config.max_slippage_pct = 0.005
     config.extended_move_low_price_pct = 0.15
     config.extended_move_any_pct = 0.10
+    config.min_trade_price = 5.0
+    config.bracket_reprice_enabled = False
     config.entry_confirmation_enabled = False
     config.entry_confirmation_lookback_minutes = 8
     config.entry_confirmation_trend_minutes = 3
@@ -28,6 +30,13 @@ def _make_executor(market_data_client=None) -> OrderExecutor:
     config.fast_fail_minutes = 5
     config.fast_fail_loss_pct = 0.015
     config.fast_fail_min_favorable_pct = 0.0025
+    config.early_failure_enabled = True
+    config.early_failure_minutes = 30
+    config.early_failure_min_favorable_pct = 0.005
+    config.profit_lock_enabled = True
+    config.profit_lock_breakeven_pct = 0.02
+    config.profit_lock_trailing_start_pct = 0.03
+    config.profit_lock_trailing_gap_pct = 0.0125
     notifier = MagicMock()
     notifier.notify_buy = AsyncMock()
     notifier.notify_short = AsyncMock()
@@ -230,12 +239,13 @@ def test_wait_for_fill_returns_true_on_filled():
 
 def test_wait_for_fill_returns_false_on_rejected():
     ex = _make_executor()
-    ex._client.get_order = MagicMock(return_value=("rejected", None))
+    ex._read_order_status = AsyncMock(return_value=("rejected", None, "not shortable"))
 
     import asyncio
     filled, price = asyncio.run(ex._wait_for_fill("order-1"))
     assert filled is False
     assert price is None
+    assert ex._order_detail("order-1") == "status=rejected: not shortable"
 
 
 def test_wait_for_fill_returns_false_on_timeout():
@@ -398,6 +408,23 @@ def test_short_rolls_back_state_on_unconfirmed_fill():
     assert "AAPL" not in ex._position_book
     buys, _, _ = ex.daily_summary()
     assert buys == 0
+
+
+def test_short_rejected_notification_includes_broker_reason():
+    ex = _make_executor()
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._read_order_status = AsyncMock(return_value=(
+        "rejected",
+        None,
+        "This symbol is not available for short sales.",
+    ))
+
+    asyncio.run(ex.short("WIX"))
+
+    ex._notifier.notify_error.assert_called_once_with(
+        "short WIX",
+        "order order-1 status=rejected: This symbol is not available for short sales.",
+    )
 
 
 # --- decision_monotonic / fill_latency_sec ---
@@ -624,7 +651,7 @@ def test_take_profit_close_does_not_add_to_stopped_tickers():
 # --- intraday extension filter ---
 
 def test_buy_blocked_low_price_extended_move():
-    """Price < $5 and intraday move > 15% must block the buy."""
+    """Sub-$5 stocks must block the buy before any order is submitted."""
     import asyncio
     ex = _make_executor()
     # TELA: open $0.90, last $1.10 → +22% > 15%
@@ -635,6 +662,19 @@ def test_buy_blocked_low_price_extended_move():
     asyncio.run(ex.buy("TELA"))
 
     ex._client.submit_order.assert_not_called()
+
+
+def test_buy_blocked_below_min_trade_price_records_skip():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"XXII": (0.61, 0.60)})
+    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
+
+    asyncio.run(ex.buy("XXII", decision_id=123))
+
+    ex._db.record_skip.assert_called_once_with(123, "low_price_block")
+    ex._client.submit_otoco_order.assert_not_called()
 
 
 def test_buy_blocked_any_price_extreme_move():
@@ -803,9 +843,35 @@ def test_fast_fail_does_not_trigger_after_favorable_move():
     assert ex.update_price_for_fast_fail("HIMX", 17.18) is False
 
 
+def test_exit_signal_trails_after_three_percent_gain():
+    ex = _make_executor()
+    ex._position_book["LDOS"] = (127.12, 3, None)
+    ex._hold_opened_at["LDOS"] = datetime.now(timezone.utc) - timedelta(minutes=45)
+
+    assert ex.update_price_for_exit_signal("LDOS", 130.95) is None
+    assert ex.update_price_for_exit_signal("LDOS", 129.20) == "profit_trailing_stop"
+
+
+def test_exit_signal_moves_to_breakeven_after_two_percent_gain():
+    ex = _make_executor()
+    ex._position_book["LDOS"] = (127.12, 3, None)
+    ex._hold_opened_at["LDOS"] = datetime.now(timezone.utc) - timedelta(minutes=45)
+
+    assert ex.update_price_for_exit_signal("LDOS", 129.80) is None
+    assert ex.update_price_for_exit_signal("LDOS", 127.00) == "breakeven_stop"
+
+
+def test_exit_signal_cuts_early_failure_after_30_minutes():
+    ex = _make_executor()
+    ex._position_book["BA"] = (240.22, 2, None)
+    ex._hold_opened_at["BA"] = datetime.now(timezone.utc) - timedelta(minutes=31)
+
+    assert ex.update_price_for_exit_signal("BA", 239.90) == "early_failure"
+
+
 # --- limit order dispatch ---
 
-def test_buy_uses_limit_entry_for_low_price_stock():
+def test_buy_blocks_low_price_stock_instead_of_ordering():
     """Price < $5 → OTOCO must be placed with a limit entry price (slippage cap)."""
     import asyncio
     ex = _make_executor()
@@ -820,11 +886,36 @@ def test_buy_uses_limit_entry_for_low_price_stock():
 
     asyncio.run(ex.buy("FATN"))
 
-    call_args = ex._client.submit_otoco_order.call_args
+    ex._client.submit_otoco_order.assert_not_called()
     # submit_otoco_order(symbol, qty, tp_price, sl_price, entry_limit) — entry_limit is args[4]
-    entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
-    assert entry_limit is not None
-    assert entry_limit == pytest.approx(3.18 * 1.005, rel=1e-4)
+
+
+def test_buy_reprices_bracket_from_actual_fill():
+    ex = _make_executor()
+    ex._bracket_reprice_enabled = True
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 99.0)})
+    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
+    ex._client.get_order = MagicMock(return_value=("open", None))
+    ex._client.get_all_positions = MagicMock(return_value=[
+        TradierPosition(symbol="AAPL", qty=1.0, cost_basis=104.0)
+    ])
+    ex._client.get_account_orders = MagicMock(side_effect=[
+        [
+            TradierOrder("AAPL", "sell", "open", "limit", None, None, 1, "tp-1"),
+            TradierOrder("AAPL", "sell", "open", "stop", None, None, 1, "sl-1"),
+        ],
+        [],
+    ])
+    ex._client.cancel_order = MagicMock()
+    ex._client.submit_oco_order = MagicMock(return_value="oco-2")
+
+    asyncio.run(ex.buy("AAPL"))
+
+    ex._client.cancel_order.assert_any_call("tp-1")
+    ex._client.cancel_order.assert_any_call("sl-1")
+    ex._client.submit_oco_order.assert_called_once_with("AAPL", 1, 107.12, 101.92)
+    assert ex._bracket_orders["AAPL"] == "oco-2"
 
 
 def test_buy_uses_limit_entry_for_calm_large_cap():
@@ -1080,6 +1171,7 @@ def test_sell_unconfirmed_does_not_notify_or_close_db():
 def test_buy_fast_bracket_round_trip_uses_tradier_fills():
     import asyncio
     ex = _make_executor()
+    ex._min_trade_price = 0.5
     ex._db = MagicMock()
     ex._db.record_trade_open.return_value = 42
     ex._client.get_buying_power = MagicMock(return_value=500.0)

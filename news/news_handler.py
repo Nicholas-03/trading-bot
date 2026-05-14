@@ -9,7 +9,12 @@ from alpaca.data.live import NewsDataStream
 
 from config import Config
 from llm.llm_advisor import LLMAdvisor
-from news.filters import compute_news_age_hours, is_retrospective_headline, is_routine_news
+from news.filters import (
+    compute_news_age_hours,
+    is_retrospective_headline,
+    is_routine_news,
+    is_soft_partnership_without_materiality,
+)
 from trading.order_executor import OrderExecutor
 from trading.tradier_client import TradierClient
 
@@ -17,6 +22,11 @@ if TYPE_CHECKING:
     from analytics.db import TradeDB
 
 logger = logging.getLogger(__name__)
+
+
+def _effective_hold_hours(requested: int, config: Config) -> int:
+    hold_hours = requested if requested > 0 else config.default_hold_hours
+    return max(1, min(hold_hours, config.max_hold_hours))
 
 
 class NewsHandler:
@@ -76,6 +86,13 @@ class NewsHandler:
                 logger.info("SKIP [routine_news_block] %s", headline[:100])
                 return
 
+            if (
+                self._config.block_soft_partnership_news
+                and is_soft_partnership_without_materiality(headline, summary)
+            ):
+                logger.info("SKIP [soft_partnership_materiality_block] %s", headline[:100])
+                return
+
             article_ts = getattr(news, "created_at", None)
             if not isinstance(article_ts, datetime):
                 article_ts = None
@@ -116,6 +133,15 @@ class NewsHandler:
                 decision.provider, decision.action, decision.ticker,
                 decision.confidence, decision.reasoning,
             )
+
+            if decision.action in ("buy", "short"):
+                capped_hold = _effective_hold_hours(decision.hold_hours, self._config)
+                if capped_hold != decision.hold_hours:
+                    logger.info(
+                        "Adjusted hold_hours for %s %s from %s to %s",
+                        decision.action, decision.ticker, decision.hold_hours, capped_hold,
+                    )
+                    decision.hold_hours = capped_hold
 
             decision_id: int | None = None
             if self._db is not None and news_event_id is not None:

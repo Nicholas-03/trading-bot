@@ -30,6 +30,11 @@ class Config:
     max_slippage_pct: float
     extended_move_low_price_pct: float
     extended_move_any_pct: float
+    min_trade_price: float
+    default_hold_hours: int
+    max_hold_hours: int
+    block_soft_partnership_news: bool
+    bracket_reprice_enabled: bool
     entry_confirmation_enabled: bool
     entry_confirmation_lookback_minutes: int
     entry_confirmation_trend_minutes: int
@@ -39,6 +44,13 @@ class Config:
     fast_fail_minutes: int
     fast_fail_loss_pct: float
     fast_fail_min_favorable_pct: float
+    early_failure_enabled: bool
+    early_failure_minutes: int
+    early_failure_min_favorable_pct: float
+    profit_lock_enabled: bool
+    profit_lock_breakeven_pct: float
+    profit_lock_trailing_start_pct: float
+    profit_lock_trailing_gap_pct: float
     news_stale_hours: float
 
 
@@ -103,6 +115,11 @@ def load_config() -> Config:
         max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "0.5") / 100,
         extended_move_low_price_pct=_parse_float("EXTENDED_MOVE_LOW_PRICE_PCT", "15.0") / 100,
         extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "10.0") / 100,
+        min_trade_price=_parse_float("MIN_TRADE_PRICE", "5.0"),
+        default_hold_hours=int(os.getenv("DEFAULT_HOLD_HOURS", "4")),
+        max_hold_hours=int(os.getenv("MAX_HOLD_HOURS", "4")),
+        block_soft_partnership_news=_parse_bool("BLOCK_SOFT_PARTNERSHIP_NEWS", "true"),
+        bracket_reprice_enabled=_parse_bool("BRACKET_REPRICE_ENABLED", "true"),
         entry_confirmation_enabled=_parse_bool("ENTRY_CONFIRMATION_ENABLED", "true"),
         entry_confirmation_lookback_minutes=int(os.getenv("ENTRY_CONFIRMATION_LOOKBACK_MINUTES", "8")),
         entry_confirmation_trend_minutes=int(os.getenv("ENTRY_CONFIRMATION_TREND_MINUTES", "3")),
@@ -112,6 +129,13 @@ def load_config() -> Config:
         fast_fail_minutes=int(os.getenv("FAST_FAIL_MINUTES", "5")),
         fast_fail_loss_pct=_parse_float("FAST_FAIL_LOSS_PCT", "1.5") / 100,
         fast_fail_min_favorable_pct=_parse_float("FAST_FAIL_MIN_FAVORABLE_PCT", "0.25") / 100,
+        early_failure_enabled=_parse_bool("EARLY_FAILURE_ENABLED", "true"),
+        early_failure_minutes=int(os.getenv("EARLY_FAILURE_MINUTES", "30")),
+        early_failure_min_favorable_pct=_parse_float("EARLY_FAILURE_MIN_FAVORABLE_PCT", "0.5") / 100,
+        profit_lock_enabled=_parse_bool("PROFIT_LOCK_ENABLED", "true"),
+        profit_lock_breakeven_pct=_parse_float("PROFIT_LOCK_BREAKEVEN_PCT", "2.0") / 100,
+        profit_lock_trailing_start_pct=_parse_float("PROFIT_LOCK_TRAILING_START_PCT", "3.0") / 100,
+        profit_lock_trailing_gap_pct=_parse_float("PROFIT_LOCK_TRAILING_GAP_PCT", "1.25") / 100,
         news_stale_hours=_parse_float("NEWS_STALE_HOURS", "2.0"),
     )
 
@@ -131,6 +155,14 @@ def load_config() -> Config:
         raise ValueError("EXTENDED_MOVE_LOW_PRICE_PCT must be between 0 and 100 exclusive")
     if not (0.0 < cfg.extended_move_any_pct < 1.0):
         raise ValueError("EXTENDED_MOVE_ANY_PCT must be between 0 and 100 exclusive")
+    if cfg.min_trade_price <= 0:
+        raise ValueError("MIN_TRADE_PRICE must be positive")
+    if cfg.default_hold_hours < 1:
+        raise ValueError("DEFAULT_HOLD_HOURS must be at least 1")
+    if cfg.max_hold_hours < 1:
+        raise ValueError("MAX_HOLD_HOURS must be at least 1")
+    if cfg.default_hold_hours > cfg.max_hold_hours:
+        raise ValueError("DEFAULT_HOLD_HOURS must be <= MAX_HOLD_HOURS")
     if cfg.entry_confirmation_lookback_minutes < 3:
         raise ValueError("ENTRY_CONFIRMATION_LOOKBACK_MINUTES must be at least 3")
     if cfg.entry_confirmation_trend_minutes < 1:
@@ -145,6 +177,18 @@ def load_config() -> Config:
         raise ValueError("FAST_FAIL_LOSS_PCT must be between 0 and 100 exclusive")
     if not (0.0 <= cfg.fast_fail_min_favorable_pct < 1.0):
         raise ValueError("FAST_FAIL_MIN_FAVORABLE_PCT must be between 0 and 100 exclusive")
+    if cfg.early_failure_minutes < 1:
+        raise ValueError("EARLY_FAILURE_MINUTES must be at least 1")
+    if not (0.0 <= cfg.early_failure_min_favorable_pct < 1.0):
+        raise ValueError("EARLY_FAILURE_MIN_FAVORABLE_PCT must be between 0 and 100 exclusive")
+    if not (0.0 < cfg.profit_lock_breakeven_pct < 1.0):
+        raise ValueError("PROFIT_LOCK_BREAKEVEN_PCT must be between 0 and 100 exclusive")
+    if not (0.0 < cfg.profit_lock_trailing_start_pct < 1.0):
+        raise ValueError("PROFIT_LOCK_TRAILING_START_PCT must be between 0 and 100 exclusive")
+    if not (0.0 < cfg.profit_lock_trailing_gap_pct < 1.0):
+        raise ValueError("PROFIT_LOCK_TRAILING_GAP_PCT must be between 0 and 100 exclusive")
+    if cfg.profit_lock_trailing_gap_pct >= cfg.profit_lock_trailing_start_pct:
+        raise ValueError("PROFIT_LOCK_TRAILING_GAP_PCT must be less than PROFIT_LOCK_TRAILING_START_PCT")
     if cfg.news_stale_hours <= 0:
         raise ValueError("NEWS_STALE_HOURS must be positive")
     if cfg.alpaca_data_feed not in ("iex", "sip", "delayed_sip", "otc"):

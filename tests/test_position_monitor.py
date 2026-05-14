@@ -3,7 +3,13 @@ import asyncio
 import pytz
 from datetime import date, datetime
 from unittest.mock import MagicMock
-from trading.position_monitor import PositionMonitor, compute_pnl_pct, _should_fire_report
+from trading.position_monitor import (
+    PositionMonitor,
+    compute_pnl_pct,
+    _poll_error_delay,
+    _should_fire_report,
+    _should_log_poll_error_at_error,
+)
 
 
 def test_pnl_at_stop_loss_boundary():
@@ -114,3 +120,16 @@ def test_record_account_value_snapshot_writes_to_db():
     db.record_account_value.assert_called_once()
     _, value = db.record_account_value.call_args.args
     assert value == 25075.5
+
+
+def test_poll_error_delay_backs_off_to_cap():
+    assert _poll_error_delay(1) == 30
+    assert _poll_error_delay(2) == 60
+    assert _poll_error_delay(5) == 300
+    assert _poll_error_delay(20) == 300
+
+
+def test_poll_error_logging_is_throttled():
+    assert _should_log_poll_error_at_error(1) is True
+    assert _should_log_poll_error_at_error(2) is False
+    assert _should_log_poll_error_at_error(10) is True

@@ -28,6 +28,45 @@ def is_routine_news(headline: str) -> bool:
     return any(p.search(headline) for p in _ROUTINE_PATTERNS)
 
 
+_SOFT_PARTNERSHIP_TERMS = (
+    "partnership",
+    "partners with",
+    "partnered with",
+    "collaboration",
+    "collaborates",
+    "strategic investment",
+    "invests in",
+    "investment in",
+)
+
+_MATERIAL_CATALYST_TERMS = (
+    "acquisition",
+    "acquire",
+    "merger",
+    "contract",
+    "order",
+    "award",
+    "revenue",
+    "sales",
+    "eps",
+    "earnings",
+    "guidance",
+    "profit",
+    "approval",
+    "rejection",
+    "fda",
+    "settlement",
+)
+
+
+def is_soft_partnership_without_materiality(headline: str, summary: str | None = None) -> bool:
+    """Return True for partnership/investment items without a concrete financial catalyst."""
+    text = f"{headline or ''} {summary or ''}".lower()
+    if not any(term in text for term in _SOFT_PARTNERSHIP_TERMS):
+        return False
+    return not any(term in text for term in _MATERIAL_CATALYST_TERMS)
+
+
 def compute_news_age_hours(article_ts: datetime) -> float:
     """Return hours elapsed since article_ts. Raises ValueError for naive datetimes."""
     if article_ts.tzinfo is None:

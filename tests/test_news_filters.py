@@ -1,6 +1,11 @@
 from datetime import datetime, timezone, timedelta
 import pytest
-from news.filters import is_retrospective_headline, is_routine_news, compute_news_age_hours
+from news.filters import (
+    is_retrospective_headline,
+    is_routine_news,
+    is_soft_partnership_without_materiality,
+    compute_news_age_hours,
+)
 
 
 # --- is_retrospective_headline ---
@@ -67,6 +72,20 @@ def test_not_routine_fda():
 
 def test_not_routine_acquisition():
     assert is_routine_news("Company Announces Acquisition Of Rival For $2B") is False
+
+
+def test_soft_partnership_without_materiality_blocks():
+    assert is_soft_partnership_without_materiality(
+        "SAP Invests In AI Platform N8n; Strikes Partnership To Embed Platform",
+        "Strategic investment and commercial partnership.",
+    ) is True
+
+
+def test_contract_order_is_material_not_soft_partnership_block():
+    assert is_soft_partnership_without_materiality(
+        "Leidos Wins $2.7B U.S. Army Contract",
+        "Contract to advance hypersonic weapons production.",
+    ) is False
 
 
 # --- compute_news_age_hours ---

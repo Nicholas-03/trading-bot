@@ -27,6 +27,10 @@ def _monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
 
+def _round_order_price(value: float) -> float:
+    return round(value, 4 if value < 1 else 2)
+
+
 class OrderExecutor:
     def __init__(
         self,
@@ -47,6 +51,8 @@ class OrderExecutor:
         self._max_slippage_pct: float = config.max_slippage_pct
         self._extended_move_low_price_pct: float = config.extended_move_low_price_pct
         self._extended_move_any_pct: float = config.extended_move_any_pct
+        self._min_trade_price: float = config.min_trade_price
+        self._bracket_reprice_enabled: bool = config.bracket_reprice_enabled
         self._entry_confirmation_enabled: bool = config.entry_confirmation_enabled
         self._entry_confirmation_lookback_minutes: int = config.entry_confirmation_lookback_minutes
         self._entry_confirmation_trend_minutes: int = config.entry_confirmation_trend_minutes
@@ -56,6 +62,13 @@ class OrderExecutor:
         self._fast_fail_minutes: int = config.fast_fail_minutes
         self._fast_fail_loss_pct: float = config.fast_fail_loss_pct
         self._fast_fail_min_favorable_pct: float = config.fast_fail_min_favorable_pct
+        self._early_failure_enabled: bool = config.early_failure_enabled
+        self._early_failure_minutes: int = config.early_failure_minutes
+        self._early_failure_min_favorable_pct: float = config.early_failure_min_favorable_pct
+        self._profit_lock_enabled: bool = config.profit_lock_enabled
+        self._profit_lock_breakeven_pct: float = config.profit_lock_breakeven_pct
+        self._profit_lock_trailing_start_pct: float = config.profit_lock_trailing_start_pct
+        self._profit_lock_trailing_gap_pct: float = config.profit_lock_trailing_gap_pct
         self._held_tickers = held_tickers
         self._shorted_tickers = shorted_tickers
         self._notifier = notifier
@@ -87,6 +100,7 @@ class OrderExecutor:
         self._weekly_buys: int = 0
         self._weekly_sells: int = 0
         self._weekly_realized_pnl: float = 0.0
+        self._order_terminal_details: dict[str, str] = {}
 
     @property
     def held_tickers(self) -> frozenset[str]:
@@ -149,7 +163,7 @@ class OrderExecutor:
         )
         for attempt in range(1, max_polls + 1):
             try:
-                status, fill_price = await asyncio.to_thread(self._client.get_order, order_id)
+                status, fill_price, reason = await self._read_order_status(order_id)
                 logger.info(
                     "ORDER POLL RESULT: order_id=%s attempt=%d/%d status=%s fill_price=%s",
                     order_id, attempt, max_polls, status, fill_price,
@@ -158,13 +172,34 @@ class OrderExecutor:
                     logger.info("ORDER TERMINAL FILLED: order_id=%s fill_price=%s", order_id, fill_price)
                     return True, fill_price
                 if status in ("canceled", "expired", "rejected", "error"):
-                    logger.warning("Order %s reached terminal state: %s", order_id, status)
+                    self._remember_order_detail(order_id, status, reason)
+                    logger.warning("Order %s reached terminal state: %s", order_id, self._order_detail(order_id, status))
                     return False, None
             except Exception as e:
                 logger.warning("Error polling order %s status: %s", order_id, e)
             await asyncio.sleep(poll_interval)
         logger.warning("Order %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
+        self._remember_order_detail(order_id, "timeout", f"fill confirmation timed out after {timeout_sec:.0f}s")
         return False, None
+
+    async def _read_order_status(self, order_id: str) -> tuple[str, float | None, str | None]:
+        if isinstance(self._client, TradierClient):
+            detail = await asyncio.to_thread(self._client.get_order_status, order_id)
+            return detail.status, detail.avg_fill_price, detail.reason_description
+        status, fill_price = await asyncio.to_thread(self._client.get_order, order_id)
+        return status, fill_price, None
+
+    def _remember_order_detail(self, order_id: str, status: str, reason: str | None = None) -> None:
+        detail = f"status={status}"
+        if reason:
+            detail += f": {reason}"
+        self._order_terminal_details[order_id] = detail
+
+    def _order_detail(self, order_id: str, fallback: str = "fill unconfirmed") -> str:
+        return self._order_terminal_details.get(order_id, fallback)
+
+    def _order_error_message(self, order_id: str, fallback: str = "fill unconfirmed") -> str:
+        return f"order {order_id} {self._order_detail(order_id, fallback)}"
 
     async def _wait_for_position(
         self,
@@ -186,13 +221,14 @@ class OrderExecutor:
         )
         for attempt in range(1, max_polls + 1):
             try:
-                status, _ = await asyncio.to_thread(self._client.get_order, order_id)
+                status, _, reason = await self._read_order_status(order_id)
                 logger.info(
                     "BUY ORDER POLL RESULT: ticker=%s order_id=%s attempt=%d/%d status=%s",
                     ticker, order_id, attempt, max_polls, status,
                 )
                 if status in ("canceled", "expired", "rejected", "error"):
-                    logger.warning("OTOCO %s reached terminal state: %s", order_id, status)
+                    self._remember_order_detail(order_id, status, reason)
+                    logger.warning("OTOCO %s reached terminal state: %s", order_id, self._order_detail(order_id, status))
                     return False, None
             except Exception as e:
                 logger.warning("Error checking OTOCO order %s status: %s", order_id, e)
@@ -215,6 +251,7 @@ class OrderExecutor:
                 logger.warning("Error polling position for %s: %s", ticker, e)
             await asyncio.sleep(poll_interval)
         logger.warning("OTOCO %s fill confirmation timed out after %.0fs", order_id, timeout_sec)
+        self._remember_order_detail(order_id, "timeout", f"entry did not appear in positions after {timeout_sec:.0f}s")
         return False, None
 
     def daily_summary(self, target_date: date | None = None) -> tuple[int, int, float]:
@@ -526,6 +563,56 @@ class OrderExecutor:
             return active_orders
         return await self._wait_for_bracket_close_orders_clear(ticker)
 
+    async def _replace_bracket_after_fill(
+        self,
+        ticker: str,
+        qty: int,
+        actual_price: float,
+        old_order_id: str,
+    ) -> str:
+        """Replace initial quote-based TP/SL with levels based on actual fill."""
+        if not self._bracket_reprice_enabled or actual_price <= 0 or qty <= 0:
+            return old_order_id
+
+        tp_price = _round_order_price(actual_price * (1 + self._take_profit_pct))
+        sl_price = _round_order_price(actual_price * (1 - self._stop_loss_pct))
+        logger.info(
+            "BRACKET REPRICE START: ticker=%s old_order_id=%s qty=%d fill=$%.4f tp=$%.4f sl=$%.4f",
+            ticker, old_order_id, qty, actual_price, tp_price, sl_price,
+        )
+
+        try:
+            await asyncio.to_thread(self._client.cancel_order, old_order_id)
+            logger.info("Cancelled quote-based bracket parent %s for %s before reprice", old_order_id, ticker)
+        except Exception as exc:
+            logger.warning("Could not cancel quote-based bracket parent %s for %s: %s", old_order_id, ticker, exc)
+
+        blocking_orders = await self._cancel_active_bracket_close_orders(ticker)
+        if blocking_orders:
+            order_ids = ", ".join(o.order_id or "unknown" for o in blocking_orders)
+            logger.warning(
+                "BRACKET REPRICE DEFERRED: ticker=%s active close orders still present: %s",
+                ticker, order_ids,
+            )
+            await self._notifier.notify_error(
+                f"buy {ticker}",
+                f"could not reprice bracket after fill; old bracket still active ({order_ids})",
+            )
+            return old_order_id
+
+        try:
+            new_order_id = await asyncio.to_thread(self._client.submit_oco_order, ticker, qty, tp_price, sl_price)
+            self._bracket_orders[ticker] = new_order_id
+            logger.info(
+                "BRACKET REPRICE DONE: ticker=%s old_order_id=%s new_order_id=%s tp=$%.4f sl=$%.4f",
+                ticker, old_order_id, new_order_id, tp_price, sl_price,
+            )
+            return new_order_id
+        except Exception as exc:
+            logger.error("BRACKET REPRICE FAILED for %s after fill: %s", ticker, exc)
+            await self._notifier.notify_error(f"buy {ticker}", f"bracket reprice failed after fill: {exc}")
+            return old_order_id
+
     def defer_close(self, ticker: str) -> None:
         self._pending_close.add(ticker)
 
@@ -631,8 +718,8 @@ class OrderExecutor:
             # Infer which bracket leg fired from price direction, then use the known
             # TP/SL levels for P&L — the live quote arrives up to ~30s after the fill
             # and does not reflect the actual bracket execution price.
-            tp_price = round(entry_price * (1 + self._take_profit_pct), 2)
-            sl_price = round(entry_price * (1 - self._stop_loss_pct), 2)
+            tp_price = _round_order_price(entry_price * (1 + self._take_profit_pct))
+            sl_price = _round_order_price(entry_price * (1 - self._stop_loss_pct))
             if current_price >= entry_price:
                 exit_price = tp_price
                 exit_reason = "take_profit"
@@ -759,6 +846,76 @@ class OrderExecutor:
             return True
         return False
 
+    def update_price_for_exit_signal(self, ticker: str, current_price: float) -> str | None:
+        """Track trade progress and return a risk-control exit reason when triggered."""
+        entry = self._position_book.get(ticker)
+        opened_at = self._hold_opened_at.get(ticker)
+        if entry is None or opened_at is None:
+            return None
+        entry_price, qty, _ = entry
+        if entry_price <= 0 or qty <= 0 or current_price <= 0:
+            return None
+
+        age = datetime.now(timezone.utc) - opened_at
+        pnl_pct = (current_price - entry_price) / entry_price
+        favorable = max(0.0, pnl_pct)
+        best_favorable = max(self._max_favorable_move.get(ticker, 0.0), favorable)
+        self._max_favorable_move[ticker] = best_favorable
+
+        if (
+            self._fast_fail_enabled
+            and age <= timedelta(minutes=self._fast_fail_minutes)
+            and pnl_pct <= -self._fast_fail_loss_pct
+            and best_favorable < self._fast_fail_min_favorable_pct
+        ):
+            logger.info(
+                "FAST FAIL EXIT for %s - age %.1fm pnl %.2f%% best favorable %.2f%%",
+                ticker,
+                age.total_seconds() / 60,
+                pnl_pct * 100,
+                best_favorable * 100,
+            )
+            return "fast_fail"
+
+        if (
+            self._profit_lock_enabled
+            and best_favorable >= self._profit_lock_trailing_start_pct
+            and pnl_pct <= best_favorable - self._profit_lock_trailing_gap_pct
+        ):
+            logger.info(
+                "PROFIT TRAILING EXIT for %s - pnl %.2f%% best favorable %.2f%% trail gap %.2f%%",
+                ticker, pnl_pct * 100, best_favorable * 100, self._profit_lock_trailing_gap_pct * 100,
+            )
+            return "profit_trailing_stop"
+
+        if (
+            self._profit_lock_enabled
+            and best_favorable >= self._profit_lock_breakeven_pct
+            and pnl_pct <= 0
+        ):
+            logger.info(
+                "BREAKEVEN EXIT for %s - pnl %.2f%% after best favorable %.2f%%",
+                ticker, pnl_pct * 100, best_favorable * 100,
+            )
+            return "breakeven_stop"
+
+        if (
+            self._early_failure_enabled
+            and age >= timedelta(minutes=self._early_failure_minutes)
+            and pnl_pct < 0
+            and best_favorable < self._early_failure_min_favorable_pct
+        ):
+            logger.info(
+                "EARLY FAILURE EXIT for %s - age %.1fm pnl %.2f%% best favorable %.2f%%",
+                ticker,
+                age.total_seconds() / 60,
+                pnl_pct * 100,
+                best_favorable * 100,
+            )
+            return "early_failure"
+
+        return None
+
     async def buy(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
         logger.info(
             "BUY TRIGGERED: ticker=%s decision_id=%s hold_hours=%s",
@@ -805,6 +962,14 @@ class OrderExecutor:
                 "BUY PRECHECK: ticker=%s buying_power=%.2f quote=%s open=%s",
                 ticker, buying_power, price, open_price,
             )
+
+            if price < self._min_trade_price:
+                logger.info(
+                    "SKIP [low_price_block] %s — price $%.2f is below minimum $%.2f",
+                    ticker, price, self._min_trade_price,
+                )
+                await self._record_skip_safe(decision_id, "low_price_block")
+                return
 
             # --- intraday extension filter ---
             if open_price is not None and open_price > 0:
@@ -856,8 +1021,8 @@ class OrderExecutor:
             # good signal into a chase fill above the confirmation price.
             entry_limit = price * (1 + self._max_slippage_pct)
 
-            tp_price = round(price * (1 + self._take_profit_pct), 2)
-            sl_price = round(price * (1 - self._stop_loss_pct), 2)
+            tp_price = _round_order_price(price * (1 + self._take_profit_pct))
+            sl_price = _round_order_price(price * (1 - self._stop_loss_pct))
 
             logger.info(
                 "BUY ORDER SUBMITTING: ticker=%s decision_id=%s qty=%d entry_limit=$%.4f quote=$%.2f tp=$%.2f sl=$%.2f",
@@ -933,11 +1098,12 @@ class OrderExecutor:
                     logger.info("BUY CANCEL ORDER DONE: ticker=%s order_id=%s", ticker, order_id)
                 except Exception as cancel_err:
                     logger.warning("BUY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
-                logger.warning("OTOCO %s for %s fill unconfirmed — rolling back state", order_id, ticker)
-                await self._notifier.notify_error(f"buy {ticker}", f"order {order_id} fill unconfirmed")
+                logger.warning("OTOCO %s for %s did not fill (%s) — rolling back state", order_id, ticker, self._order_detail(order_id))
+                await self._notifier.notify_error(f"buy {ticker}", self._order_error_message(order_id))
                 return
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
+            order_id = await self._replace_bracket_after_fill(ticker, qty, actual_price, order_id)
 
             opened_at = datetime.now(timezone.utc).isoformat()
             opened_at_utc = datetime.fromisoformat(opened_at)
@@ -1016,12 +1182,15 @@ class OrderExecutor:
             else:
                 fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
-                logger.warning("SHORT order %s for %s fill unconfirmed — rolling back state", order_id, ticker)
+                logger.warning(
+                    "SHORT order %s for %s did not fill (%s) — rolling back state",
+                    order_id, ticker, self._order_detail(order_id),
+                )
                 self._shorted_tickers.discard(ticker)
                 self._position_book.pop(ticker, None)
                 self._daily_buys -= 1
                 self._weekly_buys -= 1
-                await self._notifier.notify_error(f"short {ticker}", f"order {order_id} fill unconfirmed")
+                await self._notifier.notify_error(f"short {ticker}", self._order_error_message(order_id))
                 return
 
             actual_price = fill_price or 0.0
@@ -1146,9 +1315,12 @@ class OrderExecutor:
 
         filled, fill_price = await self._wait_for_fill(order_id)
         if not filled:
-            logger.warning("SELL order %s for %s fill unconfirmed — skipping sell notification", order_id, ticker)
+            logger.warning(
+                "SELL order %s for %s did not fill (%s) — skipping sell notification",
+                order_id, ticker, self._order_detail(order_id),
+            )
             self._pending_close.discard(ticker)
-            await self._notifier.notify_error(f"sell {ticker}", f"order {order_id} fill unconfirmed")
+            await self._notifier.notify_error(f"sell {ticker}", self._order_error_message(order_id))
             return
 
         # Refine P&L with actual fill price when available

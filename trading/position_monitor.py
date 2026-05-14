@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_POLL_INTERVAL_SEC = 30
+_MAX_ERROR_BACKOFF_SEC = 300
+
 
 def compute_pnl_pct(avg_entry_price: float, current_price: float) -> float:
     return (current_price - avg_entry_price) / avg_entry_price
@@ -31,6 +34,18 @@ def _should_fire_report(now_et: datetime, last_report_date: date | None) -> bool
     if now_et.hour != 16 or now_et.minute > 1:
         return False
     return last_report_date != now_et.date()
+
+
+def _poll_error_delay(failure_count: int) -> int:
+    """Return exponential retry delay after consecutive monitor failures."""
+    if failure_count <= 0:
+        return _POLL_INTERVAL_SEC
+    return min(_MAX_ERROR_BACKOFF_SEC, _POLL_INTERVAL_SEC * (2 ** (failure_count - 1)))
+
+
+def _should_log_poll_error_at_error(failure_count: int) -> bool:
+    """Throttle Telegram ERROR spam while preserving periodic high-signal alerts."""
+    return failure_count == 1 or failure_count % 10 == 0
 
 
 class PositionMonitor:
@@ -52,12 +67,24 @@ class PositionMonitor:
         await asyncio.gather(self._position_loop(), self._report_loop())
 
     async def _position_loop(self) -> None:
+        failure_count = 0
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(_POLL_INTERVAL_SEC if failure_count == 0 else _poll_error_delay(failure_count))
             try:
                 await self._check_positions()
+                if failure_count:
+                    logger.info("Position monitor recovered after %d failed poll(s)", failure_count)
+                failure_count = 0
             except Exception:
-                logger.exception("Position monitor poll failed")
+                failure_count += 1
+                if _should_log_poll_error_at_error(failure_count):
+                    logger.exception("Position monitor poll failed")
+                else:
+                    logger.warning(
+                        "Position monitor poll failed (%d consecutive); retrying in %ss",
+                        failure_count,
+                        _poll_error_delay(failure_count),
+                    )
 
     async def _report_loop(self) -> None:
         while True:
@@ -161,8 +188,9 @@ class PositionMonitor:
         if live_longs:
             quotes = await asyncio.to_thread(self._client.get_quotes, list(live_longs))
             for ticker, price in quotes.items():
-                if self._executor.update_price_for_fast_fail(ticker, price):
-                    await self._executor.sell(ticker, exit_reason="fast_fail")
+                exit_reason = self._executor.update_price_for_exit_signal(ticker, price)
+                if exit_reason:
+                    await self._executor.sell(ticker, exit_reason=exit_reason)
 
         # Detect short positions closed externally (not via this bot's sell path)
         external_short_closed = self._executor.shorted_tickers - live_symbols - self._executor.pending_close

@@ -36,6 +36,13 @@ class TradierOrder:
 
 
 @dataclass
+class TradierOrderStatus:
+    status: str
+    avg_fill_price: float | None
+    reason_description: str | None = None
+
+
+@dataclass
 class TradierGainLoss:
     symbol: str
     quantity: float
@@ -185,7 +192,7 @@ class TradierClient:
             "duration": "day",
         }
         if limit_price is not None:
-            data["price"] = f"{limit_price:.2f}"
+            data["price"] = _format_order_price(limit_price)
         resp = self._request(
             "POST",
             f"/accounts/{self._account_id}/orders",
@@ -217,17 +224,37 @@ class TradierClient:
             "side[1]": "sell",
             "quantity[1]": str(qty),
             "type[1]": "limit",
-            "price[1]": f"{tp_price:.2f}",
+            "price[1]": _format_order_price(tp_price),
             "duration[1]": "gtc",
             "symbol[2]": symbol,
             "side[2]": "sell",
             "quantity[2]": str(qty),
             "type[2]": "stop",
-            "stop[2]": f"{sl_price:.2f}",
+            "stop[2]": _format_order_price(sl_price),
             "duration[2]": "gtc",
         }
         if entry_limit is not None:
-            data["price[0]"] = f"{entry_limit:.2f}"
+            data["price[0]"] = _format_order_price(entry_limit)
+        resp = self._request("POST", f"/accounts/{self._account_id}/orders", data=data)
+        return str(resp.json()["order"]["id"])
+
+    def submit_oco_order(self, symbol: str, qty: int, tp_price: float, sl_price: float) -> str:
+        """Place an OCO close order: take-profit limit + stop-loss stop."""
+        data: dict[str, str] = {
+            "class": "oco",
+            "symbol[0]": symbol,
+            "side[0]": "sell",
+            "quantity[0]": str(qty),
+            "type[0]": "limit",
+            "price[0]": _format_order_price(tp_price),
+            "duration[0]": "gtc",
+            "symbol[1]": symbol,
+            "side[1]": "sell",
+            "quantity[1]": str(qty),
+            "type[1]": "stop",
+            "stop[1]": _format_order_price(sl_price),
+            "duration[1]": "gtc",
+        }
         resp = self._request("POST", f"/accounts/{self._account_id}/orders", data=data)
         return str(resp.json()["order"]["id"])
 
@@ -247,8 +274,13 @@ class TradierClient:
 
     def get_order(self, order_id: str) -> tuple[str, float | None]:
         """Return (status, avg_fill_price) for an order."""
+        detail = self.get_order_status(order_id)
+        return detail.status, detail.avg_fill_price
+
+    def get_order_status(self, order_id: str) -> TradierOrderStatus:
+        """Return order status plus broker rejection/cancel reason when present."""
         resp = self._request("GET", f"/accounts/{self._account_id}/orders/{order_id}")
-        return _parse_order_status(resp.json())
+        return _parse_order_status_detail(resp.json())
 
     def get_account_orders(self) -> list[TradierOrder]:
         """Return all recent account orders across all statuses.
@@ -402,7 +434,14 @@ class TradierClient:
         client = http or self._http
         last_exc: Exception | None = None
         for attempt, delay in enumerate((*_RETRY_DELAYS, None), start=1):
-            resp = client.request(method, path, **kwargs)
+            try:
+                resp = client.request(method, path, **kwargs)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                last_exc = exc
+                if delay is None:
+                    break
+                time.sleep(delay)
+                continue
             if resp.status_code not in _RETRYABLE_STATUSES:
                 _raise_for_status(resp)
                 return resp
@@ -501,6 +540,12 @@ def _format_timesales_dt(value: datetime) -> str:
     return value.astimezone(_MARKET_TZ).strftime("%Y-%m-%d %H:%M")
 
 
+def _format_order_price(value: float) -> str:
+    """Format order prices without losing precision for low-priced stocks."""
+    decimals = 4 if value < 1 else 2
+    return f"{value:.{decimals}f}"
+
+
 def _retry_delay(resp: httpx.Response, fallback: float) -> float:
     retry_after = resp.headers.get("Retry-After")
     if resp.status_code != 429 or not retry_after:
@@ -593,11 +638,22 @@ def _parse_market_bars(data: dict) -> list[MarketBar]:
 
 def _parse_order_status(data: dict) -> tuple[str, float | None]:
     """Parse Tradier order response. Returns (status, avg_fill_price)."""
+    detail = _parse_order_status_detail(data)
+    return detail.status, detail.avg_fill_price
+
+
+def _parse_order_status_detail(data: dict) -> TradierOrderStatus:
+    """Parse Tradier order response with optional broker reason text."""
     order = data.get("order", {})
     if _is_nullish(order) or not isinstance(order, dict):
-        return "unknown", None
+        return TradierOrderStatus("unknown", None, None)
     status = str(order.get("status", "unknown"))
-    return status, _to_positive_float(order.get("avg_fill_price"))
+    reason = order.get("reason_description") or order.get("reason")
+    return TradierOrderStatus(
+        status,
+        _to_positive_float(order.get("avg_fill_price")),
+        str(reason) if reason else None,
+    )
 
 
 def _parse_buying_power(data: dict) -> float:

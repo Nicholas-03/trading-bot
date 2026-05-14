@@ -6,8 +6,10 @@ from trading.tradier_client import (
     TradierClient,
     TradierActivity,
     TradierGainLoss,
+    TradierOrderStatus,
     TradierPosition,
     _format_timesales_dt,
+    _format_order_price,
     _parse_account_total_value,
     _parse_account_history,
     _parse_account_orders,
@@ -15,6 +17,7 @@ from trading.tradier_client import (
     _parse_gain_loss,
     _parse_market_bars,
     _parse_order_status,
+    _parse_order_status_detail,
     _parse_positions,
     _parse_quotes,
     _parse_quotes_with_open,
@@ -187,6 +190,24 @@ def test_parse_order_status_rejected():
     assert price is None
 
 
+def test_parse_order_status_detail_includes_rejection_reason():
+    data = {
+        "order": {
+            "status": "rejected",
+            "avg_fill_price": "0",
+            "reason_description": "This symbol is not available for short sales.",
+        }
+    }
+
+    detail = _parse_order_status_detail(data)
+
+    assert detail == TradierOrderStatus(
+        status="rejected",
+        avg_fill_price=None,
+        reason_description="This symbol is not available for short sales.",
+    )
+
+
 def test_parse_order_status_missing_order_key():
     status, price = _parse_order_status({})
     assert status == "unknown"
@@ -252,6 +273,11 @@ def test_format_timesales_dt_uses_tradier_market_time_minute_format():
     assert _format_timesales_dt(ts) == "2026-05-11 09:21"
 
 
+def test_format_order_price_keeps_sub_dollar_precision():
+    assert _format_order_price(0.57646) == "0.5765"
+    assert _format_order_price(101.923) == "101.92"
+
+
 def test_get_intraday_bars_sends_tradier_timesales_minute_format():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/markets/timesales"
@@ -287,6 +313,27 @@ def test_get_intraday_bars_sends_tradier_timesales_minute_format():
 
     assert bars[0].close == 23.15
     client.close()
+
+
+def test_submit_oco_order_sends_fill_based_close_legs():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        assert request.url.path == "/accounts/acct/orders"
+        assert "class=oco" in body
+        assert "symbol%5B0%5D=AAPL" in body
+        assert "price%5B0%5D=107.12" in body
+        assert "stop%5B1%5D=101.92" in body
+        return httpx.Response(200, json={"order": {"id": "oco-1"}}, request=request)
+
+    client = TradierClient("token", "acct")
+    client._http.close()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test")
+    try:
+        order_id = client.submit_oco_order("AAPL", 1, 107.12, 101.92)
+    finally:
+        client.close()
+
+    assert order_id == "oco-1"
 
 
 def test_parse_account_orders_flattens_nested_otoco_legs():
@@ -469,6 +516,28 @@ def test_request_retries_429_with_retry_after_zero():
         calls += 1
         if calls == 1:
             return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    client = TradierClient("token", "acct")
+    client._http.close()
+    client._http = httpx.Client(transport=httpx.MockTransport(handler), base_url="https://example.test")
+    try:
+        resp = client._request("GET", "/anything")
+    finally:
+        client.close()
+
+    assert resp.status_code == 200
+    assert calls == 2
+
+
+def test_request_retries_read_timeout():
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ReadTimeout("temporary read timeout", request=request)
         return httpx.Response(200, json={"ok": True}, request=request)
 
     client = TradierClient("token", "acct")

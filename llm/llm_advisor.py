@@ -38,6 +38,8 @@ Rules - evaluate each one before deciding:
 7. STALE NEWS WARNING: if news_age_hours > 2.0, the market has likely already fully priced in this catalyst. Lower confidence significantly. If news_age_hours > 4.0, return hold unless the catalyst is an exceptionally rare binary event (e.g., FDA approval).
 8. MARKET DIRECTION CHECK: if the article text implies the price has already made a large move, be skeptical. Chasing an extended move has poor risk/reward. Lower confidence when the article implies "up 9%" or "surging 25%".
 9. Same-day duplicate: if the same underlying event (same earnings release, same FDA approval) is being re-reported in a follow-up article, return hold.
+10. REJECT soft partnership/collaboration/investment headlines unless the article gives direct financial materiality for the ticker being traded (e.g., revenue, order/contract value, earnings/guidance impact, acquisition/settlement value).
+11. Prefer short holds for news momentum. For new buy/short decisions, set hold_hours between 1 and 4.
 
 Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
 {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
