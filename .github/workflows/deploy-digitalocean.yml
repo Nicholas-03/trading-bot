@@ -1,0 +1,56 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: digitalocean-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy trading bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      DROPLET_APP_DIR: ${{ vars.DROPLET_APP_DIR }}
+      DROPLET_COMPOSE_DIR: ${{ vars.DROPLET_COMPOSE_DIR }}
+      DROPLET_SERVICE: ${{ vars.DROPLET_SERVICE }}
+      DROPLET_BRANCH: ${{ vars.DROPLET_BRANCH }}
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: DROPLET_APP_DIR,DROPLET_COMPOSE_DIR,DROPLET_SERVICE,DROPLET_BRANCH
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            APP_DIR="${DROPLET_APP_DIR:-/opt/trading-bot/app}"
+            COMPOSE_DIR="${DROPLET_COMPOSE_DIR:-/opt/trading-bot}"
+            SERVICE="${DROPLET_SERVICE:-trading-bot}"
+            BRANCH="${DROPLET_BRANCH:-master}"
+            TEST_VENV="/tmp/trading-bot-deploy-venv"
+
+            cd "$APP_DIR"
+            git fetch --prune origin "$BRANCH"
+            git pull --ff-only origin "$BRANCH"
+
+            python3 -m venv "$TEST_VENV"
+            "$TEST_VENV/bin/python" -m pip install --upgrade pip
+            "$TEST_VENV/bin/python" -m pip install -r requirements-dev.txt
+            "$TEST_VENV/bin/python" -m pytest tests/ -v
+            "$TEST_VENV/bin/python" -c "import main; print('OK')"
+
+            cd "$COMPOSE_DIR"
+            docker compose build "$SERVICE"
+            docker compose up -d --no-deps "$SERVICE"
+            docker compose ps "$SERVICE"
