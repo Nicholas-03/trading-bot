@@ -17,6 +17,22 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
    - The LLM's `hold_hours` window has expired
 9. All trades are recorded to a local SQLite analytics database.
 
+## Execution Policy
+
+The bot must use Alpaca for all stock market data used in trading decisions: entry quotes, session open, 1-minute confirmation bars, and live prices for position monitoring. Tradier is used only for brokerage/account actions: orders, positions, balances, account history, and realized gain/loss.
+
+Long entries must not be submitted as Tradier OTOCO entry orders. The required flow is:
+
+1. Read the Alpaca snapshot and use the ask price for buy sizing and the slippage-capped entry limit.
+2. Submit a plain Tradier DAY limit buy.
+3. Wait for Tradier to confirm the entry fill.
+4. Place a protective Tradier OCO bracket using the actual fill price.
+5. Record the OCO bracket order ID in analytics.
+
+This policy exists because Tradier sandbox advanced OTOCO entries can remain unfilled/canceled even when the live market appears marketable, especially when mixed with non-Tradier market data. Keeping entry and protective bracket placement separate makes fill failures explicit and prevents the CSX-style missed-entry ambiguity.
+
+See [docs/trading-execution-policy.md](docs/trading-execution-policy.md) for the durable engineering note.
+
 ## Prerequisites
 
 - [Alpaca](https://alpaca.markets) account - used for the real-time news feed and stock market data (not order execution); a free account works with the IEX feed

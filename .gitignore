@@ -21,7 +21,7 @@ build/
 .claude
 .codex/
 TODO
-docs
+docs/superpowers/
 superpowers
 AGENTS.md
 data/trades.db
