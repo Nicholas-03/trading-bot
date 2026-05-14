@@ -36,7 +36,6 @@ def _make_tradier_client(config: Config) -> TradierClient:
         access_token=config.tradier_access_token,
         account_id=config.tradier_account_id,
         paper=config.tradier_paper,
-        quote_token=config.tradier_live_token or None,
     )
 
 
@@ -203,7 +202,7 @@ async def main() -> None:
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
         llm_advisor = LLMAdvisor(config)
         news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
-        position_monitor = PositionMonitor(client, config, order_executor, notifier, db)
+        position_monitor = PositionMonitor(client, config, order_executor, notifier, db, market_data_client)
 
         coroutines = [news_handler.run(), position_monitor.run()]
         command_listener = None

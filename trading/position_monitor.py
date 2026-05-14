@@ -11,6 +11,7 @@ from config import Config
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
+    from trading.alpaca_data_client import AlpacaMarketDataClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,13 @@ class PositionMonitor:
         order_executor: OrderExecutor,
         notifier: Notifier,
         db: "TradeDB | None" = None,
+        market_data_client: "AlpacaMarketDataClient | None" = None,
     ) -> None:
         self._client = client
         self._executor = order_executor
         self._notifier = notifier
         self._db = db
+        self._market_data_client = market_data_client
         self._last_report_date: date | None = None
 
     async def run(self) -> None:
@@ -167,14 +170,14 @@ class PositionMonitor:
                 self._executor.confirm_closed(ticker)
                 logger.info("Deferred close ready to retry for %s", ticker)
 
-        # Detect positions closed by OTOCO bracket (held but disappeared, not manually closed).
-        # Exclude pending_fill tickers: their OTOCO entry hasn't confirmed yet, so they're
-        # not in live_symbols by design — treating them as bracket-closed would be a false positive.
+        # Detect positions closed by a protective bracket (held but disappeared, not manually closed).
+        # Exclude pending_fill tickers: their entry is not fully confirmed/bracketed yet, so
+        # treating them as bracket-closed would be a false positive.
         otoco_closed = self._executor.held_tickers - live_symbols - self._executor.pending_close - self._executor.pending_fill
         if otoco_closed:
-            quotes = await asyncio.to_thread(self._client.get_quotes, list(otoco_closed))
+            quotes = await self._latest_prices(list(otoco_closed))
             for ticker in otoco_closed:
-                logger.info("Position %s no longer in Tradier — OTOCO bracket fired", ticker)
+                logger.info("Position %s no longer in Tradier - protective bracket fired", ticker)
                 await self._executor.handle_bracket_close(ticker, quotes.get(ticker))
 
         # Early exit for trades that fail immediately after entry without ever
@@ -186,7 +189,7 @@ class PositionMonitor:
             - self._executor.pending_fill
         )
         if live_longs:
-            quotes = await asyncio.to_thread(self._client.get_quotes, list(live_longs))
+            quotes = await self._latest_prices(list(live_longs))
             for ticker, price in quotes.items():
                 exit_reason = self._executor.update_price_for_exit_signal(ticker, price)
                 if exit_reason:
@@ -220,3 +223,15 @@ class PositionMonitor:
             await asyncio.to_thread(self._db.record_account_value, ts, value)
         except Exception as exc:
             logger.warning("Account value snapshot unavailable: %s", exc)
+
+    async def _latest_prices(self, symbols: list[str]) -> dict[str, float]:
+        if self._market_data_client is None or not symbols:
+            logger.warning("Position price data unavailable: Alpaca market data client missing")
+            return {}
+        try:
+            prices = await asyncio.to_thread(self._market_data_client.get_latest_prices, symbols)
+            logger.info("POSITION PRICE DATA: provider=alpaca symbols=%s prices=%s", symbols, prices)
+            return prices
+        except Exception as exc:
+            logger.warning("Position price data unavailable from Alpaca for %s: %s", symbols, exc)
+            return {}

@@ -11,6 +11,17 @@ from config import Config
 
 def _make_executor(market_data_client=None) -> OrderExecutor:
     client = MagicMock()
+    client.get_order = MagicMock(return_value=("filled", None))
+    client.get_all_positions = MagicMock(return_value=[])
+    client.get_account_orders = MagicMock(return_value=[])
+    client.submit_order = MagicMock(return_value="order-1")
+    client.submit_oco_order = MagicMock(return_value="oco-1")
+    if market_data_client is None:
+        market_data_client = MagicMock()
+        market_data_client.get_quote_with_open.side_effect = (
+            lambda symbol: client.get_quotes_with_open([symbol]).get(symbol)
+        )
+        market_data_client.get_latest_prices.side_effect = lambda symbols: client.get_quotes(symbols)
     config = MagicMock(spec=Config)
     config.trade_amount_usd = 100.0
     config.short_qty = 1
@@ -357,8 +368,8 @@ def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
     ex._db = MagicMock()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 95.0)})
-    ex._client.submit_otoco_order = MagicMock(return_value="otoco-ambiguous")
-    ex._wait_for_position = AsyncMock(return_value=(False, None))
+    ex._client.submit_order = MagicMock(return_value="entry-ambiguous")
+    ex._wait_for_fill = AsyncMock(return_value=(False, None))
     ex._client.get_account_orders = MagicMock(return_value=[])
     ex._client.cancel_order = MagicMock()
 
@@ -366,7 +377,7 @@ def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
 
     ex._db.record_skip.assert_not_called()
     ex._db.record_trade_open.assert_not_called()
-    ex._client.cancel_order.assert_called_once_with("otoco-ambiguous")
+    ex._client.cancel_order.assert_called_once_with("entry-ambiguous")
     ex._notifier.notify_order_skip.assert_called_once()
     ex._notifier.notify_error.assert_not_called()
 
@@ -376,8 +387,8 @@ def test_buy_exception_after_order_submission_does_not_record_skip_reason():
     ex._db = MagicMock()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 95.0)})
-    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
-    ex._wait_for_position = AsyncMock(side_effect=RuntimeError("polling crashed"))
+    ex._client.submit_order = MagicMock(return_value="entry-1")
+    ex._wait_for_fill = AsyncMock(side_effect=RuntimeError("polling crashed"))
 
     asyncio.run(ex.buy("AAPL", decision_id=88))
 
@@ -415,7 +426,7 @@ def test_short_rolls_back_state_on_unconfirmed_fill():
     assert buys == 0
 
 
-def test_short_rejected_notification_includes_broker_reason():
+def test_short_unavailable_rejection_does_not_notify_telegram():
     ex = _make_executor()
     ex._client.submit_order = MagicMock(return_value="order-1")
     ex._read_order_status = AsyncMock(return_value=(
@@ -426,10 +437,35 @@ def test_short_rejected_notification_includes_broker_reason():
 
     asyncio.run(ex.short("WIX"))
 
+    ex._notifier.notify_error.assert_not_called()
+
+
+def test_short_other_rejection_notification_includes_broker_reason():
+    ex = _make_executor()
+    ex._client.submit_order = MagicMock(return_value="order-1")
+    ex._read_order_status = AsyncMock(return_value=(
+        "rejected",
+        None,
+        "Account is not approved for this order type.",
+    ))
+
+    asyncio.run(ex.short("WIX"))
+
     ex._notifier.notify_error.assert_called_once_with(
         "short WIX",
-        "order order-1 status=rejected: This symbol is not available for short sales.",
+        "order order-1 status=rejected: Account is not approved for this order type.",
     )
+
+
+def test_short_unavailable_submit_exception_does_not_notify_telegram():
+    ex = _make_executor()
+    ex._client.submit_order = MagicMock(
+        side_effect=RuntimeError("This symbol is not available for short sales.")
+    )
+
+    asyncio.run(ex.short("WIX"))
+
+    ex._notifier.notify_error.assert_not_called()
 
 
 # --- decision_monotonic / fill_latency_sec ---
@@ -499,7 +535,8 @@ def test_buy_records_bracket_order_id_in_db():
     ex._db.record_trade_open.return_value = 321
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (50.0, 49.0)})
-    ex._client.submit_otoco_order = MagicMock(return_value="otoco-321")
+    ex._client.submit_order = MagicMock(return_value="entry-321")
+    ex._client.submit_oco_order = MagicMock(return_value="oco-321")
     ex._client.get_order = MagicMock(return_value=("filled", 50.0))
     ex._client.get_all_positions = MagicMock(return_value=[
         TradierPosition(symbol="AAPL", qty=2.0, cost_basis=100.0)
@@ -510,7 +547,7 @@ def test_buy_records_bracket_order_id_in_db():
     args = ex._db.record_trade_open.call_args.args
     assert args[0] == 7
     assert args[1] == "AAPL"
-    assert args[8] == "otoco-321"
+    assert args[8] == "oco-321"
 
 
 def test_short_with_decision_monotonic_calculates_correct_latency():
@@ -610,7 +647,8 @@ def test_buy_allowed_for_fresh_ticker_despite_other_stops():
 
     asyncio.run(ex.buy("ARVN"))
 
-    ex._client.submit_otoco_order.assert_called_once()
+    ex._client.submit_order.assert_called_once()
+    ex._client.submit_oco_order.assert_called_once()
 
 
 def test_daily_stopped_tickers_resets_on_new_day():
@@ -674,7 +712,7 @@ def test_buy_blocked_below_min_trade_price_records_skip():
     ex._db = MagicMock()
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"XXII": (0.61, 0.60)})
-    ex._client.submit_otoco_order = MagicMock(return_value="order-1")
+    ex._client.submit_order = MagicMock(return_value="entry-1")
 
     asyncio.run(ex.buy("XXII", decision_id=123))
 
@@ -710,7 +748,8 @@ def test_buy_allowed_moderate_move():
 
     asyncio.run(ex.buy("ARVN"))
 
-    ex._client.submit_otoco_order.assert_called_once()
+    ex._client.submit_order.assert_called_once()
+    ex._client.submit_oco_order.assert_called_once()
 
 
 # --- falling on good news ---
@@ -743,7 +782,8 @@ def test_buy_allowed_slight_pullback():
 
     asyncio.run(ex.buy("INSG"))
 
-    ex._client.submit_otoco_order.assert_called_once()
+    ex._client.submit_order.assert_called_once()
+    ex._client.submit_oco_order.assert_called_once()
 
 
 # --- 1-minute entry confirmation ---
@@ -818,7 +858,7 @@ def test_recent_bars_prefers_alpaca_market_data():
     ex._client.get_intraday_bars.assert_not_called()
 
 
-def test_recent_bars_falls_back_to_tradier_when_alpaca_has_too_few_bars():
+def test_recent_bars_uses_alpaca_only_when_alpaca_has_too_few_bars():
     alpaca = MagicMock()
     alpaca.get_intraday_bars.return_value = _bars([100, 101])
     ex = _make_executor(market_data_client=alpaca)
@@ -826,9 +866,24 @@ def test_recent_bars_falls_back_to_tradier_when_alpaca_has_too_few_bars():
 
     bars = asyncio.run(ex._recent_bars("AAPL", 8))
 
-    assert [bar.close for bar in bars] == [90, 91, 92, 93]
+    assert [bar.close for bar in bars] == [100, 101]
     alpaca.get_intraday_bars.assert_called_once()
-    ex._client.get_intraday_bars.assert_called_once()
+    ex._client.get_intraday_bars.assert_not_called()
+
+
+def test_buy_entry_quote_uses_alpaca_market_data_not_tradier_quotes():
+    alpaca = MagicMock()
+    alpaca.get_quote_with_open.return_value = (50.0, 49.0)
+    ex = _make_executor(market_data_client=alpaca)
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (999.0, 900.0)})
+    ex._client.get_order = MagicMock(return_value=("filled", 50.0))
+
+    asyncio.run(ex.buy("AAPL"))
+
+    alpaca.get_quote_with_open.assert_called_once_with("AAPL")
+    ex._client.get_quotes_with_open.assert_not_called()
+    ex._client.submit_order.assert_called_once_with("AAPL", "buy", 2, pytest.approx(50.0 * 1.005))
 
 
 def test_fast_fail_triggers_only_before_meaningful_favorable_move():
@@ -891,34 +946,23 @@ def test_buy_blocks_low_price_stock_instead_of_ordering():
 
     asyncio.run(ex.buy("FATN"))
 
+    ex._client.submit_order.assert_not_called()
     ex._client.submit_otoco_order.assert_not_called()
-    # submit_otoco_order(symbol, qty, tp_price, sl_price, entry_limit) — entry_limit is args[4]
 
 
-def test_buy_reprices_bracket_from_actual_fill():
+def test_buy_submits_protective_bracket_from_actual_fill():
     ex = _make_executor()
-    ex._bracket_reprice_enabled = True
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 99.0)})
-    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
-    ex._client.get_order = MagicMock(return_value=("open", None))
-    ex._client.get_all_positions = MagicMock(return_value=[
-        TradierPosition(symbol="AAPL", qty=1.0, cost_basis=104.0)
-    ])
-    ex._client.get_account_orders = MagicMock(side_effect=[
-        [
-            TradierOrder("AAPL", "sell", "open", "limit", None, None, 1, "tp-1"),
-            TradierOrder("AAPL", "sell", "open", "stop", None, None, 1, "sl-1"),
-        ],
-        [],
-    ])
+    ex._client.submit_order = MagicMock(return_value="entry-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 104.0))
     ex._client.cancel_order = MagicMock()
     ex._client.submit_oco_order = MagicMock(return_value="oco-2")
 
     asyncio.run(ex.buy("AAPL"))
 
-    ex._client.cancel_order.assert_any_call("tp-1")
-    ex._client.cancel_order.assert_any_call("sl-1")
+    ex._client.submit_order.assert_called_once_with("AAPL", "buy", 1, pytest.approx(100.0 * 1.005))
+    ex._client.cancel_order.assert_not_called()
     ex._client.submit_oco_order.assert_called_once_with("AAPL", 1, 107.12, 101.92)
     assert ex._bracket_orders["AAPL"] == "oco-2"
 
@@ -938,8 +982,8 @@ def test_buy_uses_limit_entry_for_calm_large_cap():
 
     asyncio.run(ex.buy("IONQ"))
 
-    call_args = ex._client.submit_otoco_order.call_args
-    entry_limit = call_args.args[4] if len(call_args.args) > 4 else call_args.kwargs.get("entry_limit")
+    call_args = ex._client.submit_order.call_args
+    entry_limit = call_args.args[3] if len(call_args.args) > 3 else call_args.kwargs.get("limit_price")
     assert entry_limit == pytest.approx(46.05 * 1.005, rel=1e-4)
 
 
@@ -1173,7 +1217,7 @@ def test_sell_unconfirmed_does_not_notify_or_close_db():
     ex._notifier.notify_error.assert_called_once()
 
 
-def test_buy_fast_bracket_round_trip_uses_tradier_fills():
+def test_buy_plain_entry_submits_protective_bracket_after_fill():
     import asyncio
     ex = _make_executor()
     ex._min_trade_price = 0.5
@@ -1181,42 +1225,19 @@ def test_buy_fast_bracket_round_trip_uses_tradier_fills():
     ex._db.record_trade_open.return_value = 42
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"ZTEK": (0.56, 0.53)})
-    ex._client.submit_otoco_order = MagicMock(return_value="otoco-1")
-    ex._wait_for_position = AsyncMock(return_value=(False, None))
+    ex._client.submit_order = MagicMock(return_value="entry-1")
+    ex._client.get_order = MagicMock(return_value=("filled", 0.51))
+    ex._client.submit_oco_order = MagicMock(return_value="oco-1")
     ex._client.cancel_order = MagicMock()
-    ex._client.get_account_orders = MagicMock(return_value=[
-        TradierOrder(
-            symbol="ZTEK",
-            side="buy",
-            status="filled",
-            order_type="limit",
-            avg_fill_price=0.51,
-            filled_at="2999-05-06T16:33:27.434Z",
-            quantity=89,
-        ),
-        TradierOrder(
-            symbol="ZTEK",
-            side="sell",
-            status="filled",
-            order_type="stop",
-            avg_fill_price=0.49,
-            filled_at="2999-05-06T16:33:27.513Z",
-            quantity=89,
-        ),
-    ])
 
     asyncio.run(ex.buy("ZTEK", decision_id=4231, hold_hours=24))
 
+    ex._client.submit_order.assert_called_once_with("ZTEK", "buy", 178, pytest.approx(0.56 * 1.005))
+    ex._client.submit_oco_order.assert_called_once_with("ZTEK", 178, 0.5253, 0.4998)
     ex._client.cancel_order.assert_not_called()
     ex._notifier.notify_error.assert_not_called()
     ex._notifier.notify_buy.assert_called_once()
-    ex._notifier.notify_sell.assert_called_once()
-    sell_args = ex._notifier.notify_sell.call_args.args
-    assert sell_args[0] == "ZTEK"
-    assert abs(sell_args[1] - ((0.49 - 0.51) / 0.51)) < 1e-9
-    assert abs(sell_args[2] - ((0.49 - 0.51) * 89)) < 1e-9
-    ex._db.record_trade_close.assert_called_once()
-    close_args = ex._db.record_trade_close.call_args.args
-    assert close_args[1] == 0.49
-    assert close_args[4] == "stop_loss"
+    ex._notifier.notify_sell.assert_not_called()
+    ex._db.record_trade_open.assert_called_once()
+    assert ex._db.record_trade_open.call_args.args[8] == "oco-1"
 

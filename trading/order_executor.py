@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _FILL_TIMEOUT = 60.0
 _FILL_POLL = 3.0
 _PENDING_CLOSE_STATUSES = {"open", "pending", "accepted", "queued", "partially_filled"}
+_SHORT_SALE_UNAVAILABLE_PHRASE = "not available for short sales"
 
 
 def _monday_of(d: date) -> date:
@@ -29,6 +30,10 @@ def _monday_of(d: date) -> date:
 
 def _round_order_price(value: float) -> float:
     return round(value, 4 if value < 1 else 2)
+
+
+def _is_short_sale_unavailable_error(message: str) -> bool:
+    return _SHORT_SALE_UNAVAILABLE_PHRASE in message.lower()
 
 
 class OrderExecutor:
@@ -81,7 +86,7 @@ class OrderExecutor:
         self._position_book: dict[str, tuple[float, int, int | None]] = {}
         # ticker -> best favorable move seen by the position monitor after entry
         self._max_favorable_move: dict[str, float] = {}
-        # ticker -> OTOCO bracket group order ID (present only for long positions)
+        # ticker -> protective OCO bracket group order ID (present only for long positions)
         self._bracket_orders: dict[str, str] = {}
         # ticker -> UTC datetime when the hold_hours window expires
         self._hold_until: dict[str, datetime] = {}
@@ -219,8 +224,8 @@ class OrderExecutor:
     ) -> tuple[bool, float | None]:
         """Poll until the position appears in the account or the bracket order reaches a terminal state.
 
-        Returns (filled, avg_entry_price). Used for OTOCO entry confirmation because the
-        parent OTOCO order status stays 'open' while the bracket is active — polling the
+        Returns (filled, avg_entry_price). Kept for legacy OTOCO entry confirmation because the
+        parent OTOCO order status stays 'open' while the bracket is active - polling the
         position list is the reliable signal that leg 0 filled.
         """
         max_polls = max(1, int(timeout_sec / poll_interval))
@@ -700,7 +705,7 @@ class OrderExecutor:
         return True
 
     async def handle_bracket_close(self, ticker: str, current_price: float | None) -> None:
-        """Called by PositionMonitor when a long position disappears after an OTOCO bracket fired."""
+        """Called by PositionMonitor when a long position disappears after a protective bracket fired."""
         entry_price, qty_held, trade_id = self._position_book.get(ticker, (0.0, 0, None))
         opened_at = self._hold_opened_at.get(ticker)
         self._bracket_orders.pop(ticker, None)
@@ -764,21 +769,59 @@ class OrderExecutor:
                     logger.info("ENTRY DATA: provider=alpaca ticker=%s bars=%d required=%d", ticker, len(bars), min_bars)
                     return bars
                 logger.warning(
-                    "ENTRY DATA INSUFFICIENT: provider=alpaca ticker=%s bars=%d required=%d; falling back to Tradier",
+                    "ENTRY DATA INSUFFICIENT: provider=alpaca ticker=%s bars=%d required=%d",
                     ticker, len(bars), min_bars,
                 )
+                return bars
             except Exception as e:
-                logger.warning("ENTRY DATA ERROR: provider=alpaca ticker=%s error=%s; falling back to Tradier", ticker, e)
+                logger.warning("ENTRY DATA ERROR: provider=alpaca ticker=%s error=%s", ticker, e)
+        else:
+            logger.warning("ENTRY DATA ERROR: provider=alpaca ticker=%s error=market data client unavailable", ticker)
+        return []
+
+    async def _entry_quote(self, ticker: str) -> tuple[float, float | None] | None:
+        if self._market_data_client is None:
+            logger.warning("ENTRY QUOTE ERROR: provider=alpaca ticker=%s error=market data client unavailable", ticker)
+            return None
         try:
-            bars = await asyncio.to_thread(self._client.get_intraday_bars, ticker, start, end, "1min")
-            logger.info(
-                "ENTRY DATA: provider=tradier ticker=%s bars=%d required=%d",
-                ticker, len(bars), self._entry_confirmation_trend_minutes + 1,
-            )
-            return bars
+            quote = await asyncio.to_thread(self._market_data_client.get_quote_with_open, ticker)
+            if quote is not None:
+                logger.info("ENTRY QUOTE: provider=alpaca ticker=%s price=%s open=%s", ticker, quote[0], quote[1])
+            return quote
         except Exception as e:
-            logger.warning("ENTRY DATA ERROR: provider=tradier ticker=%s error=%s", ticker, e)
-            return []
+            logger.warning("ENTRY QUOTE ERROR: provider=alpaca ticker=%s error=%s", ticker, e)
+            return None
+
+    async def _latest_prices(self, symbols: list[str]) -> dict[str, float]:
+        if self._market_data_client is None or not symbols:
+            return {}
+        try:
+            prices = await asyncio.to_thread(self._market_data_client.get_latest_prices, symbols)
+            logger.info("PRICE DATA: provider=alpaca symbols=%s prices=%s", symbols, prices)
+            return prices
+        except Exception as e:
+            logger.warning("PRICE DATA ERROR: provider=alpaca symbols=%s error=%s", symbols, e)
+            return {}
+
+    async def _submit_fill_based_bracket(self, ticker: str, qty: int, actual_price: float) -> str | None:
+        if actual_price <= 0 or qty <= 0:
+            return None
+
+        tp_price = _round_order_price(actual_price * (1 + self._take_profit_pct))
+        sl_price = _round_order_price(actual_price * (1 - self._stop_loss_pct))
+        logger.info(
+            "BRACKET SUBMITTING: ticker=%s qty=%d fill=$%.4f tp=$%.4f sl=$%.4f",
+            ticker, qty, actual_price, tp_price, sl_price,
+        )
+        try:
+            order_id = await asyncio.to_thread(self._client.submit_oco_order, ticker, qty, tp_price, sl_price)
+            self._bracket_orders[ticker] = order_id
+            logger.info("BRACKET SUBMITTED: ticker=%s order_id=%s", ticker, order_id)
+            return order_id
+        except Exception as exc:
+            logger.error("BRACKET SUBMIT FAILED for %s after fill: %s", ticker, exc)
+            await self._notifier.notify_error(f"buy {ticker}", f"protective bracket failed after fill: {exc}")
+            return None
 
     def _entry_confirmation_skip_reason(
         self,
@@ -960,15 +1003,14 @@ class OrderExecutor:
                 )
                 await self._record_skip_safe(decision_id, "insufficient_funds")
                 return
-            quotes_ext = await asyncio.to_thread(self._client.get_quotes_with_open, [ticker])
-            quote = quotes_ext.get(ticker)
+            quote = await self._entry_quote(ticker)
             if not quote:
-                logger.error("No quote available for %s — skipping buy", ticker)
+                logger.error("No Alpaca quote available for %s - skipping buy", ticker)
                 await self._record_skip_safe(decision_id, "no_quote")
                 return
             price, open_price = quote
             logger.info(
-                "BUY PRECHECK: ticker=%s buying_power=%.2f quote=%s open=%s",
+                "BUY PRECHECK: ticker=%s buying_power=%.2f provider=alpaca quote=%s open=%s",
                 ticker, buying_power, price, open_price,
             )
 
@@ -1030,24 +1072,20 @@ class OrderExecutor:
             # good signal into a chase fill above the confirmation price.
             entry_limit = price * (1 + self._max_slippage_pct)
 
-            tp_price = _round_order_price(price * (1 + self._take_profit_pct))
-            sl_price = _round_order_price(price * (1 - self._stop_loss_pct))
-
             logger.info(
-                "BUY ORDER SUBMITTING: ticker=%s decision_id=%s qty=%d entry_limit=$%.4f quote=$%.2f tp=$%.2f sl=$%.2f",
-                ticker, decision_id, qty, entry_limit, price, tp_price, sl_price,
+                "BUY ENTRY SUBMITTING: ticker=%s decision_id=%s qty=%d entry_limit=$%.4f quote=$%.2f",
+                ticker, decision_id, qty, entry_limit, price,
             )
 
             order_id = await asyncio.to_thread(
-                self._client.submit_otoco_order, ticker, qty, tp_price, sl_price, entry_limit
+                self._client.submit_order, ticker, "buy", qty, entry_limit
             )
             submitted_at_utc = datetime.now(timezone.utc)
             _submitted_at = time.monotonic()
             logger.info(
-                "BUY ORDER SUBMITTED: ticker=%s decision_id=%s order_id=%s submitted_at=%s",
+                "BUY ENTRY SUBMITTED: ticker=%s decision_id=%s order_id=%s submitted_at=%s",
                 ticker, decision_id, order_id, submitted_at_utc.isoformat(),
             )
-            self._bracket_orders[ticker] = order_id
 
             # Guard against duplicate buys immediately — broker accepted the order
             self._held_tickers.add(ticker)
@@ -1059,13 +1097,12 @@ class OrderExecutor:
             self._daily_buys += 1
             self._weekly_buys += 1
 
-            # Wait for entry leg fill: poll positions (OTOCO parent stays 'open' while bracket is active).
-            # Guard pending_fill so the position monitor does not mistake a not-yet-filled entry as a
-            # bracket close (the race that caused false handle_bracket_close calls for KYIV/AMC/ZTEK).
+            # Wait for the plain entry order to fill before submitting protective OCO legs.
+            # pending_fill keeps the monitor from treating the not-yet-protected entry as closed.
             self._pending_fill.add(ticker)
-            filled, fill_price = await self._wait_for_position(ticker, order_id)
+            filled, fill_price = await self._wait_for_fill(order_id)
             logger.info(
-                "BUY POLLING FINISHED: ticker=%s order_id=%s filled=%s fill_price=%s",
+                "BUY ENTRY POLLING FINISHED: ticker=%s order_id=%s filled=%s fill_price=%s",
                 ticker, order_id, filled, fill_price,
             )
             # Measure latency from decision time when provided, otherwise from submission
@@ -1074,19 +1111,9 @@ class OrderExecutor:
             else:
                 fill_latency_sec = time.monotonic() - _submitted_at
             if not filled:
-                reconciled = await self._reconcile_fast_bracket_round_trip(
-                    ticker,
-                    decision_id,
-                    submitted_at_utc,
-                    qty,
-                    fill_latency_sec,
-                    hold_hours,
-                )
-                if reconciled:
-                    logger.info("BUY RECONCILED AFTER UNCONFIRMED POLL: ticker=%s order_id=%s", ticker, order_id)
-                    return
+                error_message = self._order_error_message(order_id)
                 logger.warning(
-                    "BUY BROKER STATE AMBIGUOUS: ticker=%s order_id=%s no position confirmed and no fast bracket fill found; canceling order",
+                    "BUY ENTRY UNFILLED: ticker=%s order_id=%s no entry fill confirmed; canceling order",
                     ticker, order_id,
                 )
                 # Synchronously clean up all tracked state before any awaits so the position monitor
@@ -1102,18 +1129,18 @@ class OrderExecutor:
                     self._weekly_buys -= 1
                 self._pending_fill.discard(ticker)
                 try:
-                    logger.info("BUY CANCEL ORDER: ticker=%s order_id=%s", ticker, order_id)
+                    logger.info("BUY ENTRY CANCEL ORDER: ticker=%s order_id=%s", ticker, order_id)
                     await asyncio.to_thread(self._client.cancel_order, order_id)
-                    logger.info("BUY CANCEL ORDER DONE: ticker=%s order_id=%s", ticker, order_id)
+                    logger.info("BUY ENTRY CANCEL ORDER DONE: ticker=%s order_id=%s", ticker, order_id)
                     await self._refresh_order_detail_safe(order_id, "canceled")
                 except Exception as cancel_err:
-                    logger.warning("BUY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
-                logger.warning("OTOCO %s for %s did not fill (%s) — rolling back state", order_id, ticker, self._order_detail(order_id))
+                    logger.warning("BUY ENTRY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
+                logger.warning("Entry order %s for %s did not fill (%s) - rolling back state", order_id, ticker, self._order_detail(order_id))
                 await self._notifier.notify_order_skip(f"buy {ticker}", self._order_error_message(order_id))
                 return
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
-            order_id = await self._replace_bracket_after_fill(ticker, qty, actual_price, order_id)
+            bracket_order_id = await self._submit_fill_based_bracket(ticker, qty, actual_price)
 
             opened_at = datetime.now(timezone.utc).isoformat()
             opened_at_utc = datetime.fromisoformat(opened_at)
@@ -1126,7 +1153,7 @@ class OrderExecutor:
                     trade_id = await asyncio.to_thread(
                         self._db.record_trade_open,
                         decision_id, ticker, "buy", qty, actual_price, opened_at,
-                        fill_latency_sec, hold_hours, order_id,
+                        fill_latency_sec, hold_hours, bracket_order_id,
                     )
                     self._position_book[ticker] = (actual_price, qty, trade_id)
                     logger.info(
@@ -1144,7 +1171,10 @@ class OrderExecutor:
             # firing with trade_id=None if the bracket executes during that await (BLSH pattern).
             self._pending_fill.discard(ticker)
 
-            logger.info("BUY filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, qty, actual_price, fill_latency_sec, order_id)
+            logger.info(
+                "BUY filled for %s qty=%d @ $%.2f in %.1fs - entry order %s bracket order %s",
+                ticker, qty, actual_price, fill_latency_sec, order_id, bracket_order_id,
+            )
             await self._notifier.notify_buy(ticker, actual_price * qty, order_id, fill_price=actual_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
             logger.error("Failed to buy %s: %s", ticker, e)
@@ -1200,7 +1230,14 @@ class OrderExecutor:
                 self._position_book.pop(ticker, None)
                 self._daily_buys -= 1
                 self._weekly_buys -= 1
-                await self._notifier.notify_error(f"short {ticker}", self._order_error_message(order_id))
+                error_message = self._order_error_message(order_id)
+                if _is_short_sale_unavailable_error(error_message):
+                    logger.info(
+                        "Skipping Telegram notification for unavailable short sale: ticker=%s detail=%s",
+                        ticker, error_message,
+                    )
+                else:
+                    await self._notifier.notify_error(f"short {ticker}", error_message)
                 return
 
             actual_price = fill_price or 0.0
@@ -1226,9 +1263,14 @@ class OrderExecutor:
             logger.info("SHORT filled for %s qty=%d @ $%.2f in %.1fs — order %s", ticker, self._short_qty, actual_price, fill_latency_sec, order_id)
             await self._notifier.notify_short(ticker, self._short_qty, order_id, fill_price=fill_price, fill_latency_sec=fill_latency_sec)
         except Exception as e:
+            error_message = str(e)
+            if _is_short_sale_unavailable_error(error_message):
+                logger.info("Short rejected because symbol is unavailable for short sale: ticker=%s detail=%s", ticker, error_message)
+                await self._record_skip_safe(decision_id, "short_unavailable")
+                return
             logger.error("Failed to short %s: %s", ticker, e)
             await self._record_skip_safe(decision_id, "short_exception")
-            await self._notifier.notify_error(f"short {ticker}", str(e))
+            await self._notifier.notify_error(f"short {ticker}", error_message)
 
     async def sell(
         self,
@@ -1242,7 +1284,7 @@ class OrderExecutor:
             logger.warning("Sell/cover called for %s but no open position — skipping", ticker)
             return
 
-        # Cancel any active OTOCO bracket before closing to avoid order conflicts
+        # Cancel any active protective bracket before closing to avoid order conflicts.
         bracket_id = self._bracket_orders.pop(ticker, None)
         if bracket_id:
             try:
@@ -1282,7 +1324,7 @@ class OrderExecutor:
         try:
             # Estimate P&L when not provided by caller; refine with the actual fill below.
             if pnl_usd is None and entry_price > 0 and qty_held > 0:
-                quotes = await asyncio.to_thread(self._client.get_quotes, [ticker])
+                quotes = await self._latest_prices([ticker])
                 current = quotes.get(ticker, 0.0)
                 if current:
                     exit_price = current

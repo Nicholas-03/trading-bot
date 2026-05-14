@@ -1,9 +1,42 @@
 # trading/alpaca_data_client.py
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
 
 from trading.tradier_client import MarketBar
+
+
+@dataclass(frozen=True)
+class AlpacaSnapshotPrice:
+    symbol: str
+    bid: float | None
+    ask: float | None
+    last: float | None
+    open: float | None
+    close: float | None
+
+    @property
+    def entry_price(self) -> float | None:
+        """Price used for buy sizing/slippage checks. Prefer the ask for entries."""
+        if self.ask is not None:
+            return self.ask
+        if self.last is not None:
+            return self.last
+        return self.latest_price
+
+    @property
+    def latest_price(self) -> float | None:
+        """Price used for monitoring/estimates. Prefer last trade, then midpoint."""
+        if self.last is not None:
+            return self.last
+        if self.bid is not None and self.ask is not None:
+            return (self.bid + self.ask) / 2
+        if self.ask is not None:
+            return self.ask
+        if self.bid is not None:
+            return self.bid
+        return self.close
 
 
 class AlpacaMarketDataClient:
@@ -41,6 +74,37 @@ class AlpacaMarketDataClient:
         )
         resp.raise_for_status()
         return _parse_alpaca_bars(resp.json())
+
+    def get_snapshots(self, symbols: list[str]) -> dict[str, AlpacaSnapshotPrice]:
+        """Return Alpaca stock snapshots keyed by symbol."""
+        clean_symbols = [s.upper() for s in symbols if s]
+        if not clean_symbols:
+            return {}
+        resp = self._http.get(
+            "/v2/stocks/snapshots",
+            params={
+                "symbols": ",".join(clean_symbols),
+                "feed": self._feed,
+            },
+        )
+        resp.raise_for_status()
+        return _parse_alpaca_snapshots(resp.json())
+
+    def get_quote_with_open(self, symbol: str) -> tuple[float, float | None] | None:
+        """Return (entry_price, session_open) using Alpaca market data only."""
+        snapshot = self.get_snapshots([symbol]).get(symbol.upper())
+        if snapshot is None or snapshot.entry_price is None:
+            return None
+        return snapshot.entry_price, snapshot.open
+
+    def get_latest_prices(self, symbols: list[str]) -> dict[str, float]:
+        """Return latest monitor prices using Alpaca market data only."""
+        result: dict[str, float] = {}
+        for symbol, snapshot in self.get_snapshots(symbols).items():
+            price = snapshot.latest_price
+            if price is not None:
+                result[symbol] = price
+        return result
 
     def close(self) -> None:
         self._http.close()
@@ -82,3 +146,31 @@ def _parse_alpaca_bars(data: dict) -> list[MarketBar]:
         result.append(MarketBar(str(ts), open_price, high, low, close, volume))
 
     return sorted(result, key=lambda bar: bar.time)
+
+
+def _parse_alpaca_snapshots(data: dict) -> dict[str, AlpacaSnapshotPrice]:
+    raw = data.get("snapshots")
+    if raw is None:
+        raw = data
+    if not isinstance(raw, dict):
+        return {}
+
+    result: dict[str, AlpacaSnapshotPrice] = {}
+    for symbol, item in raw.items():
+        if not isinstance(item, dict):
+            continue
+        latest_quote = item.get("latestQuote") if isinstance(item.get("latestQuote"), dict) else {}
+        latest_trade = item.get("latestTrade") if isinstance(item.get("latestTrade"), dict) else {}
+        daily_bar = item.get("dailyBar") if isinstance(item.get("dailyBar"), dict) else {}
+
+        parsed = AlpacaSnapshotPrice(
+            symbol=str(symbol).upper(),
+            bid=_to_positive_float(latest_quote.get("bp")),
+            ask=_to_positive_float(latest_quote.get("ap")),
+            last=_to_positive_float(latest_trade.get("p")),
+            open=_to_positive_float(daily_bar.get("o")),
+            close=_to_positive_float(daily_bar.get("c")),
+        )
+        if parsed.entry_price is not None or parsed.latest_price is not None:
+            result[parsed.symbol] = parsed
+    return result

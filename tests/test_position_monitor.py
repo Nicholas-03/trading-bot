@@ -122,6 +122,20 @@ def test_record_account_value_snapshot_writes_to_db():
     assert value == 25075.5
 
 
+def test_latest_prices_uses_alpaca_market_data_not_tradier_quotes():
+    client = MagicMock()
+    client.get_quotes.return_value = {"AAPL": 1.0}
+    alpaca = MagicMock()
+    alpaca.get_latest_prices.return_value = {"AAPL": 175.25}
+    monitor = PositionMonitor(client, MagicMock(), MagicMock(), MagicMock(), market_data_client=alpaca)
+
+    prices = asyncio.run(monitor._latest_prices(["AAPL"]))
+
+    assert prices == {"AAPL": 175.25}
+    alpaca.get_latest_prices.assert_called_once_with(["AAPL"])
+    client.get_quotes.assert_not_called()
+
+
 def test_poll_error_delay_backs_off_to_cap():
     assert _poll_error_delay(1) == 30
     assert _poll_error_delay(2) == 60

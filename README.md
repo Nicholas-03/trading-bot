@@ -8,7 +8,7 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 2. Sends each news headline, summary, and mentioned tickers to the LLM along with current long/short positions.
 3. The LLM returns a `buy`, `short`, `sell`, or `hold` decision with a confidence score and expected hold duration.
 4. Decisions below `MIN_CONFIDENCE` are skipped.
-5. On `buy`: places a DAY market order for `TRADE_AMOUNT_USD` worth of the ticker (only during market hours and when sufficient buying power exists).
+5. On `buy`: uses Alpaca market data for price checks, places a capped DAY limit entry through Tradier, confirms the actual fill, then places a protective OCO take-profit/stop bracket.
 6. On `short`: places a short sell order for `SHORT_QTY` shares of the ticker.
 7. On `sell`: closes the full long or short position for the ticker.
 8. Every 30 seconds, checks all open positions and automatically closes if:
@@ -19,7 +19,7 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 
 ## Prerequisites
 
-- [Alpaca](https://alpaca.markets) account — used for the real-time news feed only (not for trading); a free account works
+- [Alpaca](https://alpaca.markets) account - used for the real-time news feed and stock market data (not order execution); a free account works with the IEX feed
 - [Tradier](https://developer.tradier.com) account — used for all trading; sandbox is free
 - An OpenAI API key for ChatGPT decisions
 
@@ -51,13 +51,13 @@ Edit `.env` with your API keys and settings:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ALPACA_API_KEY` | Alpaca API key ID (news feed only) | required |
-| `ALPACA_SECRET_KEY` | Alpaca secret key (news feed only) | required |
+| `ALPACA_API_KEY` | Alpaca API key ID for news and stock market data | required |
+| `ALPACA_SECRET_KEY` | Alpaca secret key for news and stock market data | required |
 | `TRADIER_ACCESS_TOKEN` | Tradier access token | required |
 | `TRADIER_ACCOUNT_ID` | Tradier account ID | required |
 | `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
-| `TRADIER_LIVE_TOKEN` | Live account token for real-time quotes while paper trading (sandbox quotes are 15-min delayed) | optional |
-| `ALPACA_DATA_FEED` | Alpaca stock-data feed for entry-confirmation 1-minute bars (`iex`, `sip`, `delayed_sip`, `otc`) | `iex` |
+| `TRADIER_LIVE_TOKEN` | Deprecated/unused; market data comes from Alpaca | optional |
+| `ALPACA_DATA_FEED` | Alpaca stock-data feed for quotes, snapshots, and entry-confirmation bars (`iex`, `sip`, `delayed_sip`, `otc`) | `iex` |
 | `LLM_PROVIDER` | LLM provider to use | `chatgpt` |
 | `OPENAI_API_KEY` | OpenAI API key | required |
 | `OPENAI_MODEL` | OpenAI model ID | `gpt-5.4-mini` |
