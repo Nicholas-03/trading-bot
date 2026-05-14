@@ -46,10 +46,11 @@ The SSH user must be able to:
 
 - read and update the repository checkout,
 - run `python3`,
+- create Python virtual environments with `python3-venv`,
 - run `docker compose build`,
 - run `docker compose up -d --no-deps trading-bot`.
 
-If you use a non-root `deploy` user, add it to the `docker` group or configure passwordless sudo and adjust the workflow commands accordingly.
+If the SSH user is `root`, the workflow installs `python3-venv` automatically when it is missing. If you use a non-root `deploy` user, install it manually, then add the user to the `docker` group or configure passwordless sudo and adjust the workflow commands accordingly.
 
 ## Optional GitHub variables
 
@@ -69,6 +70,8 @@ Add them in GitHub under **Settings -> Secrets and variables -> Actions -> Varia
 Clone the repository into the expected app directory:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv docker.io docker-compose-plugin
 sudo mkdir -p /opt/trading-bot
 sudo chown "$USER":"$USER" /opt/trading-bot
 git clone https://github.com/Nicholas-03/trading-bot.git /opt/trading-bot/app
