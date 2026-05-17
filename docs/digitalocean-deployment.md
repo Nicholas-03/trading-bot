@@ -1,6 +1,6 @@
 # DigitalOcean Deployment
 
-This project can redeploy itself on a DigitalOcean Droplet whenever the GitHub repository changes. The deployment is handled by GitHub Actions over SSH.
+This project can redeploy itself on a DigitalOcean Droplet whenever changes are pushed to the GitHub `master` branch. The deployment is handled by GitHub Actions over SSH.
 
 ## Production layout
 
@@ -13,7 +13,7 @@ The expected Droplet layout is:
 | `/opt/trading-bot/app/.env` | Production environment file, never committed |
 | `/mnt/trading-bot-data` | Persistent analytics database volume, if used by the production stack |
 
-The workflow defaults to the `master` branch because this repository currently uses `master` as its active branch.
+The workflow defaults to the `master` branch because this repository currently uses `master` as its active branch. A local commit by itself does not deploy; the commit must be pushed to GitHub, or the workflow must be run manually from GitHub Actions.
 
 ## GitHub Actions workflow
 
@@ -31,6 +31,8 @@ On every push to `master`, or when run manually from the GitHub Actions tab, it:
 8. Recreates the running `trading-bot` container.
 
 If the pull, tests, import check, Docker build, or Compose restart fails, the workflow fails and the deploy stops.
+
+Because the deploy step runs `git pull --ff-only origin "$BRANCH"` inside `/opt/trading-bot/app`, the Droplet checkout must be clean. If production was hotfixed manually on the Droplet, commit/push the same fix from the local repository and clean or reset the manual Droplet checkout edits before expecting the next auto-deploy to succeed.
 
 ## Required GitHub secrets
 

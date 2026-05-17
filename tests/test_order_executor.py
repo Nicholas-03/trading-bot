@@ -929,6 +929,24 @@ def test_exit_signal_cuts_early_failure_after_30_minutes():
     assert ex.update_price_for_exit_signal("BA", 239.90) == "early_failure"
 
 
+def test_exit_signal_short_take_profit_when_price_falls():
+    ex = _make_executor()
+    ex._shorted_tickers.add("QQQ")
+    ex._position_book["QQQ"] = (100.0, 1, None)
+    ex._hold_opened_at["QQQ"] = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    assert ex.update_price_for_exit_signal("QQQ", 96.0) == "take_profit"
+
+
+def test_exit_signal_short_stop_loss_when_price_rises():
+    ex = _make_executor()
+    ex._shorted_tickers.add("QQQ")
+    ex._position_book["QQQ"] = (100.0, 1, None)
+    ex._hold_opened_at["QQQ"] = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    assert ex.update_price_for_exit_signal("QQQ", 103.0) == "stop_loss"
+
+
 # --- limit order dispatch ---
 
 def test_buy_blocks_low_price_stock_instead_of_ordering():

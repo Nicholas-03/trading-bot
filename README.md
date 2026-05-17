@@ -127,9 +127,11 @@ docker compose down
 
 ## Automatic DigitalOcean deployment
 
-The repository includes a GitHub Actions workflow at `.github/workflows/deploy-digitalocean.yml` that deploys the bot to a DigitalOcean Droplet whenever `master` is updated.
+The repository includes a GitHub Actions workflow at `.github/workflows/deploy-digitalocean.yml` that deploys the bot to a DigitalOcean Droplet whenever changes are **pushed to `master`**. A local commit alone does not deploy until it is pushed to GitHub.
 
 The workflow connects to the Droplet over SSH, pulls the latest repository changes, runs the test suite, verifies that `main` imports cleanly, rebuilds the Docker Compose service, and recreates the running `trading-bot` container.
+
+Before relying on the automatic deployment, keep the Droplet checkout at `/opt/trading-bot/app` clean. Manual hotfixes in that checkout can block the workflow because it uses `git pull --ff-only origin master`.
 
 Required GitHub repository secrets:
 
@@ -161,7 +163,7 @@ python analytics/export_db.py
 
 ### DigitalOcean dashboard
 
-Production runs on a DigitalOcean Droplet with Docker Compose. The live checkout is in `/opt/trading-bot/app`, and the parent Compose stack in `/opt/trading-bot/docker-compose.yml` builds the app image, mounts the persistent analytics database at `/mnt/trading-bot-data`, and serves the FastAPI dashboard through Caddy with Basic Auth. Deployment is automated by GitHub Actions when `master` is updated.
+Production runs on a DigitalOcean Droplet with Docker Compose. The live checkout is in `/opt/trading-bot/app`, and the parent Compose stack in `/opt/trading-bot/docker-compose.yml` builds the app image, mounts the persistent analytics database at `/mnt/trading-bot-data`, and serves the FastAPI dashboard through Caddy with Basic Auth. Deployment is automated by GitHub Actions when changes are pushed to `master`.
 
 ## Testing
 

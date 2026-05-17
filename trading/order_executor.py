@@ -909,10 +909,29 @@ class OrderExecutor:
             return None
 
         age = datetime.now(timezone.utc) - opened_at
-        pnl_pct = (current_price - entry_price) / entry_price
+        is_short_position = ticker in self._shorted_tickers
+        pnl_pct = (
+            (entry_price - current_price) / entry_price
+            if is_short_position
+            else (current_price - entry_price) / entry_price
+        )
         favorable = max(0.0, pnl_pct)
         best_favorable = max(self._max_favorable_move.get(ticker, 0.0), favorable)
         self._max_favorable_move[ticker] = best_favorable
+
+        if is_short_position and pnl_pct <= -self._stop_loss_pct:
+            logger.info(
+                "STOP LOSS EXIT for %s - pnl %.2f%% threshold %.2f%%",
+                ticker, pnl_pct * 100, -self._stop_loss_pct * 100,
+            )
+            return "stop_loss"
+
+        if is_short_position and pnl_pct >= self._take_profit_pct:
+            logger.info(
+                "TAKE PROFIT EXIT for %s - pnl %.2f%% threshold %.2f%%",
+                ticker, pnl_pct * 100, self._take_profit_pct * 100,
+            )
+            return "take_profit"
 
         if (
             self._fast_fail_enabled

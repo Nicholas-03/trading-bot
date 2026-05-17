@@ -2,7 +2,7 @@ import pytest
 import asyncio
 import pytz
 from datetime import date, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from trading.position_monitor import (
     PositionMonitor,
     compute_pnl_pct,
@@ -10,6 +10,7 @@ from trading.position_monitor import (
     _should_fire_report,
     _should_log_poll_error_at_error,
 )
+from trading.tradier_client import TradierClock, TradierPosition
 
 
 def test_pnl_at_stop_loss_boundary():
@@ -134,6 +135,68 @@ def test_latest_prices_uses_alpaca_market_data_not_tradier_quotes():
     assert prices == {"AAPL": 175.25}
     alpaca.get_latest_prices.assert_called_once_with(["AAPL"])
     client.get_quotes.assert_not_called()
+
+
+def test_check_positions_defers_expired_hold_when_market_closed():
+    client = MagicMock()
+    client.get_all_positions.return_value = [TradierPosition("INTC", -1.0, -109.48)]
+    client.get_clock.return_value = TradierClock(is_open=False)
+    executor = MagicMock()
+    executor.held_tickers = frozenset()
+    executor.shorted_tickers = frozenset({"INTC"})
+    executor.pending_close = frozenset()
+    executor.pending_fill = frozenset()
+    executor.hold_windows = {}
+    executor.expired_hold_tickers.return_value = frozenset({"INTC"})
+    executor.sell = AsyncMock()
+    monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
+    monitor._latest_prices = AsyncMock(return_value={})
+
+    asyncio.run(monitor._check_positions())
+
+    client.get_clock.assert_called_once()
+    executor.sell.assert_not_called()
+
+
+def test_check_positions_closes_expired_hold_when_market_open():
+    client = MagicMock()
+    client.get_all_positions.return_value = [TradierPosition("INTC", -1.0, -109.48)]
+    client.get_clock.return_value = TradierClock(is_open=True)
+    executor = MagicMock()
+    executor.held_tickers = frozenset()
+    executor.shorted_tickers = frozenset({"INTC"})
+    executor.pending_close = frozenset()
+    executor.pending_fill = frozenset()
+    executor.hold_windows = {}
+    executor.expired_hold_tickers.return_value = frozenset({"INTC"})
+    executor.sell = AsyncMock()
+    monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
+    monitor._latest_prices = AsyncMock(return_value={})
+
+    asyncio.run(monitor._check_positions())
+
+    executor.sell.assert_called_once_with("INTC", exit_reason="hold_hours")
+
+
+def test_check_positions_applies_exit_signal_to_live_shorts():
+    client = MagicMock()
+    client.get_all_positions.return_value = [TradierPosition("QQQ", -1.0, -710.58)]
+    executor = MagicMock()
+    executor.held_tickers = frozenset()
+    executor.shorted_tickers = frozenset({"QQQ"})
+    executor.pending_close = frozenset()
+    executor.pending_fill = frozenset()
+    executor.hold_windows = {}
+    executor.expired_hold_tickers.return_value = frozenset()
+    executor.update_price_for_exit_signal.return_value = "stop_loss"
+    executor.sell = AsyncMock()
+    monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
+    monitor._latest_prices = AsyncMock(return_value={"QQQ": 725.0})
+
+    asyncio.run(monitor._check_positions())
+
+    executor.update_price_for_exit_signal.assert_called_once_with("QQQ", 725.0)
+    executor.sell.assert_called_once_with("QQQ", exit_reason="stop_loss")
 
 
 def test_poll_error_delay_backs_off_to_cap():

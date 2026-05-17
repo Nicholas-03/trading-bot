@@ -180,16 +180,16 @@ class PositionMonitor:
                 logger.info("Position %s no longer in Tradier - protective bracket fired", ticker)
                 await self._executor.handle_bracket_close(ticker, quotes.get(ticker))
 
-        # Early exit for trades that fail immediately after entry without ever
-        # printing a meaningful favorable move.
-        live_longs = (
-            self._executor.held_tickers
+        # Early/risk exits for live positions. Longs also have broker-side
+        # brackets; shorts rely on this monitor for stop/take-profit exits.
+        live_tracked = (
+            (self._executor.held_tickers | self._executor.shorted_tickers)
             & live_symbols
             - self._executor.pending_close
             - self._executor.pending_fill
         )
-        if live_longs:
-            quotes = await self._latest_prices(list(live_longs))
+        if live_tracked:
+            quotes = await self._latest_prices(list(live_tracked))
             for ticker, price in quotes.items():
                 exit_reason = self._executor.update_price_for_exit_signal(ticker, price)
                 if exit_reason:
@@ -209,10 +209,21 @@ class PositionMonitor:
                 "TIMED EXIT CHECK: ticker=%s opened_at=%s hold_hours=%d age_hours=%.2f expires=%s",
                 ticker, opened_at.isoformat(), hold_hours, age_hours, expiry.isoformat(),
             )
-        for ticker in self._executor.expired_hold_tickers():
-            if ticker not in self._executor.pending_close:
-                logger.info("TIMED EXIT TRIGGERED: ticker=%s", ticker)
-                await self._executor.sell(ticker, exit_reason="hold_hours")
+        expired = [
+            ticker for ticker in self._executor.expired_hold_tickers()
+            if ticker not in self._executor.pending_close
+        ]
+        if expired:
+            clock = await asyncio.to_thread(self._client.get_clock)
+            if not clock.is_open:
+                logger.info(
+                    "TIMED EXIT DEFERRED: market closed; will retry when open for %s",
+                    sorted(expired),
+                )
+                return
+        for ticker in expired:
+            logger.info("TIMED EXIT TRIGGERED: ticker=%s", ticker)
+            await self._executor.sell(ticker, exit_reason="hold_hours")
 
     async def _record_account_value_snapshot(self) -> None:
         if self._db is None:
