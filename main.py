@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from rich.logging import RichHandler
-from trading.tradier_client import TradierClient
+from trading.tradier_client import TradierClient, TradierOrder
 from config import load_config, Config
 from trading.order_executor import OrderExecutor
 from trading.alpaca_data_client import AlpacaMarketDataClient
@@ -79,22 +79,28 @@ def _reconcile_stale_trades(
         close_side = "buy_to_cover" if is_short else "sell"
         opened_at = _parse_iso_dt(t.get("opened_at"))
 
-        fills = [
-            o for o in orders
-            if o.symbol == ticker
-            and o.side == close_side
-            and o.status == "filled"
-            and o.avg_fill_price is not None
-            and (
-                opened_at is None
-                or (fill_dt := _parse_iso_dt(o.filled_at)) is None
-                or fill_dt >= opened_at
-            )
-        ]
-        fills.sort(key=lambda o: o.filled_at or "", reverse=True)
+        fills: list[tuple[datetime | None, TradierOrder]] = []
+        for order in orders:
+            if (
+                order.symbol != ticker
+                or order.side != close_side
+                or order.status != "filled"
+                or order.avg_fill_price is None
+            ):
+                continue
+            fill_dt = _parse_iso_dt(order.filled_at)
+            if opened_at is not None and fill_dt is not None and fill_dt < opened_at:
+                continue
+            fills.append((fill_dt, order))
 
         if fills:
-            best = fills[0]
+            dated_fills = [item for item in fills if item[0] is not None]
+            if opened_at is not None and dated_fills:
+                best = min(dated_fills, key=lambda item: item[0])[1]
+            elif dated_fills:
+                best = max(dated_fills, key=lambda item: item[0])[1]
+            else:
+                best = fills[0][1]
             exit_price = best.avg_fill_price
             if best.order_type == "limit":
                 exit_reason = "take_profit"
@@ -141,6 +147,101 @@ def _load_open_positions(client: TradierClient) -> tuple[set[str], set[str]]:
     if shorted:
         logger.info("Resuming with existing short positions: %s", shorted)
     return held, shorted
+
+
+def _adopt_live_positions_missing_from_db(
+    client: TradierClient,
+    db: "TradeDB",  # type: ignore[name-defined]
+    open_trades: list[dict],
+    held_tickers: set[str],
+    shorted_tickers: set[str],
+) -> list[dict]:
+    """Create analytics rows for live broker positions absent from the DB."""
+    open_db_tickers = {t["ticker"] for t in open_trades}
+    missing = (held_tickers | shorted_tickers) - open_db_tickers
+    if not missing:
+        return open_trades
+
+    try:
+        positions = client.get_all_positions()
+    except Exception as exc:
+        logger.warning("Adoption: failed to fetch live broker positions: %s", exc)
+        return open_trades
+    try:
+        orders = client.get_account_orders()
+    except Exception as exc:
+        logger.warning("Adoption: failed to fetch account orders: %s", exc)
+        orders = []
+
+    adopted = list(open_trades)
+    now = datetime.now(timezone.utc).isoformat()
+    for pos in positions:
+        ticker = pos.symbol
+        if ticker not in missing:
+            continue
+        qty = abs(round(pos.qty))
+        if qty <= 0:
+            continue
+        side = "short" if pos.qty < 0 else "buy"
+        entry_side = "sell_short" if side == "short" else "buy"
+        entry_price = abs(pos.cost_basis) / qty if qty else 0.0
+
+        fills = []
+        for order in orders:
+            if order.symbol != ticker or order.side != entry_side or order.status != "filled":
+                continue
+            fill_dt = _parse_iso_dt(order.filled_at)
+            if fill_dt is not None:
+                fills.append((fill_dt, order))
+        fills.sort(key=lambda item: item[0], reverse=True)
+        best_order = fills[0][1] if fills else None
+        opened_at = best_order.filled_at if best_order and best_order.filled_at else now
+        if best_order and best_order.avg_fill_price is not None:
+            entry_price = best_order.avg_fill_price
+
+        decision_id = None
+        hold_hours = 0
+        if hasattr(db, "find_recent_entry_decision"):
+            try:
+                decision = db.find_recent_entry_decision(ticker, side, opened_at)
+            except Exception as exc:
+                logger.warning("Adoption: failed to find recent decision for %s: %s", ticker, exc)
+                decision = None
+            if decision:
+                decision_id = decision.get("id")
+                hold_hours = int(decision.get("hold_hours") or 0)
+
+        try:
+            trade_id = db.record_trade_open(
+                decision_id,
+                ticker,
+                side,
+                qty,
+                entry_price or None,
+                opened_at,
+                None,
+                hold_hours,
+                None,
+            )
+        except Exception as exc:
+            logger.warning("Adoption: failed to record live position %s: %s", ticker, exc)
+            continue
+
+        adopted.append({
+            "id": trade_id,
+            "ticker": ticker,
+            "side": side,
+            "qty": qty,
+            "entry_price": entry_price,
+            "hold_hours": hold_hours,
+            "opened_at": opened_at,
+            "bracket_order_id": None,
+        })
+        logger.warning(
+            "Adopted live broker position missing from analytics DB: ticker=%s side=%s qty=%s entry=%s trade_id=%s decision_id=%s",
+            ticker, side, qty, entry_price, trade_id, decision_id,
+        )
+    return adopted
 
 
 def _record_account_value_snapshot(client: TradierClient, db) -> None:
@@ -200,6 +301,9 @@ async def main() -> None:
                 logger.info("Found %d stale DB trade(s) with no live broker position — reconciling", len(stale))
                 _reconcile_stale_trades(client, db, stale)
                 open_trades = db.get_open_trades()  # re-fetch after reconciliation
+            open_trades = _adopt_live_positions_missing_from_db(
+                client, db, open_trades, held_tickers, shorted_tickers
+            )
             order_executor.seed_from_db(open_trades)
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
         llm_advisor = LLMAdvisor(config)

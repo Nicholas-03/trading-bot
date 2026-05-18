@@ -219,6 +219,32 @@ def test_sell_short_computes_pnl_from_cover_fill():
     ex._notifier.notify_sell.assert_called_once_with("AAPL", pytest.approx(0.04), pytest.approx(8.0))
 
 
+def test_sell_already_gone_short_recovers_cover_fill_for_db():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._shorted_tickers.add("INTC")
+    ex._position_book["INTC"] = (109.48, 1, 91)
+    ex._hold_opened_at["INTC"] = datetime(2026, 5, 15, 19, 30, tzinfo=timezone.utc)
+    ex._client.get_quotes = MagicMock(return_value={"INTC": 110.0})
+    ex._client.close_position = MagicMock(side_effect=ValueError("no open position"))
+    ex._client.get_account_orders = MagicMock(return_value=[
+        TradierOrder("INTC", "buy_to_cover", "filled", "market", 114.87, "2026-05-18T13:46:11Z", 1),
+    ])
+
+    asyncio.run(ex.sell("INTC", exit_reason="external_close"))
+
+    ex._db.record_trade_close.assert_called_once_with(
+        91,
+        114.87,
+        pytest.approx(-5.39),
+        pytest.approx(-5.39 / 109.48),
+        "external_close",
+        "2026-05-18T13:46:11Z",
+    )
+    assert ex._daily_sells == 1
+    assert ex._daily_realized_pnl == pytest.approx(-5.39)
+
+
 def test_sell_skips_pnl_when_already_provided():
     """When pnl_usd is provided by caller (e.g. PositionMonitor), use it directly."""
     ex = _make_executor()
@@ -380,6 +406,34 @@ def test_buy_unconfirmed_after_submission_does_not_record_skip_reason():
     ex._client.cancel_order.assert_called_once_with("entry-ambiguous")
     ex._notifier.notify_order_skip.assert_called_once()
     ex._notifier.notify_error.assert_not_called()
+
+
+def test_buy_late_fill_after_cancel_failure_is_recovered():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._db.record_trade_open.return_value = 44
+    ex._client.get_buying_power = MagicMock(return_value=500.0)
+    ex._client.get_quotes_with_open = MagicMock(return_value={"SNY": (43.45, 43.10)})
+    ex._client.submit_order = MagicMock(return_value="entry-late")
+    ex._wait_for_fill = AsyncMock(return_value=(False, None))
+    ex._client.cancel_order = MagicMock(side_effect=RuntimeError("order not available to be canceled"))
+    ex._client.get_order = MagicMock(return_value=("filled", 43.34))
+    ex._client.submit_oco_order = MagicMock(return_value="oco-late")
+
+    asyncio.run(ex.buy("SNY", decision_id=2810, hold_hours=3))
+
+    assert "SNY" in ex.held_tickers
+    assert ex._position_book["SNY"] == (43.34, 2, 44)
+    ex._db.record_trade_open.assert_called_once()
+    args = ex._db.record_trade_open.call_args.args
+    assert args[0] == 2810
+    assert args[1] == "SNY"
+    assert args[4] == 43.34
+    assert args[7] == 3
+    assert args[8] == "oco-late"
+    ex._client.submit_oco_order.assert_called_once()
+    ex._notifier.notify_buy.assert_called_once()
+    ex._notifier.notify_order_skip.assert_not_called()
 
 
 def test_buy_exception_after_order_submission_does_not_record_skip_reason():

@@ -188,6 +188,35 @@ def test_record_account_value_snapshot(db):
     assert row == ("2026-05-09T10:00:00Z", 25123.45)
 
 
+def test_find_recent_entry_decision_matches_fill_after_decision(db):
+    decision_id = db.record_decision(
+        None,
+        "2026-05-18T19:33:01Z",
+        "buy",
+        "SNY",
+        "phase 2 catalyst",
+        hold_hours=3,
+    )
+
+    result = db.find_recent_entry_decision("SNY", "buy", "2026-05-18T19:35:33Z")
+
+    assert result["id"] == decision_id
+    assert result["hold_hours"] == 3
+
+
+def test_find_recent_entry_decision_ignores_old_decision(db):
+    db.record_decision(
+        None,
+        "2026-05-18T10:00:00Z",
+        "buy",
+        "SNY",
+        "old catalyst",
+        hold_hours=3,
+    )
+
+    assert db.find_recent_entry_decision("SNY", "buy", "2026-05-18T19:35:33Z") is None
+
+
 def test_record_trade_close_does_not_overwrite_closed_trade(db):
     tid = db.record_trade_open(None, "AAPL", "buy", 1, 100.0, "2026-01-01T00:00:00Z")
     assert db.record_trade_close(tid, 103.0, 3.0, 0.03, "take_profit", "2026-01-01T01:00:00Z")

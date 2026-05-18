@@ -88,6 +88,8 @@ class OrderExecutor:
         self._max_favorable_move: dict[str, float] = {}
         # ticker -> protective OCO bracket group order ID (present only for long positions)
         self._bracket_orders: dict[str, str] = {}
+        # DB-adopted legacy/orphan longs that have no broker-side bracket and need local fixed exits.
+        self._unbracketed_long_fixed_exit: set[str] = set()
         # ticker -> UTC datetime when the hold_hours window expires
         self._hold_until: dict[str, datetime] = {}
         # ticker -> UTC datetime when the position was opened (for age calculation)
@@ -122,6 +124,10 @@ class OrderExecutor:
     @property
     def pending_fill(self) -> frozenset[str]:
         return frozenset(self._pending_fill)
+
+    @property
+    def tracked_position_tickers(self) -> frozenset[str]:
+        return frozenset(self._position_book)
 
     @property
     def trading_paused(self) -> bool:
@@ -308,6 +314,7 @@ class OrderExecutor:
         self._max_favorable_move.pop(ticker, None)
         self._hold_until.pop(ticker, None)
         self._hold_opened_at.pop(ticker, None)
+        self._unbracketed_long_fixed_exit.discard(ticker)
         self._pending_close.add(ticker)
         if exit_reason == "stop_loss":
             self._daily_stopped_tickers.add(ticker)
@@ -354,6 +361,9 @@ class OrderExecutor:
             bracket_order_id = t.get("bracket_order_id")
             if bracket_order_id and t.get("side") == "buy":
                 self._bracket_orders[ticker] = str(bracket_order_id)
+                self._unbracketed_long_fixed_exit.discard(ticker)
+            elif t.get("side") == "buy":
+                self._unbracketed_long_fixed_exit.add(ticker)
 
             hold_hours = int(t.get("hold_hours") or 0)
             opened_at: datetime | None = None
@@ -454,7 +464,46 @@ class OrderExecutor:
             candidates.append((filled_at, order))
         if not candidates:
             return None
-        return max(candidates, key=lambda item: item[0])[1]
+        if opened_at is None:
+            return max(candidates, key=lambda item: item[0])[1]
+        return min(candidates, key=lambda item: item[0])[1]
+
+    async def _recover_already_gone_close(
+        self,
+        ticker: str,
+        is_short_position: bool,
+        entry_price: float,
+        qty_held: int,
+        exit_price: float | None,
+        pnl_usd: float | None,
+        pnl_pct: float | None,
+    ) -> tuple[float | None, float | None, float | None, str | None]:
+        """Backfill a close that already filled before our close request."""
+        opened_at = self._hold_opened_at.get(ticker)
+        exit_fill = await self._find_recent_exit_fill(
+            ticker,
+            opened_at,
+            long_position=not is_short_position,
+        )
+        if exit_fill is None or exit_fill.avg_fill_price is None:
+            return exit_price, pnl_usd, pnl_pct, None
+
+        recovered_exit_price = exit_fill.avg_fill_price
+        recovered_pnl_usd = pnl_usd
+        recovered_pnl_pct = pnl_pct
+        if entry_price > 0 and qty_held > 0:
+            price_delta = entry_price - recovered_exit_price if is_short_position else recovered_exit_price - entry_price
+            recovered_pnl_usd = price_delta * qty_held
+            recovered_pnl_pct = price_delta / entry_price
+
+        logger.info(
+            "Recovered already-closed fill for %s: side=%s exit=$%.4f closed_at=%s",
+            ticker,
+            exit_fill.side,
+            recovered_exit_price,
+            exit_fill.filled_at,
+        )
+        return recovered_exit_price, recovered_pnl_usd, recovered_pnl_pct, exit_fill.filled_at
 
     async def _find_recent_entry_fill(
         self,
@@ -919,14 +968,16 @@ class OrderExecutor:
         best_favorable = max(self._max_favorable_move.get(ticker, 0.0), favorable)
         self._max_favorable_move[ticker] = best_favorable
 
-        if is_short_position and pnl_pct <= -self._stop_loss_pct:
+        use_local_fixed_exit = is_short_position or ticker in self._unbracketed_long_fixed_exit
+
+        if use_local_fixed_exit and pnl_pct <= -self._stop_loss_pct:
             logger.info(
                 "STOP LOSS EXIT for %s - pnl %.2f%% threshold %.2f%%",
                 ticker, pnl_pct * 100, -self._stop_loss_pct * 100,
             )
             return "stop_loss"
 
-        if is_short_position and pnl_pct >= self._take_profit_pct:
+        if use_local_fixed_exit and pnl_pct >= self._take_profit_pct:
             logger.info(
                 "TAKE PROFIT EXIT for %s - pnl %.2f%% threshold %.2f%%",
                 ticker, pnl_pct * 100, self._take_profit_pct * 100,
@@ -1154,9 +1205,32 @@ class OrderExecutor:
                     await self._refresh_order_detail_safe(order_id, "canceled")
                 except Exception as cancel_err:
                     logger.warning("BUY ENTRY CANCEL ORDER FAILED: ticker=%s order_id=%s error=%s", ticker, order_id, cancel_err)
-                logger.warning("Entry order %s for %s did not fill (%s) - rolling back state", order_id, ticker, self._order_detail(order_id))
-                await self._notifier.notify_order_skip(f"buy {ticker}", self._order_error_message(order_id))
-                return
+                    try:
+                        status, late_fill_price, reason = await self._read_order_status(order_id)
+                        self._remember_order_detail(order_id, status, reason)
+                        if status == "filled":
+                            logger.warning(
+                                "BUY ENTRY LATE FILL RECOVERED: ticker=%s order_id=%s fill_price=%s",
+                                ticker, order_id, late_fill_price,
+                            )
+                            filled = True
+                            fill_price = late_fill_price
+                    except Exception as status_err:
+                        logger.warning(
+                            "BUY ENTRY LATE FILL STATUS CHECK FAILED: ticker=%s order_id=%s error=%s",
+                            ticker, order_id, status_err,
+                        )
+                if not filled:
+                    logger.warning("Entry order %s for %s did not fill (%s) - rolling back state", order_id, ticker, self._order_detail(order_id))
+                    await self._notifier.notify_order_skip(f"buy {ticker}", self._order_error_message(order_id))
+                    return
+                self._held_tickers.add(ticker)
+                self._daily_bought_tickers.add(ticker)
+                self._position_book[ticker] = (fill_price if fill_price else price, qty, None)
+                self._max_favorable_move[ticker] = 0.0
+                self._daily_buys += 1
+                self._weekly_buys += 1
+                self._pending_fill.add(ticker)
             actual_price = fill_price if fill_price else price
             self._position_book[ticker] = (actual_price, qty, None)
             bracket_order_id = await self._submit_fill_based_bracket(ticker, qty, actual_price)
@@ -1355,8 +1429,11 @@ class OrderExecutor:
             order_id = await asyncio.to_thread(self._client.close_position, ticker)
         except httpx.HTTPStatusError as e:
             if e.response.status_code in (400, 404):
+                exit_price, pnl_usd, pnl_pct, closed_at = await self._recover_already_gone_close(
+                    ticker, is_short_position, entry_price, qty_held, exit_price, pnl_usd, pnl_pct
+                )
                 self._update_close_state(ticker, pnl_usd, exit_reason)
-                await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+                await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at)
                 logger.warning(
                     "Close %s — position already gone or closing (HTTP %s), removing from tracking",
                     ticker, e.response.status_code,
@@ -1367,8 +1444,11 @@ class OrderExecutor:
             return
         except ValueError as e:
             if "no open position" in str(e).lower():
+                exit_price, pnl_usd, pnl_pct, closed_at = await self._recover_already_gone_close(
+                    ticker, is_short_position, entry_price, qty_held, exit_price, pnl_usd, pnl_pct
+                )
                 self._update_close_state(ticker, pnl_usd, exit_reason)
-                await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)
+                await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason, closed_at)
                 logger.warning("Close %s — position not found in broker, removing from tracking", ticker)
             else:
                 logger.error("Failed to close position for %s: %s", ticker, e)

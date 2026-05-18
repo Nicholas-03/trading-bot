@@ -197,6 +197,36 @@ class TradeDB:
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
+    def find_recent_entry_decision(
+        self,
+        ticker: str,
+        action: str,
+        filled_at: str | None,
+        max_age_minutes: int = 120,
+    ) -> dict | None:
+        """Return the latest matching entry decision before a recovered broker fill."""
+        filled_dt = _parse_iso_dt(filled_at)
+        if filled_dt is None:
+            return None
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT id, ts, hold_hours FROM llm_decisions "
+                "WHERE ticker=? AND action=? ORDER BY ts DESC LIMIT 20",
+                (ticker, action),
+            )
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+        best: dict | None = None
+        for row in rows:
+            decision_dt = _parse_iso_dt(row.get("ts"))
+            if decision_dt is None:
+                continue
+            age = (filled_dt - decision_dt).total_seconds()
+            if 0 <= age <= max_age_minutes * 60:
+                best = row
+                break
+        return best
+
     def record_account_value(self, ts: str, value_usd: float) -> int:
         """Record a point-in-time total account value snapshot."""
         with self._lock:
