@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from analytics.db import TradeDB
 from main import _adopt_live_positions_missing_from_db, _reconcile_stale_trades
 from trading.tradier_client import TradierOrder, TradierPosition
@@ -52,6 +54,31 @@ def test_reconcile_stale_trade_marks_unknown_when_history_missing(tmp_path):
         assert row[1] is None
         assert row[2] == "reconciled_unknown_exit"
         assert row[3] is not None
+    finally:
+        db.close()
+
+
+def test_reconcile_stale_trade_infers_hold_hours_for_expired_market_close(tmp_path):
+    db = TradeDB(str(tmp_path / "trades.db"))
+    try:
+        trade_id = db.record_trade_open(
+            None, "BSX", "buy", 8, 55.57, "2026-05-18T18:40:57Z", None, 3
+        )
+        client = MagicMock()
+        client.get_account_orders.return_value = [
+            TradierOrder("BSX", "sell", "filled", "market", 56.95, "2026-05-19T13:46:10Z", 8),
+        ]
+
+        _reconcile_stale_trades(client, db, db.get_open_trades())
+
+        row = db._conn.execute(
+            "SELECT exit_price, pnl_usd, exit_reason, closed_at FROM trades WHERE id=?",
+            (trade_id,),
+        ).fetchone()
+        assert row[0] == 56.95
+        assert row[1] == pytest.approx(11.04)
+        assert row[2] == "hold_hours"
+        assert row[3] == "2026-05-19T13:46:10Z"
     finally:
         db.close()
 

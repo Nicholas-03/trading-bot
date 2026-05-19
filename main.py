@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from rich.logging import RichHandler
 from trading.tradier_client import TradierClient, TradierOrder
 from config import load_config, Config
@@ -41,6 +41,24 @@ def _make_tradier_client(config: Config) -> TradierClient:
     )
 
 
+def _infer_reconciled_exit_reason(
+    order: TradierOrder,
+    opened_at: datetime | None,
+    hold_hours: int,
+) -> str:
+    if order.order_type == "limit":
+        return "take_profit"
+    if order.order_type in ("stop", "stop_limit"):
+        return "stop_loss"
+    if order.order_type == "market" and opened_at is not None and hold_hours > 0:
+        filled_at = _parse_iso_dt(order.filled_at)
+        if filled_at is not None and filled_at >= opened_at + timedelta(hours=hold_hours):
+            return "hold_hours"
+    if order.order_type == "market":
+        return "market_close"
+    return "bracket_order"
+
+
 def _reconcile_stale_trades(
     client: TradierClient,
     db: "TradeDB",  # type: ignore[name-defined]
@@ -75,6 +93,7 @@ def _reconcile_stale_trades(
         trade_id = t["id"]
         entry_price = float(t.get("entry_price") or 0.0)
         qty = int(t.get("qty") or 0)
+        hold_hours = int(t.get("hold_hours") or 0)
         is_short = t.get("side") == "short"
         close_side = "buy_to_cover" if is_short else "sell"
         opened_at = _parse_iso_dt(t.get("opened_at"))
@@ -102,12 +121,7 @@ def _reconcile_stale_trades(
             else:
                 best = fills[0][1]
             exit_price = best.avg_fill_price
-            if best.order_type == "limit":
-                exit_reason = "take_profit"
-            elif best.order_type in ("stop", "stop_limit"):
-                exit_reason = "stop_loss"
-            else:
-                exit_reason = "bracket_order"
+            exit_reason = _infer_reconciled_exit_reason(best, opened_at, hold_hours)
             closed_at = best.filled_at or now
             if entry_price and qty:
                 price_delta = entry_price - exit_price if is_short else exit_price - entry_price
