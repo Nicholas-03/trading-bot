@@ -23,12 +23,23 @@ Long buys must use a fill-first bracket flow:
 7. If the entry fills, use the actual fill price to submit the protective Tradier OCO bracket with `submit_oco_order`.
 8. Store the protective OCO order ID in analytics as the trade bracket ID.
 
+## Risk Gates
+
+- `MIN_CONFIDENCE_FLOOR` defaults to `0.80`; lower `MIN_CONFIDENCE` values from an old `.env` are raised to the floor.
+- `MIN_TRADE_PRICE_FLOOR` defaults to `$20`; lower `MIN_TRADE_PRICE` values are raised to the floor so low-price symbols are blocked.
+- News must pass `REQUIRE_HARD_CATALYST_NEWS=true` before the LLM is called. Valid hard catalysts are quantified earnings/guidance surprises, FDA/EMA or clinical endpoint decisions, signed M&A with value, major contracts/orders with value, or material legal/regulatory decisions with financial amounts.
+- Analyst upgrades/downgrades, price-target changes, watchlists, vague commentary, and soft partnerships without material financial impact are skipped before the LLM.
+- Entries require Alpaca bid/ask spread, average 1-minute volume, average 1-minute dollar volume, and post-news directional confirmation. Missing spread or volume data is a skip, not a fallback.
+- Short entries are limited to the built-in liquid large-cap/ETF allowlist unless `SHORT_LIQUID_SYMBOLS` overrides it. Shorts use capped limit entries, not uncapped market entries.
+- `MAX_HOLD_HOURS_CAP` defaults to `1`; longer requested holds are capped to one hour. `CLOSE_BEFORE_MARKET_CLOSE_MINUTES` defaults to `10`, so live bot positions are flattened before the regular-session close.
+
 ## What Not To Reintroduce
 
 - Do not submit buy entries as Tradier OTOCO orders.
 - Do not calculate entry prices from Tradier market data.
 - Do not fall back from Alpaca bars/snapshots to Tradier bars/quotes.
 - Do not place quote-based TP/SL legs before the entry fill is confirmed.
+- Do not relax catalyst, spread, volume, price, or short-liquidity gates without first checking analytics DB performance after the stricter policy.
 
 ## Why
 

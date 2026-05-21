@@ -4,6 +4,71 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+_DEFAULT_SHORT_LIQUID_SYMBOLS = frozenset(
+    {
+        "AAPL",
+        "ABBV",
+        "ABNB",
+        "ACN",
+        "ADBE",
+        "AMD",
+        "AMGN",
+        "AMZN",
+        "AVGO",
+        "BA",
+        "BAC",
+        "BLK",
+        "BRK.B",
+        "COP",
+        "COST",
+        "CRM",
+        "CSCO",
+        "CVX",
+        "DIA",
+        "DIS",
+        "GLD",
+        "GOOG",
+        "GOOGL",
+        "HD",
+        "HYG",
+        "INTC",
+        "IWM",
+        "JNJ",
+        "JPM",
+        "LLY",
+        "LQD",
+        "MA",
+        "META",
+        "MSFT",
+        "NEM",
+        "NFLX",
+        "NVDA",
+        "ORCL",
+        "PFE",
+        "PG",
+        "QQQ",
+        "SLV",
+        "SPY",
+        "TLT",
+        "TSLA",
+        "UNH",
+        "USO",
+        "V",
+        "WMT",
+        "XLB",
+        "XLE",
+        "XLF",
+        "XLI",
+        "XLK",
+        "XLP",
+        "XLRE",
+        "XLU",
+        "XLV",
+        "XLY",
+        "XOM",
+    }
+)
+
 
 @dataclass(frozen=True)
 class Config:
@@ -31,9 +96,16 @@ class Config:
     extended_move_low_price_pct: float
     extended_move_any_pct: float
     min_trade_price: float
+    max_entry_spread_pct: float
+    min_entry_avg_volume: float
+    min_entry_avg_dollar_volume: float
     default_hold_hours: int
     max_hold_hours: int
+    close_before_market_close_minutes: int
+    require_hard_catalyst_news: bool
     block_soft_partnership_news: bool
+    short_liquid_only: bool
+    short_liquid_symbols: frozenset[str]
     bracket_reprice_enabled: bool
     entry_confirmation_enabled: bool
     entry_confirmation_lookback_minutes: int
@@ -66,6 +138,14 @@ def _parse_bool(key: str, default: str) -> bool:
     return os.getenv(key, default).lower() in ("true", "1", "yes")
 
 
+def _parse_symbol_set(key: str, default: frozenset[str]) -> frozenset[str]:
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    symbols = frozenset(s.strip().upper() for s in raw.split(",") if s.strip())
+    return symbols
+
+
 def load_config() -> Config:
     load_dotenv()
 
@@ -91,6 +171,14 @@ def load_config() -> Config:
         if telegram_missing:
             raise ValueError(f"TELEGRAM_ENABLED=true but missing: {', '.join(telegram_missing)}")
 
+    min_confidence_floor = _parse_float("MIN_CONFIDENCE_FLOOR", "0.80")
+    min_trade_price_floor = _parse_float("MIN_TRADE_PRICE_FLOOR", "20.0")
+    max_hold_hours_cap = int(os.getenv("MAX_HOLD_HOURS_CAP", "1"))
+    configured_max_hold_hours = int(os.getenv("MAX_HOLD_HOURS", "1"))
+    max_hold_hours = min(configured_max_hold_hours, max_hold_hours_cap)
+    configured_default_hold_hours = int(os.getenv("DEFAULT_HOLD_HOURS", "1"))
+    default_hold_hours = min(configured_default_hold_hours, max_hold_hours)
+
     cfg = Config(
         alpaca_api_key=os.environ["ALPACA_API_KEY"],
         alpaca_secret_key=os.environ["ALPACA_SECRET_KEY"],
@@ -111,16 +199,26 @@ def load_config() -> Config:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
-        min_confidence=_parse_float("MIN_CONFIDENCE", "0.7"),
+        min_confidence=max(_parse_float("MIN_CONFIDENCE", "0.80"), min_confidence_floor),
         max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "0.5") / 100,
         extended_move_low_price_pct=_parse_float("EXTENDED_MOVE_LOW_PRICE_PCT", "15.0") / 100,
         extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "10.0") / 100,
-        min_trade_price=_parse_float("MIN_TRADE_PRICE", "5.0"),
-        default_hold_hours=int(os.getenv("DEFAULT_HOLD_HOURS", "4")),
-        max_hold_hours=int(os.getenv("MAX_HOLD_HOURS", "4")),
+        min_trade_price=max(_parse_float("MIN_TRADE_PRICE", "20.0"), min_trade_price_floor),
+        max_entry_spread_pct=_parse_float("MAX_ENTRY_SPREAD_PCT", "0.50") / 100,
+        min_entry_avg_volume=_parse_float("MIN_ENTRY_AVG_VOLUME", "1000"),
+        min_entry_avg_dollar_volume=_parse_float("MIN_ENTRY_AVG_DOLLAR_VOLUME", "50000"),
+        default_hold_hours=default_hold_hours,
+        max_hold_hours=max_hold_hours,
+        close_before_market_close_minutes=int(os.getenv("CLOSE_BEFORE_MARKET_CLOSE_MINUTES", "10")),
+        require_hard_catalyst_news=_parse_bool("REQUIRE_HARD_CATALYST_NEWS", "true"),
         block_soft_partnership_news=_parse_bool("BLOCK_SOFT_PARTNERSHIP_NEWS", "true"),
+        short_liquid_only=_parse_bool("SHORT_LIQUID_ONLY", "true"),
+        short_liquid_symbols=_parse_symbol_set("SHORT_LIQUID_SYMBOLS", _DEFAULT_SHORT_LIQUID_SYMBOLS),
         bracket_reprice_enabled=_parse_bool("BRACKET_REPRICE_ENABLED", "true"),
-        entry_confirmation_enabled=_parse_bool("ENTRY_CONFIRMATION_ENABLED", "true"),
+        entry_confirmation_enabled=(
+            _parse_bool("ENTRY_CONFIRMATION_ENABLED", "true")
+            or _parse_bool("ENTRY_CONFIRMATION_REQUIRED", "true")
+        ),
         entry_confirmation_lookback_minutes=int(os.getenv("ENTRY_CONFIRMATION_LOOKBACK_MINUTES", "8")),
         entry_confirmation_trend_minutes=int(os.getenv("ENTRY_CONFIRMATION_TREND_MINUTES", "3")),
         entry_confirmation_max_fade_pct=_parse_float("ENTRY_CONFIRMATION_MAX_FADE_PCT", "1.5") / 100,
@@ -147,6 +245,8 @@ def load_config() -> Config:
         raise ValueError("STOP_LOSS_PCT must be between 0 and 100 exclusive (e.g. 2 = 2%)")
     if not (0 < cfg.take_profit_pct < 1):
         raise ValueError("TAKE_PROFIT_PCT must be between 0 and 100 exclusive (e.g. 3 = 3%)")
+    if not (0.0 <= min_confidence_floor <= 1.0):
+        raise ValueError("MIN_CONFIDENCE_FLOOR must be between 0.0 and 1.0")
     if not (0.0 <= cfg.min_confidence <= 1.0):
         raise ValueError("MIN_CONFIDENCE must be between 0.0 and 1.0")
     if not (0.0 < cfg.max_slippage_pct < 0.10):
@@ -155,14 +255,30 @@ def load_config() -> Config:
         raise ValueError("EXTENDED_MOVE_LOW_PRICE_PCT must be between 0 and 100 exclusive")
     if not (0.0 < cfg.extended_move_any_pct < 1.0):
         raise ValueError("EXTENDED_MOVE_ANY_PCT must be between 0 and 100 exclusive")
+    if min_trade_price_floor <= 0:
+        raise ValueError("MIN_TRADE_PRICE_FLOOR must be positive")
     if cfg.min_trade_price <= 0:
         raise ValueError("MIN_TRADE_PRICE must be positive")
+    if not (0.0 < cfg.max_entry_spread_pct < 0.10):
+        raise ValueError("MAX_ENTRY_SPREAD_PCT must be between 0 and 10 exclusive")
+    if cfg.min_entry_avg_volume < 0:
+        raise ValueError("MIN_ENTRY_AVG_VOLUME must be zero or positive")
+    if cfg.min_entry_avg_dollar_volume < 0:
+        raise ValueError("MIN_ENTRY_AVG_DOLLAR_VOLUME must be zero or positive")
     if cfg.default_hold_hours < 1:
         raise ValueError("DEFAULT_HOLD_HOURS must be at least 1")
     if cfg.max_hold_hours < 1:
         raise ValueError("MAX_HOLD_HOURS must be at least 1")
     if cfg.default_hold_hours > cfg.max_hold_hours:
         raise ValueError("DEFAULT_HOLD_HOURS must be <= MAX_HOLD_HOURS")
+    if max_hold_hours_cap < 1:
+        raise ValueError("MAX_HOLD_HOURS_CAP must be at least 1")
+    if cfg.close_before_market_close_minutes < 0:
+        raise ValueError("CLOSE_BEFORE_MARKET_CLOSE_MINUTES must be zero or positive")
+    if cfg.close_before_market_close_minutes >= 390:
+        raise ValueError("CLOSE_BEFORE_MARKET_CLOSE_MINUTES must be less than a full trading day")
+    if cfg.short_liquid_only and not cfg.short_liquid_symbols:
+        raise ValueError("SHORT_LIQUID_SYMBOLS must not be empty when SHORT_LIQUID_ONLY=true")
     if cfg.entry_confirmation_lookback_minutes < 3:
         raise ValueError("ENTRY_CONFIRMATION_LOOKBACK_MINUTES must be at least 3")
     if cfg.entry_confirmation_trend_minutes < 1:

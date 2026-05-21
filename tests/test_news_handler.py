@@ -19,6 +19,7 @@ def test_chatgpt_decision_id_is_used_for_buy(tmp_path):
         config.allow_short = False
         config.default_hold_hours = 4
         config.max_hold_hours = 4
+        config.require_hard_catalyst_news = True
         config.block_soft_partnership_news = True
         advisor = MagicMock()
         advisor.analyze = AsyncMock(
@@ -33,8 +34,8 @@ def test_chatgpt_decision_id_is_used_for_buy(tmp_path):
         executor.buy = AsyncMock()
         handler = NewsHandler(client, config, advisor, executor, db)
         news = SimpleNamespace(
-            headline="AAPL wins major contract",
-            summary="details",
+            headline="AAPL wins $2B major contract",
+            summary="The company signed a quantified enterprise contract.",
             symbols=["AAPL"],
             created_at=datetime.now(timezone.utc),
         )
@@ -63,6 +64,7 @@ def test_buy_hold_hours_is_capped(tmp_path):
         config.allow_short = False
         config.default_hold_hours = 4
         config.max_hold_hours = 4
+        config.require_hard_catalyst_news = True
         config.block_soft_partnership_news = True
         advisor = MagicMock()
         advisor.analyze = AsyncMock(return_value=Decision("buy", "BA", "yes", 0.95, 24))
@@ -91,6 +93,7 @@ def test_soft_partnership_without_materiality_is_skipped():
     client.get_clock.return_value = SimpleNamespace(is_open=True)
     config = MagicMock()
     config.news_stale_hours = 24.0
+    config.require_hard_catalyst_news = True
     config.block_soft_partnership_news = True
     advisor = MagicMock()
     advisor.analyze = AsyncMock(return_value=Decision("buy", "SAP", "yes", 0.95, 4))
@@ -103,6 +106,60 @@ def test_soft_partnership_without_materiality_is_skipped():
         headline="SAP Invests In AI Platform N8n; Strikes Partnership To Embed Platform",
         summary="Strategic investment and multi-year commercial partnership.",
         symbols=["SAP"],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    asyncio.run(handler._handle_news(news))
+
+    advisor.analyze.assert_not_awaited()
+    executor.buy.assert_not_awaited()
+
+
+def test_analyst_price_target_news_is_skipped():
+    client = MagicMock()
+    client.get_clock.return_value = SimpleNamespace(is_open=True)
+    config = MagicMock()
+    config.news_stale_hours = 24.0
+    config.require_hard_catalyst_news = True
+    config.block_soft_partnership_news = True
+    advisor = MagicMock()
+    advisor.analyze = AsyncMock(return_value=Decision("buy", "NVDA", "yes", 0.95, 1))
+    executor = MagicMock()
+    executor.held_tickers = frozenset()
+    executor.shorted_tickers = frozenset()
+    executor.buy = AsyncMock()
+    handler = NewsHandler(client, config, advisor, executor, None)
+    news = SimpleNamespace(
+        headline="Analyst Raises NVDA Price Target To $180",
+        summary="The firm maintains a buy rating.",
+        symbols=["NVDA"],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    asyncio.run(handler._handle_news(news))
+
+    advisor.analyze.assert_not_awaited()
+    executor.buy.assert_not_awaited()
+
+
+def test_non_hard_catalyst_news_is_skipped():
+    client = MagicMock()
+    client.get_clock.return_value = SimpleNamespace(is_open=True)
+    config = MagicMock()
+    config.news_stale_hours = 24.0
+    config.require_hard_catalyst_news = True
+    config.block_soft_partnership_news = True
+    advisor = MagicMock()
+    advisor.analyze = AsyncMock(return_value=Decision("buy", "HAS", "yes", 0.95, 1))
+    executor = MagicMock()
+    executor.held_tickers = frozenset()
+    executor.shorted_tickers = frozenset()
+    executor.buy = AsyncMock()
+    handler = NewsHandler(client, config, advisor, executor, None)
+    news = SimpleNamespace(
+        headline="Hasbro Magic Growth Shows No Signs Of Slowing",
+        summary="Narrative commentary without a quantified catalyst.",
+        symbols=["HAS"],
         created_at=datetime.now(timezone.utc),
     )
 

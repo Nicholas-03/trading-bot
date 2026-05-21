@@ -11,9 +11,11 @@ from config import Config
 from llm.llm_advisor import LLMAdvisor
 from news.filters import (
     compute_news_age_hours,
+    is_hard_catalyst_news,
     is_retrospective_headline,
     is_routine_news,
     is_soft_partnership_without_materiality,
+    is_vague_or_analyst_news,
 )
 from trading.order_executor import OrderExecutor
 from trading.tradier_client import TradierClient
@@ -86,11 +88,19 @@ class NewsHandler:
                 logger.info("SKIP [routine_news_block] %s", headline[:100])
                 return
 
+            if is_vague_or_analyst_news(headline, summary):
+                logger.info("SKIP [vague_or_analyst_news_block] %s", headline[:100])
+                return
+
             if (
                 self._config.block_soft_partnership_news
                 and is_soft_partnership_without_materiality(headline, summary)
             ):
                 logger.info("SKIP [soft_partnership_materiality_block] %s", headline[:100])
+                return
+
+            if self._config.require_hard_catalyst_news and not is_hard_catalyst_news(headline, summary):
+                logger.info("SKIP [hard_catalyst_required_block] %s", headline[:100])
                 return
 
             article_ts = getattr(news, "created_at", None)

@@ -1,10 +1,11 @@
 # tests/test_order_executor.py
 import asyncio
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock
 import time
 import pytest
-from trading.order_executor import OrderExecutor, _monday_of
+from trading.order_executor import EntryQuote, OrderExecutor, _monday_of
 from trading.tradier_client import MarketBar, TradierOrder, TradierPosition
 from config import Config
 
@@ -16,11 +17,28 @@ def _make_executor(market_data_client=None) -> OrderExecutor:
     client.get_account_orders = MagicMock(return_value=[])
     client.submit_order = MagicMock(return_value="order-1")
     client.submit_oco_order = MagicMock(return_value="oco-1")
+    client.get_quotes_with_open = MagicMock(return_value={"AAPL": (100.0, 99.0)})
+    client.get_quotes = MagicMock(return_value={"AAPL": 100.0})
     if market_data_client is None:
         market_data_client = MagicMock()
         market_data_client.get_quote_with_open.side_effect = (
             lambda symbol: client.get_quotes_with_open([symbol]).get(symbol)
         )
+        def _entry_snapshot(symbol):
+            quote = client.get_quotes_with_open([symbol]).get(symbol)
+            if quote is None:
+                return None
+            price, open_price = quote
+            return SimpleNamespace(
+                bid=price,
+                ask=price,
+                last=price,
+                open=open_price,
+                entry_price=price,
+                short_entry_price=price,
+            )
+        market_data_client.get_entry_snapshot.side_effect = _entry_snapshot
+        market_data_client.get_intraday_bars.return_value = []
         market_data_client.get_latest_prices.side_effect = lambda symbols: client.get_quotes(symbols)
     config = MagicMock(spec=Config)
     config.trade_amount_usd = 100.0
@@ -31,6 +49,11 @@ def _make_executor(market_data_client=None) -> OrderExecutor:
     config.extended_move_low_price_pct = 0.15
     config.extended_move_any_pct = 0.10
     config.min_trade_price = 5.0
+    config.max_entry_spread_pct = 0.005
+    config.min_entry_avg_volume = 1000.0
+    config.min_entry_avg_dollar_volume = 50000.0
+    config.short_liquid_only = True
+    config.short_liquid_symbols = frozenset({"AAPL", "NVDA", "QQQ", "TSLA", "XLE"})
     config.bracket_reprice_enabled = False
     config.entry_confirmation_enabled = False
     config.entry_confirmation_lookback_minutes = 8
@@ -507,6 +530,8 @@ def test_short_rolls_back_state_on_unconfirmed_fill():
 
 def test_short_unavailable_rejection_does_not_notify_telegram():
     ex = _make_executor()
+    ex._short_liquid_only = False
+    ex._client.get_quotes_with_open = MagicMock(return_value={"WIX": (100.0, 99.0)})
     ex._client.submit_order = MagicMock(return_value="order-1")
     ex._read_order_status = AsyncMock(return_value=(
         "rejected",
@@ -521,6 +546,8 @@ def test_short_unavailable_rejection_does_not_notify_telegram():
 
 def test_short_other_rejection_notification_includes_broker_reason():
     ex = _make_executor()
+    ex._short_liquid_only = False
+    ex._client.get_quotes_with_open = MagicMock(return_value={"WIX": (100.0, 99.0)})
     ex._client.submit_order = MagicMock(return_value="order-1")
     ex._read_order_status = AsyncMock(return_value=(
         "rejected",
@@ -538,6 +565,8 @@ def test_short_other_rejection_notification_includes_broker_reason():
 
 def test_short_unavailable_submit_exception_does_not_notify_telegram():
     ex = _make_executor()
+    ex._short_liquid_only = False
+    ex._client.get_quotes_with_open = MagicMock(return_value={"WIX": (100.0, 99.0)})
     ex._client.submit_order = MagicMock(
         side_effect=RuntimeError("This symbol is not available for short sales.")
     )
@@ -876,7 +905,7 @@ def _bars(closes: list[float], highs: list[float] | None = None) -> list[MarketB
             high=high,
             low=min(close, high),
             close=close,
-            volume=1000,
+            volume=10000,
         )
         for idx, (close, high) in enumerate(zip(closes, highs), start=1)
     ]
@@ -924,6 +953,46 @@ def test_entry_confirmation_blocks_quote_premium():
     assert reason == "quote_premium_block"
 
 
+def test_entry_confirmation_blocks_low_volume():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+    low_volume_bars = [
+        MarketBar(bar.time, bar.open, bar.high, bar.low, bar.close, 10)
+        for bar in _bars([50.00, 50.05, 50.10, 50.15])
+    ]
+
+    reason = ex._entry_confirmation_skip_reason("THIN", 50.15, low_volume_bars)
+
+    assert reason == "low_liquidity_block"
+
+
+def test_spread_guard_blocks_wide_spread():
+    ex = _make_executor()
+    quote = EntryQuote(price=100.0, open_price=99.0, bid=99.0, ask=101.0, last=100.0)
+
+    assert ex._spread_skip_reason("WIDE", quote) == "wide_spread_block"
+
+
+def test_short_symbol_allowlist_blocks_small_name():
+    ex = _make_executor()
+
+    assert ex._short_symbol_skip_reason("AMPX") == "short_symbol_liquidity_block"
+
+
+def test_short_entry_confirmation_requires_downward_followthrough():
+    ex = _make_executor()
+    ex._entry_confirmation_enabled = True
+
+    reason = ex._entry_confirmation_skip_reason(
+        "AAPL",
+        99.00,
+        _bars([100.00, 99.80, 99.60, 99.40]),
+        "short",
+    )
+
+    assert reason is None
+
+
 def test_recent_bars_prefers_alpaca_market_data():
     alpaca = MagicMock()
     alpaca.get_intraday_bars.return_value = _bars([100, 101, 102, 103])
@@ -952,7 +1021,14 @@ def test_recent_bars_uses_alpaca_only_when_alpaca_has_too_few_bars():
 
 def test_buy_entry_quote_uses_alpaca_market_data_not_tradier_quotes():
     alpaca = MagicMock()
-    alpaca.get_quote_with_open.return_value = (50.0, 49.0)
+    alpaca.get_entry_snapshot.return_value = SimpleNamespace(
+        bid=49.99,
+        ask=50.0,
+        last=50.0,
+        open=49.0,
+        entry_price=50.0,
+        short_entry_price=49.99,
+    )
     ex = _make_executor(market_data_client=alpaca)
     ex._client.get_buying_power = MagicMock(return_value=500.0)
     ex._client.get_quotes_with_open = MagicMock(return_value={"AAPL": (999.0, 900.0)})
@@ -960,7 +1036,7 @@ def test_buy_entry_quote_uses_alpaca_market_data_not_tradier_quotes():
 
     asyncio.run(ex.buy("AAPL"))
 
-    alpaca.get_quote_with_open.assert_called_once_with("AAPL")
+    alpaca.get_entry_snapshot.assert_called_once_with("AAPL")
     ex._client.get_quotes_with_open.assert_not_called()
     ex._client.submit_order.assert_called_once_with("AAPL", "buy", 2, pytest.approx(50.0 * 1.005))
 

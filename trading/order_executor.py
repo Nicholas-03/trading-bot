@@ -3,6 +3,7 @@ import asyncio
 import logging
 import math
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 import httpx
@@ -24,6 +25,24 @@ _PENDING_CLOSE_STATUSES = {"open", "pending", "accepted", "queued", "partially_f
 _SHORT_SALE_UNAVAILABLE_PHRASE = "not available for short sales"
 
 
+@dataclass(frozen=True)
+class EntryQuote:
+    price: float
+    open_price: float | None
+    bid: float | None = None
+    ask: float | None = None
+    last: float | None = None
+
+    @property
+    def spread_pct(self) -> float | None:
+        if self.bid is None or self.ask is None or self.bid <= 0 or self.ask <= 0:
+            return None
+        midpoint = (self.bid + self.ask) / 2
+        if midpoint <= 0:
+            return None
+        return (self.ask - self.bid) / midpoint
+
+
 def _monday_of(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
@@ -34,6 +53,16 @@ def _round_order_price(value: float) -> float:
 
 def _is_short_sale_unavailable_error(message: str) -> bool:
     return _SHORT_SALE_UNAVAILABLE_PHRASE in message.lower()
+
+
+def _positive_float(value) -> float | None:
+    if not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 class OrderExecutor:
@@ -57,6 +86,11 @@ class OrderExecutor:
         self._extended_move_low_price_pct: float = config.extended_move_low_price_pct
         self._extended_move_any_pct: float = config.extended_move_any_pct
         self._min_trade_price: float = config.min_trade_price
+        self._max_entry_spread_pct: float = config.max_entry_spread_pct
+        self._min_entry_avg_volume: float = config.min_entry_avg_volume
+        self._min_entry_avg_dollar_volume: float = config.min_entry_avg_dollar_volume
+        self._short_liquid_only: bool = config.short_liquid_only
+        self._short_liquid_symbols: frozenset[str] = config.short_liquid_symbols
         self._bracket_reprice_enabled: bool = config.bracket_reprice_enabled
         self._entry_confirmation_enabled: bool = config.entry_confirmation_enabled
         self._entry_confirmation_lookback_minutes: int = config.entry_confirmation_lookback_minutes
@@ -838,15 +872,43 @@ class OrderExecutor:
             logger.warning("ENTRY DATA ERROR: provider=alpaca ticker=%s error=market data client unavailable", ticker)
         return []
 
-    async def _entry_quote(self, ticker: str) -> tuple[float, float | None] | None:
+    async def _entry_quote(self, ticker: str, side: str = "buy") -> EntryQuote | None:
         if self._market_data_client is None:
             logger.warning("ENTRY QUOTE ERROR: provider=alpaca ticker=%s error=market data client unavailable", ticker)
             return None
         try:
-            quote = await asyncio.to_thread(self._market_data_client.get_quote_with_open, ticker)
-            if quote is not None:
-                logger.info("ENTRY QUOTE: provider=alpaca ticker=%s price=%s open=%s", ticker, quote[0], quote[1])
-            return quote
+            snapshot = None
+            snapshot_getter = getattr(self._market_data_client, "get_entry_snapshot", None)
+            if callable(snapshot_getter):
+                snapshot = await asyncio.to_thread(snapshot_getter, ticker)
+
+            if snapshot is not None:
+                bid = _positive_float(getattr(snapshot, "bid", None))
+                ask = _positive_float(getattr(snapshot, "ask", None))
+                last = _positive_float(getattr(snapshot, "last", None))
+                open_price = _positive_float(getattr(snapshot, "open", None))
+                raw_price = (
+                    getattr(snapshot, "short_entry_price", None)
+                    if side == "short"
+                    else getattr(snapshot, "entry_price", None)
+                )
+                price = _positive_float(raw_price)
+                if price is not None:
+                    quote = EntryQuote(price, open_price, bid, ask, last)
+                    logger.info(
+                        "ENTRY QUOTE: provider=alpaca ticker=%s side=%s price=%s open=%s bid=%s ask=%s spread=%s",
+                        ticker, side, quote.price, quote.open_price, quote.bid, quote.ask, quote.spread_pct,
+                    )
+                    return quote
+
+            legacy_quote = await asyncio.to_thread(self._market_data_client.get_quote_with_open, ticker)
+            if legacy_quote is not None:
+                price = _positive_float(legacy_quote[0])
+                open_price = _positive_float(legacy_quote[1])
+                if price is not None:
+                    logger.info("ENTRY QUOTE: provider=alpaca ticker=%s side=%s price=%s open=%s", ticker, side, price, open_price)
+                    return EntryQuote(price, open_price)
+            return None
         except Exception as e:
             logger.warning("ENTRY QUOTE ERROR: provider=alpaca ticker=%s error=%s", ticker, e)
             return None
@@ -887,6 +949,7 @@ class OrderExecutor:
         ticker: str,
         quote_price: float,
         bars: list[MarketBar],
+        side: str = "buy",
     ) -> str | None:
         if not self._entry_confirmation_enabled:
             return None
@@ -900,10 +963,38 @@ class OrderExecutor:
         recent = bars[-self._entry_confirmation_lookback_minutes:]
         latest = recent[-1]
         trend_reference = recent[-(self._entry_confirmation_trend_minutes + 1)]
+        volume_skip = self._entry_volume_skip_reason(ticker, recent)
+        if volume_skip is not None:
+            return volume_skip
+
         recent_high = max(bar.high for bar in recent)
+        recent_low = min(bar.low for bar in recent)
         fade_from_high = (recent_high - latest.close) / recent_high if recent_high > 0 else 0.0
+        bounce_from_low = (latest.close - recent_low) / recent_low if recent_low > 0 else 0.0
         trend_move = (latest.close - trend_reference.close) / trend_reference.close
         quote_premium = (quote_price - latest.close) / latest.close if latest.close > 0 else 0.0
+        quote_discount = (latest.close - quote_price) / latest.close if latest.close > 0 else 0.0
+
+        if side == "short":
+            if bounce_from_low > self._entry_confirmation_max_fade_pct:
+                logger.info(
+                    "SKIP [short_bounce_block] %s - latest 1m close $%.2f is %.1f%% above recent low $%.2f",
+                    ticker, latest.close, bounce_from_low * 100, recent_low,
+                )
+                return "short_bounce_block"
+            if trend_move >= 0:
+                logger.info(
+                    "SKIP [short_weak_followthrough_block] %s - latest 1m close $%.2f is not below %dm-ago close $%.2f",
+                    ticker, latest.close, self._entry_confirmation_trend_minutes, trend_reference.close,
+                )
+                return "short_weak_followthrough_block"
+            if quote_discount > self._entry_confirmation_max_quote_premium_pct:
+                logger.info(
+                    "SKIP [quote_discount_block] %s - short quote $%.2f is %.1f%% below latest 1m close $%.2f",
+                    ticker, quote_price, quote_discount * 100, latest.close,
+                )
+                return "quote_discount_block"
+            return None
 
         if fade_from_high > self._entry_confirmation_max_fade_pct:
             logger.info(
@@ -923,6 +1014,48 @@ class OrderExecutor:
                 ticker, quote_price, quote_premium * 100, latest.close,
             )
             return "quote_premium_block"
+        return None
+
+    def _entry_volume_skip_reason(self, ticker: str, bars: list[MarketBar]) -> str | None:
+        volumes = [bar.volume for bar in bars if bar.volume is not None]
+        if len(volumes) < len(bars):
+            logger.info("SKIP [entry_volume_unavailable] %s - recent bars missing volume", ticker)
+            return "entry_volume_unavailable"
+        if not bars:
+            return "entry_confirmation_unavailable"
+        avg_volume = sum(volumes) / len(volumes)
+        avg_dollar_volume = sum((bar.volume or 0.0) * bar.close for bar in bars) / len(bars)
+        if avg_volume < self._min_entry_avg_volume:
+            logger.info(
+                "SKIP [low_liquidity_block] %s - avg 1m volume %.0f below minimum %.0f",
+                ticker, avg_volume, self._min_entry_avg_volume,
+            )
+            return "low_liquidity_block"
+        if avg_dollar_volume < self._min_entry_avg_dollar_volume:
+            logger.info(
+                "SKIP [low_dollar_volume_block] %s - avg 1m dollar volume $%.0f below minimum $%.0f",
+                ticker, avg_dollar_volume, self._min_entry_avg_dollar_volume,
+            )
+            return "low_dollar_volume_block"
+        return None
+
+    def _spread_skip_reason(self, ticker: str, quote: EntryQuote) -> str | None:
+        spread_pct = quote.spread_pct
+        if spread_pct is None:
+            logger.info("SKIP [entry_spread_unavailable] %s - bid/ask spread unavailable", ticker)
+            return "entry_spread_unavailable"
+        if spread_pct > self._max_entry_spread_pct:
+            logger.info(
+                "SKIP [wide_spread_block] %s - spread %.2f%% above maximum %.2f%%",
+                ticker, spread_pct * 100, self._max_entry_spread_pct * 100,
+            )
+            return "wide_spread_block"
+        return None
+
+    def _short_symbol_skip_reason(self, ticker: str) -> str | None:
+        if self._short_liquid_only and ticker.upper() not in self._short_liquid_symbols:
+            logger.info("SKIP [short_symbol_liquidity_block] %s - not in liquid short allowlist", ticker)
+            return "short_symbol_liquidity_block"
         return None
 
     def update_price_for_fast_fail(self, ticker: str, current_price: float) -> bool:
@@ -1083,15 +1216,16 @@ class OrderExecutor:
                 )
                 await self._record_skip_safe(decision_id, "insufficient_funds")
                 return
-            quote = await self._entry_quote(ticker)
+            quote = await self._entry_quote(ticker, "buy")
             if not quote:
                 logger.error("No Alpaca quote available for %s - skipping buy", ticker)
                 await self._record_skip_safe(decision_id, "no_quote")
                 return
-            price, open_price = quote
+            price = quote.price
+            open_price = quote.open_price
             logger.info(
-                "BUY PRECHECK: ticker=%s buying_power=%.2f provider=alpaca quote=%s open=%s",
-                ticker, buying_power, price, open_price,
+                "BUY PRECHECK: ticker=%s buying_power=%.2f provider=alpaca quote=%s open=%s bid=%s ask=%s",
+                ticker, buying_power, price, open_price, quote.bid, quote.ask,
             )
 
             if price < self._min_trade_price:
@@ -1100,6 +1234,11 @@ class OrderExecutor:
                     ticker, price, self._min_trade_price,
                 )
                 await self._record_skip_safe(decision_id, "low_price_block")
+                return
+
+            spread_skip_reason = self._spread_skip_reason(ticker, quote)
+            if spread_skip_reason is not None:
+                await self._record_skip_safe(decision_id, spread_skip_reason)
                 return
 
             # --- intraday extension filter ---
@@ -1130,7 +1269,7 @@ class OrderExecutor:
                     return
 
             bars = await self._recent_bars(ticker, self._entry_confirmation_lookback_minutes)
-            entry_skip_reason = self._entry_confirmation_skip_reason(ticker, price, bars)
+            entry_skip_reason = self._entry_confirmation_skip_reason(ticker, price, bars, "buy")
             if entry_skip_reason is not None:
                 logger.info(
                     "BUY PRE-ORDER SKIP: ticker=%s decision_id=%s reason=%s bars=%d",
@@ -1291,6 +1430,10 @@ class OrderExecutor:
             await self._notifier.notify_error(f"buy {ticker}", str(e))
 
     async def short(self, ticker: str, decision_id: int | None = None, decision_monotonic: float | None = None, hold_hours: int = 0) -> None:
+        logger.info(
+            "SHORT TRIGGERED: ticker=%s decision_id=%s hold_hours=%s",
+            ticker, decision_id, hold_hours,
+        )
         if self._trading_paused:
             logger.info("Trading paused — skipping short for %s", ticker)
             await self._record_skip_safe(decision_id, "trading_paused")
@@ -1303,9 +1446,70 @@ class OrderExecutor:
             logger.info("Skipping short for %s — currently held long, sell first", ticker)
             await self._record_skip_safe(decision_id, "already_held")
             return
+        short_symbol_skip = self._short_symbol_skip_reason(ticker)
+        if short_symbol_skip is not None:
+            await self._record_skip_safe(decision_id, short_symbol_skip)
+            return
         try:
+            quote = await self._entry_quote(ticker, "short")
+            if not quote:
+                logger.error("No Alpaca quote available for %s - skipping short", ticker)
+                await self._record_skip_safe(decision_id, "no_quote")
+                return
+            price = quote.price
+            open_price = quote.open_price
+            logger.info(
+                "SHORT PRECHECK: ticker=%s provider=alpaca quote=%s open=%s bid=%s ask=%s",
+                ticker, price, open_price, quote.bid, quote.ask,
+            )
+
+            if price < self._min_trade_price:
+                logger.info(
+                    "SKIP [low_price_block] %s - price $%.2f is below minimum $%.2f",
+                    ticker, price, self._min_trade_price,
+                )
+                await self._record_skip_safe(decision_id, "low_price_block")
+                return
+
+            spread_skip_reason = self._spread_skip_reason(ticker, quote)
+            if spread_skip_reason is not None:
+                await self._record_skip_safe(decision_id, spread_skip_reason)
+                return
+
+            if open_price is not None and open_price > 0:
+                intraday_move = (price - open_price) / open_price
+                if intraday_move < -self._extended_move_any_pct:
+                    logger.info(
+                        "SKIP [extended_move_block] %s - price $%.2f is down %.1f%% from open $%.2f; not chasing short",
+                        ticker, price, intraday_move * 100, open_price,
+                    )
+                    await self._record_skip_safe(decision_id, "extended_move_block")
+                    return
+                if intraday_move > 0.03:
+                    logger.info(
+                        "SKIP [positive_price_confirmation_block] %s - price $%.2f is up %.1f%% from session open $%.2f despite negative catalyst",
+                        ticker, price, intraday_move * 100, open_price,
+                    )
+                    await self._record_skip_safe(decision_id, "positive_price_confirmation_block")
+                    return
+
+            bars = await self._recent_bars(ticker, self._entry_confirmation_lookback_minutes)
+            entry_skip_reason = self._entry_confirmation_skip_reason(ticker, price, bars, "short")
+            if entry_skip_reason is not None:
+                logger.info(
+                    "SHORT PRE-ORDER SKIP: ticker=%s decision_id=%s reason=%s bars=%d",
+                    ticker, decision_id, entry_skip_reason, len(bars),
+                )
+                await self._record_skip_safe(decision_id, entry_skip_reason)
+                return
+
+            entry_limit = price * (1 - self._max_slippage_pct)
+            logger.info(
+                "SHORT ENTRY SUBMITTING: ticker=%s decision_id=%s qty=%d entry_limit=$%.4f quote=$%.2f",
+                ticker, decision_id, self._short_qty, entry_limit, price,
+            )
             order_id = await asyncio.to_thread(
-                self._client.submit_order, ticker, "sell_short", self._short_qty
+                self._client.submit_order, ticker, "sell_short", self._short_qty, entry_limit
             )
             _submitted_at = time.monotonic()
 

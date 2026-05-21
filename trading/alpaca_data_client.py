@@ -26,6 +26,15 @@ class AlpacaSnapshotPrice:
         return self.latest_price
 
     @property
+    def short_entry_price(self) -> float | None:
+        """Price used for short sizing/slippage checks. Prefer the bid for entries."""
+        if self.bid is not None:
+            return self.bid
+        if self.last is not None:
+            return self.last
+        return self.latest_price
+
+    @property
     def latest_price(self) -> float | None:
         """Price used for monitoring/estimates. Prefer last trade, then midpoint."""
         if self.last is not None:
@@ -37,6 +46,16 @@ class AlpacaSnapshotPrice:
         if self.bid is not None:
             return self.bid
         return self.close
+
+    @property
+    def spread_pct(self) -> float | None:
+        """Bid/ask spread as a fraction of midpoint, when both sides are available."""
+        if self.bid is None or self.ask is None or self.bid <= 0 or self.ask <= 0:
+            return None
+        midpoint = (self.bid + self.ask) / 2
+        if midpoint <= 0:
+            return None
+        return (self.ask - self.bid) / midpoint
 
 
 class AlpacaMarketDataClient:
@@ -96,6 +115,10 @@ class AlpacaMarketDataClient:
         if snapshot is None or snapshot.entry_price is None:
             return None
         return snapshot.entry_price, snapshot.open
+
+    def get_entry_snapshot(self, symbol: str) -> AlpacaSnapshotPrice | None:
+        """Return the raw Alpaca snapshot used for entry quality checks."""
+        return self.get_snapshots([symbol]).get(symbol.upper())
 
     def get_latest_prices(self, symbols: list[str]) -> dict[str, float]:
         """Return latest monitor prices using Alpaca market data only."""

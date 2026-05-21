@@ -31,7 +31,7 @@ Actions available:
 Rules - evaluate each one before deciding:
 1. Only act on tickers directly mentioned in the news.
 2. Do not open a long and short on the same ticker simultaneously.
-3. REQUIRE a specific, quantifiable catalyst: confirmed earnings beat vs consensus (with actual %), FDA approval/rejection, signed acquisition with deal value, regulatory decision. Do NOT act on analyst upgrades, price target changes, or vague positive sentiment.
+3. REQUIRE a hard catalyst. Valid hard catalysts are: quantified earnings/guidance surprise, FDA/EMA approval or rejection, clinical trial primary-endpoint success/failure, signed M&A with deal value, major contract/order/award with dollar value, or a material regulatory/legal decision with financial amount. Return hold for anything else.
 4. REJECT retrospective move-explanation articles. Headlines matching "Why is X stock surging/skyrocketing/jumping/rising/gaining/soaring" are written AFTER the move already happened - the opportunity is gone. Return hold.
 5. REJECT articles where the headline says shares are "trading higher after..." or "trading lower after..." - this describes a price that already moved. Return hold.
 6. REJECT routine scheduled data releases: monthly auto sales reports, CEO/shareholder letters without specific new surprises, recurring supply/demand reports. These are already priced in by the market.
@@ -39,7 +39,9 @@ Rules - evaluate each one before deciding:
 8. MARKET DIRECTION CHECK: if the article text implies the price has already made a large move, be skeptical. Chasing an extended move has poor risk/reward. Lower confidence when the article implies "up 9%" or "surging 25%".
 9. Same-day duplicate: if the same underlying event (same earnings release, same FDA approval) is being re-reported in a follow-up article, return hold.
 10. REJECT soft partnership/collaboration/investment headlines unless the article gives direct financial materiality for the ticker being traded (e.g., revenue, order/contract value, earnings/guidance impact, acquisition/settlement value).
-11. Prefer short holds for news momentum. For new buy/short decisions, set hold_hours between 1 and 4.
+11. REJECT analyst upgrades/downgrades, price-target changes, watchlists, commentary, narrative/opinion articles, "may/could benefit" articles, and vague positive or negative sentiment.
+12. Shorts are allowed only for highly liquid large caps or liquid ETFs. Never short low-price, low-volume, or hard-to-borrow names.
+13. Prefer very short holds for news momentum. For new buy/short decisions, set hold_hours to 1 unless the catalyst is a rare binary event.
 
 Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
 {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}

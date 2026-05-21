@@ -37,6 +37,17 @@ def _should_fire_report(now_et: datetime, last_report_date: date | None) -> bool
     return last_report_date != now_et.date()
 
 
+def _should_close_before_market_close(now_et: datetime, minutes_before_close: int) -> bool:
+    """Return True during the configured pre-close flattening window."""
+    if now_et.tzinfo is None:
+        raise ValueError("now_et must be timezone-aware (ET)")
+    if minutes_before_close <= 0 or now_et.weekday() >= 5:
+        return False
+    close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+    start_time = close_time - timedelta(minutes=minutes_before_close)
+    return start_time <= now_et < close_time
+
+
 def _poll_error_delay(failure_count: int) -> int:
     """Return exponential retry delay after consecutive monitor failures."""
     if failure_count <= 0:
@@ -65,6 +76,8 @@ class PositionMonitor:
         self._db = db
         self._market_data_client = market_data_client
         self._last_report_date: date | None = None
+        close_minutes = getattr(config, "close_before_market_close_minutes", 0)
+        self._close_before_market_close_minutes = close_minutes if isinstance(close_minutes, int) else 0
 
     async def run(self) -> None:
         await asyncio.gather(self._position_loop(), self._report_loop())
@@ -178,6 +191,16 @@ class PositionMonitor:
             - self._executor.pending_close
             - self._executor.pending_fill
         )
+        et = pytz.timezone("America/New_York")
+        if live_tracked and _should_close_before_market_close(
+            datetime.now(et),
+            self._close_before_market_close_minutes,
+        ):
+            for ticker in sorted(live_tracked):
+                logger.info("EOD FLATTEN TRIGGERED: ticker=%s", ticker)
+                await self._executor.sell(ticker, exit_reason="eod_flatten")
+            return
+
         if live_tracked:
             quotes = await self._latest_prices(list(live_tracked))
             for ticker, price in quotes.items():

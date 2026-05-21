@@ -1,9 +1,11 @@
 from datetime import datetime, timezone, timedelta
 import pytest
 from news.filters import (
+    is_hard_catalyst_news,
     is_retrospective_headline,
     is_routine_news,
     is_soft_partnership_without_materiality,
+    is_vague_or_analyst_news,
     compute_news_age_hours,
 )
 
@@ -86,6 +88,35 @@ def test_contract_order_is_material_not_soft_partnership_block():
         "Leidos Wins $2.7B U.S. Army Contract",
         "Contract to advance hypersonic weapons production.",
     ) is False
+
+
+def test_hard_catalyst_contract_requires_amount():
+    assert is_hard_catalyst_news(
+        "Leidos Wins $2.7B U.S. Army Contract",
+        "Contract to advance hypersonic weapons production.",
+    ) is True
+    assert is_hard_catalyst_news(
+        "Boeing Wins Aircraft Order",
+        "No value or delivery impact disclosed.",
+    ) is False
+
+
+def test_hard_catalyst_fda_approval():
+    assert is_hard_catalyst_news("FDA Approves New Drug", "Approval granted after review.") is True
+
+
+def test_hard_catalyst_blocks_narrative_growth_article():
+    assert is_hard_catalyst_news(
+        "Hasbro Magic Growth Shows No Signs Of Slowing",
+        "Narrative commentary without guidance or earnings surprise.",
+    ) is False
+
+
+def test_vague_or_analyst_news_blocks_price_target():
+    assert is_vague_or_analyst_news(
+        "Analyst Raises NVDA Price Target To $180",
+        "The firm maintains a buy rating.",
+    ) is True
 
 
 # --- compute_news_age_hours ---

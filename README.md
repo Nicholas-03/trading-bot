@@ -7,15 +7,18 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 1. Connects to Alpaca's news WebSocket and receives live news events.
 2. Sends each news headline, summary, and mentioned tickers to the LLM along with current long/short positions.
 3. The LLM returns a `buy`, `short`, `sell`, or `hold` decision with a confidence score and expected hold duration.
-4. Decisions below `MIN_CONFIDENCE` are skipped.
-5. On `buy`: uses Alpaca market data for price checks, places a capped DAY limit entry through Tradier, confirms the actual fill, then places a protective OCO take-profit/stop bracket.
-6. On `short`: places a short sell order for `SHORT_QTY` shares of the ticker.
-7. On `sell`: closes the full long or short position for the ticker.
-8. Every 30 seconds, checks all open positions and automatically closes if:
+4. Decisions below `MIN_CONFIDENCE` are skipped; production also applies `MIN_CONFIDENCE_FLOOR` so stale `.env` values cannot lower the safety floor.
+5. News must pass the hard-catalyst gate: quantified earnings/guidance surprise, FDA/EMA or trial endpoint result, signed M&A with value, major contract/order with value, or material legal/regulatory decision with financial amount.
+6. Entries must pass price, bid/ask spread, recent 1-minute volume, dollar-volume, and direction-confirmation checks.
+7. On `buy`: uses Alpaca market data for price checks, places a capped DAY limit entry through Tradier, confirms the actual fill, then places a protective OCO take-profit/stop bracket.
+8. On `short`: only liquid large-cap/ETF symbols from the short allowlist can be shorted; the bot places a capped limit short entry for `SHORT_QTY` shares.
+9. On `sell`: closes the full long or short position for the ticker.
+10. Every 30 seconds, checks all open positions and automatically closes if:
    - P&L drops to **-2%** (stop-loss)
    - P&L reaches **+3%** (take-profit)
    - The LLM's `hold_hours` window has expired
-9. All trades are recorded to a local SQLite analytics database.
+   - The configured pre-close flattening window has started
+11. All trades are recorded to a local SQLite analytics database.
 
 ## Execution Policy
 
@@ -82,7 +85,20 @@ Edit `.env` with your API keys and settings:
 | `SHORT_QTY` | Shares per short sell order | `1` |
 | `STOP_LOSS_PCT` | Stop-loss threshold (e.g. `2` = 2%) | `2` |
 | `TAKE_PROFIT_PCT` | Take-profit threshold (e.g. `3` = 3%) | `3` |
-| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0–1.0) to act on a decision | `0.7` |
+| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0-1.0) to act on a decision | `0.80` |
+| `MIN_CONFIDENCE_FLOOR` | Safety floor applied over `MIN_CONFIDENCE`; lower `.env` values are raised to this | `0.80` |
+| `MIN_TRADE_PRICE` | Minimum entry price; lower-price names are skipped | `20.0` |
+| `MIN_TRADE_PRICE_FLOOR` | Safety floor applied over `MIN_TRADE_PRICE` | `20.0` |
+| `MAX_ENTRY_SPREAD_PCT` | Maximum bid/ask spread allowed for entries | `0.50` |
+| `MIN_ENTRY_AVG_VOLUME` | Minimum average 1-minute share volume over the confirmation window | `1000` |
+| `MIN_ENTRY_AVG_DOLLAR_VOLUME` | Minimum average 1-minute dollar volume over the confirmation window | `50000` |
+| `DEFAULT_HOLD_HOURS` | Default hold window for new entries | `1` |
+| `MAX_HOLD_HOURS` | Maximum requested hold window before cap | `1` |
+| `MAX_HOLD_HOURS_CAP` | Safety cap applied over `MAX_HOLD_HOURS` | `1` |
+| `CLOSE_BEFORE_MARKET_CLOSE_MINUTES` | Close open bot positions before the regular-session close | `10` |
+| `REQUIRE_HARD_CATALYST_NEWS` | Skip news before the LLM unless it matches a hard catalyst | `true` |
+| `SHORT_LIQUID_ONLY` | Restrict shorts to the configured liquid symbol allowlist | `true` |
+| `SHORT_LIQUID_SYMBOLS` | Optional comma-separated override for the built-in liquid short allowlist | built-in list |
 | `ANALYTICS_DB_PATH` | Path to the SQLite analytics database | `data/trades.db` |
 | `TELEGRAM_ENABLED` | Send trade notifications via Telegram | `false` |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token (if enabled) | conditional |

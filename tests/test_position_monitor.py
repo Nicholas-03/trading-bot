@@ -7,6 +7,7 @@ from trading.position_monitor import (
     PositionMonitor,
     compute_pnl_pct,
     _poll_error_delay,
+    _should_close_before_market_close,
     _should_fire_report,
     _should_log_poll_error_at_error,
 )
@@ -82,6 +83,18 @@ def test_should_not_fire_on_weekend():
     # April 18, 2026 is a Saturday
     now = _ET.localize(datetime(2026, 4, 18, 16, 0, 0))
     assert _should_fire_report(now, None) is False
+
+
+def test_should_close_before_market_close_window():
+    now = _ET.localize(datetime(2026, 4, 14, 15, 52, 0))
+    assert _should_close_before_market_close(now, 10) is True
+
+
+def test_should_not_close_before_market_close_too_early_or_after_close():
+    early = _ET.localize(datetime(2026, 4, 14, 15, 49, 59))
+    closed = _ET.localize(datetime(2026, 4, 14, 16, 0, 0))
+    assert _should_close_before_market_close(early, 10) is False
+    assert _should_close_before_market_close(closed, 10) is False
 
 
 def test_fetch_eod_data_uses_bot_pnl_with_broker_activity_counts():
