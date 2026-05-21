@@ -84,10 +84,9 @@ def test_should_not_fire_on_weekend():
     assert _should_fire_report(now, None) is False
 
 
-def test_fetch_eod_data_prefers_tradier_gain_loss_for_pnl():
+def test_fetch_eod_data_uses_bot_pnl_with_broker_activity_counts():
     client = MagicMock()
     client.trade_activity_summary_for_date.return_value = (4, 10)
-    client.gain_loss_summary_for_close_date.return_value = (10, 28.07)
     executor = MagicMock()
     executor.daily_summary.return_value = (14, 14, 17.27)
     monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())
@@ -96,13 +95,13 @@ def test_fetch_eod_data_prefers_tradier_gain_loss_for_pnl():
 
     assert buys == 4
     assert sells == 10
-    assert pnl == 28.07
+    assert pnl == 17.27
+    client.gain_loss_summary_for_close_date.assert_not_called()
 
 
-def test_fetch_eod_data_falls_back_to_db_when_gain_loss_unavailable():
+def test_fetch_eod_data_uses_db_counts_when_account_history_unavailable():
     client = MagicMock()
     client.trade_activity_summary_for_date.side_effect = RuntimeError("sandbox history unavailable")
-    client.gain_loss_summary_for_close_date.side_effect = RuntimeError("gainloss unavailable")
     executor = MagicMock()
     executor.daily_summary.return_value = (14, 14, 17.27)
     monitor = PositionMonitor(client, MagicMock(), executor, MagicMock())

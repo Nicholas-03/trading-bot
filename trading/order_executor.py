@@ -430,6 +430,16 @@ class OrderExecutor:
             return False
 
     @staticmethod
+    def _exit_reason_after_actual_fill(exit_reason: str, pnl_usd: float | None) -> str:
+        if pnl_usd is None:
+            return exit_reason
+        if exit_reason == "take_profit" and pnl_usd <= 0:
+            return "take_profit_fill_loss"
+        if exit_reason == "stop_loss" and pnl_usd >= 0:
+            return "stop_loss_positive_fill"
+        return exit_reason
+
+    @staticmethod
     def _parse_tradier_dt(value: str | None) -> datetime | None:
         if not value:
             return None
@@ -1481,6 +1491,7 @@ class OrderExecutor:
             pnl_usd = actual_pnl_usd
             pnl_pct = price_delta / entry_price
             exit_price = fill_price
+            exit_reason = self._exit_reason_after_actual_fill(exit_reason, pnl_usd)
 
         self._update_close_state(ticker, pnl_usd, exit_reason)
         await self._record_close_safe(trade_id, ticker, exit_price, pnl_usd, pnl_pct, exit_reason)

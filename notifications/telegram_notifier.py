@@ -115,7 +115,7 @@ class TelegramNotifier:
             f"📊 End of Day Report — {day_str}\n"
             f"🟢 Buys: {buys}\n"
             f"🔴 Sells: {sells}\n"
-            f"💰 Broker realized P&L: {sign}${pnl:.2f}"
+            f"💰 Bot day P&L: {sign}${pnl:.2f}"
         )
 
     def _format_weekly_report(self, buys: int, sells: int, pnl: float, now_et: datetime) -> str:
@@ -125,7 +125,7 @@ class TelegramNotifier:
             f"📅 Weekly Report — Week of {day_str}\n"
             f"🟢 Buys: {buys}\n"
             f"🔴 Sells: {sells}\n"
-            f"💰 Broker realized P&L: {sign}${pnl:.2f}"
+            f"💰 Bot week P&L: {sign}${pnl:.2f}"
         )
 
     # --- HTTP transport ---

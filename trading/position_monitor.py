@@ -117,40 +117,30 @@ class PositionMonitor:
     def _fetch_eod_data(self) -> tuple[int, int, float]:
         et = pytz.timezone("America/New_York")
         today = datetime.now(et).date()
-        fallback_buys, fallback_sells, fallback_pnl = self._executor.daily_summary(today)
-        buys = fallback_buys
+        buys, sells, pnl = self._executor.daily_summary(today)
         try:
             broker_buys, broker_activity_sells = self._client.trade_activity_summary_for_date(today)
             if broker_buys or broker_activity_sells:
                 buys = broker_buys
+                sells = broker_activity_sells
         except Exception as exc:
             logger.warning("Tradier account history unavailable for EOD buy count; using analytics DB: %s", exc)
-        try:
-            broker_sells, broker_pnl = self._client.gain_loss_summary_for_close_date(today)
-            return buys, broker_sells, broker_pnl
-        except Exception as exc:
-            logger.warning("Tradier gain/loss unavailable for EOD P&L; using analytics DB: %s", exc)
-            return fallback_buys, fallback_sells, fallback_pnl
+        return buys, sells, pnl
 
     def _fetch_weekly_data(self) -> tuple[int, int, float]:
         et = pytz.timezone("America/New_York")
         today = datetime.now(et).date()
         week_monday = today - timedelta(days=today.weekday())
         week_end = week_monday + timedelta(days=6)
-        fallback_buys, fallback_sells, fallback_pnl = self._executor.weekly_summary(week_monday)
-        buys = fallback_buys
+        buys, sells, pnl = self._executor.weekly_summary(week_monday)
         try:
             broker_buys, broker_activity_sells = self._client.trade_activity_summary_for_date_range(week_monday, week_end)
             if broker_buys or broker_activity_sells:
                 buys = broker_buys
+                sells = broker_activity_sells
         except Exception as exc:
             logger.warning("Tradier account history unavailable for weekly buy count; using analytics DB: %s", exc)
-        try:
-            broker_sells, broker_pnl = self._client.gain_loss_summary_for_close_date_range(week_monday, week_end)
-            return buys, broker_sells, broker_pnl
-        except Exception as exc:
-            logger.warning("Tradier gain/loss unavailable for weekly P&L; using analytics DB: %s", exc)
-            return fallback_buys, fallback_sells, fallback_pnl
+        return buys, sells, pnl
 
     async def _check_positions(self) -> None:
         await self._record_account_value_snapshot()

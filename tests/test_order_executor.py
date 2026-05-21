@@ -245,6 +245,31 @@ def test_sell_already_gone_short_recovers_cover_fill_for_db():
     assert ex._daily_realized_pnl == pytest.approx(-5.39)
 
 
+def test_take_profit_signal_records_fill_loss_when_actual_fill_loses_money():
+    ex = _make_executor()
+    ex._db = MagicMock()
+    ex._shorted_tickers.add("AMPX")
+    ex._position_book["AMPX"] = (15.32, 1, 126)
+    ex._client.close_position = MagicMock(return_value="cover-1")
+    ex._client.get_quotes = MagicMock(return_value={"AMPX": 14.53})
+    ex._client.get_order = MagicMock(return_value=("filled", 15.39))
+
+    asyncio.run(ex.sell("AMPX", exit_reason="take_profit"))
+
+    ex._db.record_trade_close.assert_called_once()
+    args = ex._db.record_trade_close.call_args.args
+    assert args[0] == 126
+    assert args[1] == 15.39
+    assert args[2] == pytest.approx(-0.07)
+    assert args[3] == pytest.approx(-0.07 / 15.32)
+    assert args[4] == "take_profit_fill_loss"
+    ex._notifier.notify_sell.assert_called_once_with(
+        "AMPX",
+        pytest.approx(-0.07 / 15.32),
+        pytest.approx(-0.07),
+    )
+
+
 def test_sell_skips_pnl_when_already_provided():
     """When pnl_usd is provided by caller (e.g. PositionMonitor), use it directly."""
     ex = _make_executor()

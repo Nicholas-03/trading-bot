@@ -7,7 +7,8 @@ This note captures the production rule agreed after the CSX missed-entry investi
 - Alpaca is the source for all stock market data used by the bot.
 - Use Alpaca for entry snapshots, ask/last prices, session open, 1-minute entry-confirmation bars, and live prices used by the position monitor.
 - Do not use Tradier quotes or Tradier time-and-sales as a fallback for trading decisions.
-- Tradier is the broker only: order submission, order status, positions, balances, account history, and realized gain/loss.
+- Tradier is the broker only: order submission, order status, positions, balances, and account history.
+- Do not use Tradier gain/loss for bot performance reporting. It is broker/tax-lot accounting and can include old lots for the same symbol; EOD and weekly Telegram P&L should come from the analytics DB's bot round-trip records.
 
 ## Long Entry Flow
 

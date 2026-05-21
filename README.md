@@ -19,7 +19,7 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 
 ## Execution Policy
 
-The bot must use Alpaca for all stock market data used in trading decisions: entry quotes, session open, 1-minute confirmation bars, and live prices for position monitoring. Tradier is used only for brokerage/account actions: orders, positions, balances, account history, and realized gain/loss.
+The bot must use Alpaca for all stock market data used in trading decisions: entry quotes, session open, 1-minute confirmation bars, and live prices for position monitoring. Tradier is used only for brokerage/account actions: orders, positions, balances, and account history. Telegram EOD/weekly P&L reports use the bot analytics DB, not Tradier gain/loss, because broker gain/loss can include old tax lots and misstate the bot's day result.
 
 Long entries must not be submitted as Tradier OTOCO entry orders. The required flow is:
 

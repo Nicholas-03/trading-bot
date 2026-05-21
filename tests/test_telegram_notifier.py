@@ -87,11 +87,11 @@ def test_format_sell_labels_pnl_as_bot_estimate_not_broker_realized():
     assert "📊 P&L:" not in msg
 
 
-def test_eod_report_labels_pnl_as_broker_realized():
+def test_eod_report_labels_pnl_as_bot_day_pnl():
     n = TelegramNotifier.__new__(TelegramNotifier)
     msg = n._format_eod_report(0, 10, 28.07, _ET.localize(datetime(2026, 5, 8, 16, 0)))
-    assert "Broker realized P&L: +$28.07" in msg
-    assert "Day P&L" not in msg
+    assert "Bot day P&L: +$28.07" in msg
+    assert "Broker realized P&L" not in msg
 
 
 def test_format_short():
