@@ -57,7 +57,7 @@ jobs:
 
             echo "== Runtime Config And DB =="
             docker cp "$APP_DIR/scripts/production_db_diagnostics.py" "$SERVICE":/tmp/production_db_diagnostics.py
-            docker compose exec -T "$SERVICE" sh -lc "cd /app && python /tmp/production_db_diagnostics.py"
+            docker compose exec -T "$SERVICE" sh -lc "cd /app && PYTHONPATH=/app python /tmp/production_db_diagnostics.py"
 
             echo "== Log Summary =="
             python3 "$APP_DIR/scripts/production_log_summary.py" "$LOG_FILE" "$TAIL_LINES"
