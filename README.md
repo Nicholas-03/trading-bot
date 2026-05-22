@@ -85,8 +85,8 @@ Edit `.env` with your API keys and settings:
 | `SHORT_QTY` | Shares per short sell order | `1` |
 | `STOP_LOSS_PCT` | Stop-loss threshold (e.g. `2` = 2%) | `2` |
 | `TAKE_PROFIT_PCT` | Take-profit threshold (e.g. `3` = 3%) | `3` |
-| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0-1.0) to act on a decision | `0.80` |
-| `MIN_CONFIDENCE_FLOOR` | Safety floor applied over `MIN_CONFIDENCE`; lower `.env` values are raised to this | `0.80` |
+| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0-1.0) to act on a decision | `0.70` |
+| `MIN_CONFIDENCE_FLOOR` | Safety floor applied over `MIN_CONFIDENCE`; lower `.env` values are raised to this | `0.70` |
 | `MIN_TRADE_PRICE` | Minimum entry price; lower-price names are skipped | `20.0` |
 | `MIN_TRADE_PRICE_FLOOR` | Safety floor applied over `MIN_TRADE_PRICE` | `20.0` |
 | `MAX_ENTRY_SPREAD_PCT` | Maximum bid/ask spread allowed for entries | `0.50` |

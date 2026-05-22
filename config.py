@@ -171,7 +171,7 @@ def load_config() -> Config:
         if telegram_missing:
             raise ValueError(f"TELEGRAM_ENABLED=true but missing: {', '.join(telegram_missing)}")
 
-    min_confidence_floor = _parse_float("MIN_CONFIDENCE_FLOOR", "0.80")
+    min_confidence_floor = _parse_float("MIN_CONFIDENCE_FLOOR", "0.70")
     min_trade_price_floor = _parse_float("MIN_TRADE_PRICE_FLOOR", "20.0")
     max_hold_hours_cap = int(os.getenv("MAX_HOLD_HOURS_CAP", "1"))
     configured_max_hold_hours = int(os.getenv("MAX_HOLD_HOURS", "1"))
@@ -199,7 +199,7 @@ def load_config() -> Config:
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
         analytics_db_path=os.getenv("ANALYTICS_DB_PATH", "data/trades.db"),
-        min_confidence=max(_parse_float("MIN_CONFIDENCE", "0.80"), min_confidence_floor),
+        min_confidence=max(_parse_float("MIN_CONFIDENCE", "0.70"), min_confidence_floor),
         max_slippage_pct=_parse_float("MAX_SLIPPAGE_PCT", "0.5") / 100,
         extended_move_low_price_pct=_parse_float("EXTENDED_MOVE_LOW_PRICE_PCT", "15.0") / 100,
         extended_move_any_pct=_parse_float("EXTENDED_MOVE_ANY_PCT", "10.0") / 100,

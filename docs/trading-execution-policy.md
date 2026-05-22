@@ -25,7 +25,7 @@ Long buys must use a fill-first bracket flow:
 
 ## Risk Gates
 
-- `MIN_CONFIDENCE_FLOOR` defaults to `0.80`; lower `MIN_CONFIDENCE` values from an old `.env` are raised to the floor.
+- `MIN_CONFIDENCE_FLOOR` defaults to `0.70`; lower `MIN_CONFIDENCE` values from an old `.env` are raised to the floor.
 - `MIN_TRADE_PRICE_FLOOR` defaults to `$20`; lower `MIN_TRADE_PRICE` values are raised to the floor so low-price symbols are blocked.
 - News must pass `REQUIRE_HARD_CATALYST_NEWS=true` before the LLM is called. Valid hard catalysts are quantified earnings/guidance surprises, FDA/EMA or clinical endpoint decisions, signed M&A with value, major contracts/orders with value, or material legal/regulatory decisions with financial amounts.
 - Analyst upgrades/downgrades, price-target changes, watchlists, vague commentary, and soft partnerships without material financial impact are skipped before the LLM.
