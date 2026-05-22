@@ -96,6 +96,19 @@ def main() -> None:
                 "trades": [dict(r) for r in trades],
                 "account": acct_summary,
             })
+            candidates = con.execute(
+                "SELECT d.ts, d.action, d.ticker, d.confidence, d.skip_reason, "
+                "       n.headline, n.symbols, substr(d.reasoning, 1, 220) AS reasoning "
+                "FROM llm_decisions d "
+                "LEFT JOIN news_events n ON n.id = d.news_event_id "
+                "WHERE d.ts >= ? AND d.ts < ? AND lower(d.action) IN ('buy', 'short') "
+                "ORDER BY d.ts",
+                (start, end),
+            ).fetchall()
+            if candidates:
+                print("trade_candidates", day.isoformat())
+                for row in candidates:
+                    print(dict(row))
 
         recent = con.execute(
             "SELECT ts, action, ticker, confidence, skip_reason, reasoning "
