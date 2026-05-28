@@ -18,6 +18,7 @@ Headline: {headline}
 Summary: {summary}
 Tickers mentioned: {symbols}
 News age: {news_age_hours:.1f} hours since publication
+Entry-quality precheck: {symbol_entry_context}
 
 Currently held long positions: {held_tickers}
 Currently held short positions: {shorted_tickers}
@@ -42,6 +43,9 @@ Rules - evaluate each one before deciding:
 11. REJECT analyst upgrades/downgrades, price-target changes, watchlists, commentary, narrative/opinion articles, "may/could benefit" articles, and vague positive or negative sentiment.
 12. Shorts are allowed only for highly liquid large caps or liquid ETFs. Never short low-price, low-volume, or hard-to-borrow names.
 13. Prefer very short holds for news momentum. For new buy/short decisions, set hold_hours to 1 unless the catalyst is a rare binary event.
+14. Ticker selection matters. If several tickers are mentioned, choose the most directly affected liquid common stock or liquid ETF. Avoid small caps, newly listed names, proxy/derivative tickers, crypto symbols, and unfamiliar symbols when a cleaner liquid ticker is available.
+15. For buy/short decisions, do not choose a ticker marked blocked by the entry-quality precheck. If the only directly affected ticker is blocked for low price, missing quote, missing spread, or wide spread, return hold.
+16. Do not choose a ticker likely to trade below the configured minimum price. If unsure and there is no clearly liquid alternative, return hold.
 
 Return ONLY a valid JSON object, nothing else. Use exactly one of these formats:
 {{"action": "buy", "ticker": "SYMBOL", "reasoning": "one sentence", "confidence": 0.0-1.0, "hold_hours": int}}
@@ -67,6 +71,27 @@ class Decision:
     provider: str = _PROVIDER_NAME
     latency_sec: float | None = None
     cost_usd: float | None = None
+
+
+def _build_prompt(
+    *,
+    headline: str,
+    summary: str,
+    symbols: list[str],
+    held_tickers: set[str],
+    shorted_tickers: set[str],
+    news_age_hours: float = 0.0,
+    symbol_entry_context: str = "not checked",
+) -> str:
+    return _PROMPT_TEMPLATE.format(
+        headline=headline,
+        summary=summary or "(no summary)",
+        symbols=", ".join(symbols) if symbols else "none",
+        held_tickers=", ".join(held_tickers) if held_tickers else "none",
+        shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
+        news_age_hours=news_age_hours,
+        symbol_entry_context=symbol_entry_context or "not checked",
+    )
 
 
 def _parse_response(text: str) -> Decision:
@@ -113,19 +138,22 @@ class LLMAdvisor:
         held_tickers: set[str],
         shorted_tickers: set[str],
         news_age_hours: float = 0.0,
+        symbol_entry_context: str = "not checked",
     ) -> Decision:
-        prompt = _PROMPT_TEMPLATE.format(
+        prompt = _build_prompt(
             headline=headline,
-            summary=summary or "(no summary)",
-            symbols=", ".join(symbols) if symbols else "none",
-            held_tickers=", ".join(held_tickers) if held_tickers else "none",
-            shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
+            summary=summary,
+            symbols=symbols,
+            held_tickers=set(held_tickers),
+            shorted_tickers=set(shorted_tickers),
             news_age_hours=news_age_hours,
+            symbol_entry_context=symbol_entry_context,
         )
         start = time.monotonic()
         try:
             result = await self._provider.complete(prompt)
             decision = _parse_response(result.text)
+            decision = _validate_decision_symbols(decision, symbols, held_tickers, shorted_tickers)
             decision.latency_sec = time.monotonic() - start
             decision.cost_usd = compute_cost(self._model, result.input_tokens, result.output_tokens)
             return decision
@@ -145,3 +173,37 @@ class LLMAdvisor:
                 reasoning=f"api error: {e}",
                 latency_sec=time.monotonic() - start,
             )
+
+
+def _validate_decision_symbols(
+    decision: Decision,
+    symbols: list[str],
+    held_tickers: set[str],
+    shorted_tickers: set[str],
+) -> Decision:
+    if decision.ticker is None or decision.action == "hold":
+        return decision
+
+    decision.ticker = decision.ticker.upper()
+    news_symbols = {s.upper() for s in symbols}
+    held_or_shorted = {s.upper() for s in held_tickers} | {s.upper() for s in shorted_tickers}
+
+    if decision.action in ("buy", "short") and decision.ticker not in news_symbols:
+        return Decision(
+            action="hold",
+            ticker=None,
+            reasoning=f"LLM selected {decision.ticker}, which was not directly mentioned in the news.",
+            provider=decision.provider,
+            latency_sec=decision.latency_sec,
+            cost_usd=decision.cost_usd,
+        )
+    if decision.action == "sell" and decision.ticker not in held_or_shorted:
+        return Decision(
+            action="hold",
+            ticker=None,
+            reasoning=f"LLM selected sell for {decision.ticker}, but that ticker is not currently held.",
+            provider=decision.provider,
+            latency_sec=decision.latency_sec,
+            cost_usd=decision.cost_usd,
+        )
+    return decision

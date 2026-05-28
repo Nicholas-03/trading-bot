@@ -5,11 +5,11 @@ Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide wh
 ## How it works
 
 1. Connects to Alpaca's news WebSocket and receives live news events.
-2. Sends each news headline, summary, and mentioned tickers to the LLM along with current long/short positions.
+2. Pre-checks mentioned tickers with Alpaca snapshots and sends the LLM a tradable/blocked ticker context along with current long/short positions.
 3. The LLM returns a `buy`, `short`, `sell`, or `hold` decision with a confidence score and expected hold duration.
 4. Decisions below `MIN_CONFIDENCE` are skipped; production also applies `MIN_CONFIDENCE_FLOOR` so stale `.env` values cannot lower the safety floor.
 5. News must pass the hard-catalyst gate: quantified earnings/guidance surprise, FDA/EMA or trial endpoint result, signed M&A with value, major contract/order with value, or material legal/regulatory decision with financial amount.
-6. Entries must pass price, bid/ask spread, recent 1-minute volume, dollar-volume, and direction-confirmation checks.
+6. Entries must pass price, bid/ask spread, recent 1-minute volume, dollar-volume, and direction-confirmation checks. The LLM is instructed not to choose tickers already blocked by the snapshot precheck.
 7. On `buy`: uses Alpaca market data for price checks, places a capped DAY limit entry through Tradier, confirms the actual fill, then places a protective OCO take-profit/stop bracket.
 8. On `short`: only liquid large-cap/ETF symbols from the short allowlist can be shorted; the bot places a capped limit short entry for `SHORT_QTY` shares.
 9. On `sell`: closes the full long or short position for the ticker.

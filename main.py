@@ -321,7 +321,7 @@ async def main() -> None:
             order_executor.seed_from_db(open_trades)
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
         llm_advisor = LLMAdvisor(config)
-        news_handler = NewsHandler(client, config, llm_advisor, order_executor, db)
+        news_handler = NewsHandler(client, config, llm_advisor, order_executor, db, market_data_client)
         position_monitor = PositionMonitor(client, config, order_executor, notifier, db, market_data_client)
 
         coroutines = [news_handler.run(), position_monitor.run()]

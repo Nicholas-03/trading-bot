@@ -1,5 +1,5 @@
 import pytest
-from llm.llm_advisor import Decision, _parse_response
+from llm.llm_advisor import Decision, _build_prompt, _parse_response, _validate_decision_symbols
 
 
 def test_parse_buy_decision():
@@ -76,3 +76,43 @@ def test_parse_confidence_defaults_when_absent():
     decision = _parse_response(text)
     assert decision.confidence == 0.0
     assert decision.hold_hours == 0
+
+
+def test_prompt_includes_entry_precheck_and_ticker_selection_rules():
+    prompt = _build_prompt(
+        headline="AAPL wins $2B contract",
+        summary="details",
+        symbols=["AAPL", "TINY"],
+        held_tickers=set(),
+        shorted_tickers=set(),
+        symbol_entry_context="tradable now: AAPL. blocked now: TINY: low_price price=$3.00.",
+    )
+
+    assert "Entry-quality precheck: tradable now: AAPL" in prompt
+    assert "do not choose a ticker marked blocked" in prompt
+    assert "choose the most directly affected liquid common stock or liquid ETF" in prompt
+
+
+def test_validate_decision_symbols_rejects_unmentioned_entry():
+    decision = _validate_decision_symbols(
+        Decision("buy", "MSFT", "not in article", 0.9, 1),
+        ["AAPL"],
+        set(),
+        set(),
+    )
+
+    assert decision.action == "hold"
+    assert decision.ticker is None
+    assert "not directly mentioned" in decision.reasoning
+
+
+def test_validate_decision_symbols_normalizes_valid_entry_ticker():
+    decision = _validate_decision_symbols(
+        Decision("buy", "aapl", "valid", 0.9, 1),
+        ["AAPL"],
+        set(),
+        set(),
+    )
+
+    assert decision.action == "buy"
+    assert decision.ticker == "AAPL"

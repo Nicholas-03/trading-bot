@@ -22,6 +22,7 @@ from trading.tradier_client import TradierClient
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
+    from trading.alpaca_data_client import AlpacaMarketDataClient
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,68 @@ logger = logging.getLogger(__name__)
 def _effective_hold_hours(requested: int, config: Config) -> int:
     hold_hours = requested if requested > 0 else config.default_hold_hours
     return max(1, min(hold_hours, config.max_hold_hours))
+
+
+def _positive_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _format_entry_precheck_context(
+    symbols: list[str],
+    snapshots: dict,
+    *,
+    min_trade_price: float,
+    max_entry_spread_pct: float,
+) -> str:
+    clean_symbols: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        clean = str(symbol).strip().upper()
+        if clean and clean not in seen:
+            clean_symbols.append(clean)
+            seen.add(clean)
+
+    if not clean_symbols:
+        return "not checked (no symbols)"
+
+    tradable: list[str] = []
+    blocked: list[str] = []
+    normalized_snapshots = {str(k).upper(): v for k, v in snapshots.items()}
+    for symbol in clean_symbols:
+        snapshot = normalized_snapshots.get(symbol)
+        if snapshot is None:
+            blocked.append(f"{symbol}: no_quote")
+            continue
+
+        price = _positive_float(getattr(snapshot, "entry_price", None))
+        spread_pct = getattr(snapshot, "spread_pct", None)
+        if price is None:
+            blocked.append(f"{symbol}: no_quote")
+        elif price < min_trade_price:
+            blocked.append(f"{symbol}: low_price price=${price:.2f}")
+        elif spread_pct is None:
+            blocked.append(f"{symbol}: entry_spread_unavailable price=${price:.2f}")
+        elif spread_pct > max_entry_spread_pct:
+            blocked.append(
+                f"{symbol}: wide_spread price=${price:.2f} "
+                f"spread={spread_pct * 100:.2f}%"
+            )
+        else:
+            tradable.append(f"{symbol}: price=${price:.2f} spread={spread_pct * 100:.2f}%")
+
+    tradable_text = "; ".join(tradable) if tradable else "none"
+    blocked_text = "; ".join(blocked) if blocked else "none"
+    return (
+        f"tradable now: {tradable_text}. "
+        f"blocked now: {blocked_text}. "
+        f"minimum price=${min_trade_price:.2f}; max spread={max_entry_spread_pct * 100:.2f}%."
+    )
 
 
 class NewsHandler:
@@ -39,12 +102,14 @@ class NewsHandler:
         llm_advisor: LLMAdvisor,
         order_executor: OrderExecutor,
         db: "TradeDB | None" = None,
+        market_data_client: "AlpacaMarketDataClient | None" = None,
     ) -> None:
         self._client = client
         self._config = config
         self._advisor = llm_advisor
         self._executor = order_executor
         self._db = db
+        self._market_data_client = market_data_client
 
     async def run(self) -> None:
         while True:
@@ -129,6 +194,7 @@ class NewsHandler:
                     )
 
             decision_monotonic = time.monotonic()
+            symbol_entry_context = await self._build_entry_precheck_context(symbols)
             decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
@@ -136,6 +202,7 @@ class NewsHandler:
                 held_tickers=self._executor.held_tickers,
                 shorted_tickers=self._executor.shorted_tickers,
                 news_age_hours=age_hours,
+                symbol_entry_context=symbol_entry_context,
             )
 
             logger.info(
@@ -216,3 +283,20 @@ class NewsHandler:
                 await self._executor.sell(decision.ticker)
         except Exception:
             logger.exception("Unhandled error processing news event")
+
+    async def _build_entry_precheck_context(self, symbols: list[str]) -> str:
+        if self._market_data_client is None:
+            return "not checked (market data client unavailable)"
+        try:
+            snapshots = await asyncio.to_thread(self._market_data_client.get_snapshots, symbols)
+            context = _format_entry_precheck_context(
+                symbols,
+                snapshots,
+                min_trade_price=self._config.min_trade_price,
+                max_entry_spread_pct=self._config.max_entry_spread_pct,
+            )
+            logger.info("ENTRY PRECHECK CONTEXT: %s", context)
+            return context
+        except Exception as exc:
+            logger.warning("Entry precheck unavailable for %s: %s", symbols, exc)
+            return "not checked (Alpaca precheck failed)"
