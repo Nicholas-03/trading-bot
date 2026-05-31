@@ -16,6 +16,8 @@ build/
 *.egg-info/
 .DS_Store
 *.log
+data/
+*.db
 *.egg
 .eggs/
 .claude

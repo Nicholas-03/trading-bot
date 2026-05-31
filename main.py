@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import date, datetime
+import os
+from datetime import date, datetime, timezone
 from rich.logging import RichHandler
 import pytz
 from alpaca.trading.client import TradingClient
@@ -63,9 +64,24 @@ def _load_open_positions(
     return held, shorted, open_dates
 
 
+def _record_account_value_snapshot(client: TradingClient, db) -> None:
+    try:
+        account = client.get_account()
+        raw_value = getattr(account, "portfolio_value", None) or getattr(account, "equity", None)
+        if raw_value is None:
+            logger.warning("Initial account value snapshot unavailable: account has no portfolio_value/equity")
+            return
+        value = float(raw_value)
+        db.record_account_value(datetime.now(timezone.utc).isoformat(), value)
+        logger.info("Recorded account value snapshot: $%.2f", value)
+    except Exception as exc:
+        logger.warning("Initial account value snapshot unavailable: %s", exc)
+
+
 async def main() -> None:
     config = load_config()
     client = _make_trading_client(config)
+    db = None
     held_tickers, shorted_tickers, open_dates = _load_open_positions(client)
 
     if config.telegram_enabled:
@@ -73,10 +89,26 @@ async def main() -> None:
     else:
         notifier = NoOpNotifier()
 
-    order_executor = OrderExecutor(client, config, held_tickers, shorted_tickers, notifier, open_dates=open_dates)
+    if config.analytics_db_path:
+        from analytics.db import TradeDB
+
+        os.makedirs(os.path.dirname(config.analytics_db_path) or ".", exist_ok=True)
+        db = TradeDB(config.analytics_db_path)
+        logger.info("Analytics DB: %s", config.analytics_db_path)
+        _record_account_value_snapshot(client, db)
+
+    order_executor = OrderExecutor(
+        client,
+        config,
+        held_tickers,
+        shorted_tickers,
+        notifier,
+        open_dates=open_dates,
+        db=db,
+    )
     llm_advisor = LLMAdvisor(config)
-    news_handler = NewsHandler(client, config, llm_advisor, order_executor)
-    position_monitor = PositionMonitor(client, config, order_executor, notifier)
+    news_handler = NewsHandler(client, config, llm_advisor, order_executor, db=db)
+    position_monitor = PositionMonitor(client, config, order_executor, notifier, db=db)
 
     coroutines = [news_handler.run(), position_monitor.run()]
     command_listener = None
@@ -98,6 +130,8 @@ async def main() -> None:
         await notifier.aclose()
         if command_listener:
             await command_listener.aclose()
+        if db is not None:
+            db.close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,78 @@
+name: Deploy alpaca to DigitalOcean
+
+on:
+  push:
+    branches:
+      - alpaca
+  workflow_dispatch:
+
+concurrency:
+  group: digitalocean-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy trading bot
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      DROPLET_APP_DIR: ${{ vars.DROPLET_APP_DIR }}
+      DROPLET_COMPOSE_DIR: ${{ vars.DROPLET_COMPOSE_DIR }}
+      DROPLET_SERVICE: ${{ vars.DROPLET_SERVICE }}
+
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          envs: DROPLET_APP_DIR,DROPLET_COMPOSE_DIR,DROPLET_SERVICE
+          script_stop: true
+          script: |
+            set -euo pipefail
+
+            APP_DIR="${DROPLET_APP_DIR:-/opt/trading-bot/app}"
+            COMPOSE_DIR="${DROPLET_COMPOSE_DIR:-/opt/trading-bot}"
+            SERVICE="${DROPLET_SERVICE:-trading-bot}"
+            BRANCH="alpaca"
+            TEST_VENV="/tmp/trading-bot-deploy-venv"
+            PROD_DATA_DIR="/mnt/trading-bot-data"
+
+            cd "$APP_DIR"
+            git fetch --prune origin "$BRANCH"
+            if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+              git switch "$BRANCH"
+            else
+              git switch --track -c "$BRANCH" "origin/$BRANCH"
+            fi
+            git pull --ff-only origin "$BRANCH"
+
+            rm -rf "$TEST_VENV"
+            if ! python3 -m venv "$TEST_VENV"; then
+              if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ]; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv
+                python3 -m venv "$TEST_VENV"
+              else
+                echo "python3 venv support is missing. Install python3-venv on the Droplet and rerun the workflow." >&2
+                exit 1
+              fi
+            fi
+            "$TEST_VENV/bin/python" -m pip install --upgrade pip
+            "$TEST_VENV/bin/python" -m pip install -r requirements-dev.txt
+            "$TEST_VENV/bin/python" -m pytest tests/ -v
+            "$TEST_VENV/bin/python" -c "import main; print('OK')"
+
+            mkdir -p "$PROD_DATA_DIR"
+            cd "$COMPOSE_DIR"
+            cat > docker-compose.analytics.yml <<YAML
+            services:
+              ${SERVICE}:
+                volumes:
+                  - ${PROD_DATA_DIR}:/app/data
+            YAML
+            docker compose -f docker-compose.yml -f docker-compose.analytics.yml build "$SERVICE"
+            docker compose -f docker-compose.yml -f docker-compose.analytics.yml up -d --no-deps "$SERVICE"
+            docker compose -f docker-compose.yml -f docker-compose.analytics.yml ps "$SERVICE"

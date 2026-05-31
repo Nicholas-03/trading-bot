@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 import pytz
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import GetOrdersRequest, GetPortfolioHistoryRequest
@@ -8,6 +9,9 @@ from alpaca.trading.enums import QueryOrderStatus, OrderStatus, OrderSide
 from trading.order_executor import OrderExecutor
 from notifications.telegram_notifier import Notifier
 from config import Config
+
+if TYPE_CHECKING:
+    from analytics.db import TradeDB
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,7 @@ class PositionMonitor:
         config: Config,
         order_executor: OrderExecutor,
         notifier: Notifier,
+        db: "TradeDB | None" = None,
     ) -> None:
         self._client = client
         self._stop_loss = config.stop_loss_pct
@@ -44,6 +49,7 @@ class PositionMonitor:
         self._executor = order_executor
         self._notifier = notifier
         self._last_report_date: date | None = None
+        self._db = db
 
     async def run(self) -> None:
         await asyncio.gather(self._position_loop(), self._report_loop())
@@ -60,9 +66,22 @@ class PositionMonitor:
         while True:
             await asyncio.sleep(60)
             try:
+                await self._record_account_value_snapshot()
                 await self._check_report()
             except Exception:
                 logger.exception("Report loop error")
+
+    async def _record_account_value_snapshot(self) -> None:
+        if self._db is None:
+            return
+        try:
+            account = await asyncio.to_thread(self._client.get_account)
+            raw_value = getattr(account, "portfolio_value", None) or getattr(account, "equity", None)
+            if raw_value is None:
+                return
+            self._db.record_account_value(datetime.now(timezone.utc).isoformat(), float(raw_value))
+        except Exception as exc:
+            logger.warning("Analytics account value snapshot failed: %s", exc)
 
     async def _check_report(self) -> None:
         et = pytz.timezone("America/New_York")

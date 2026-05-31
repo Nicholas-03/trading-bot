@@ -59,6 +59,7 @@ Edit `.env` with your API keys and settings:
 | `SHORT_QTY` | Shares per short sell order | `1` |
 | `STOP_LOSS_PCT` | Stop-loss threshold (decimal) | `0.05` (5%) |
 | `TAKE_PROFIT_PCT` | Take-profit threshold (decimal) | `0.10` (10%) |
+| `ANALYTICS_DB_PATH` | SQLite path for the analytics dashboard | `data/trades.db` |
 
 ### 4. Run the bot
 
@@ -83,7 +84,7 @@ cp .env.example .env
 docker compose up -d
 ```
 
-This builds the image and starts the container in the background. The container restarts automatically on crash or VM reboot.
+This builds the image and starts the bot plus the FastAPI analytics dashboard in the same container. The dashboard listens on port `8080`, and analytics data is written to `ANALYTICS_DB_PATH`. The container restarts automatically on crash or VM reboot.
 
 ### 3. View logs
 
@@ -96,6 +97,12 @@ docker compose logs -f
 ```bash
 docker compose down
 ```
+
+## DigitalOcean deployment
+
+GitHub Actions deploys this branch to the DigitalOcean Droplet on every push to `alpaca`. The workflow is `.github/workflows/deploy-digitalocean.yml`; it SSHes to the Droplet, checks out/pulls `origin/alpaca` in `/opt/trading-bot/app`, runs `python -m pytest tests/ -v`, verifies `python -c "import main; print('OK')"`, then rebuilds/recreates the Docker Compose `trading-bot` service.
+
+The production analytics DB is persisted outside the app checkout at `/mnt/trading-bot-data` and mounted into the container as `/app/data`.
 
 ## Testing
 
