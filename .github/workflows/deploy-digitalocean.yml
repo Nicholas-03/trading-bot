@@ -41,7 +41,8 @@ jobs:
             PROD_DATA_DIR="/mnt/trading-bot-data"
 
             cd "$APP_DIR"
-            git fetch --prune origin "$BRANCH:refs/remotes/origin/$BRANCH"
+            git update-ref -d "refs/remotes/origin/$BRANCH" || true
+            git fetch --prune origin "+$BRANCH:refs/remotes/origin/$BRANCH"
 
             if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
               echo "Stashing local app checkout changes before deploy:"
