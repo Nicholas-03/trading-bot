@@ -42,12 +42,16 @@ jobs:
 
             cd "$APP_DIR"
             git fetch --prune origin "$BRANCH"
-            if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-              git switch "$BRANCH"
-            else
-              git switch --track -c "$BRANCH" "origin/$BRANCH"
+
+            if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+              echo "Stashing local app checkout changes before deploy:"
+              git status --short
+              git stash push --include-untracked -m "pre-alpaca-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
             fi
+
+            git switch -C "$BRANCH" "origin/$BRANCH"
             git pull --ff-only origin "$BRANCH"
+            git status --short --branch
 
             rm -rf "$TEST_VENV"
             if ! python3 -m venv "$TEST_VENV"; then
