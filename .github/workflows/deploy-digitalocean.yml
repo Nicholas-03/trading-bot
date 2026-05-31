@@ -41,7 +41,7 @@ jobs:
             PROD_DATA_DIR="/mnt/trading-bot-data"
 
             cd "$APP_DIR"
-            git fetch --prune origin "$BRANCH"
+            git fetch --prune origin "$BRANCH:refs/remotes/origin/$BRANCH"
 
             if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
               echo "Stashing local app checkout changes before deploy:"
@@ -49,8 +49,7 @@ jobs:
               git stash push --include-untracked -m "pre-alpaca-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
             fi
 
-            git switch -C "$BRANCH" "origin/$BRANCH"
-            git pull --ff-only origin "$BRANCH"
+            git switch -C "$BRANCH" "refs/remotes/origin/$BRANCH"
             git status --short --branch
 
             rm -rf "$TEST_VENV"
