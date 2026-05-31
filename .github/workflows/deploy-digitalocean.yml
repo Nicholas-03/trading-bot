@@ -70,12 +70,8 @@ jobs:
 
             mkdir -p "$PROD_DATA_DIR"
             cd "$COMPOSE_DIR"
-            cat > docker-compose.analytics.yml <<YAML
-            services:
-              ${SERVICE}:
-                volumes:
-                  - ${PROD_DATA_DIR}:/app/data
-            YAML
+            printf 'services:\n  "%s":\n    volumes:\n      - "%s:/app/data"\n' "$SERVICE" "$PROD_DATA_DIR" > docker-compose.analytics.yml
+            cat docker-compose.analytics.yml
             docker compose -f docker-compose.yml -f docker-compose.analytics.yml build "$SERVICE"
             docker compose -f docker-compose.yml -f docker-compose.analytics.yml up -d --no-deps "$SERVICE"
             docker compose -f docker-compose.yml -f docker-compose.analytics.yml ps "$SERVICE"
