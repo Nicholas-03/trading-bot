@@ -12,6 +12,8 @@ class Config:
     anthropic_model: str
     google_api_key: str
     gemini_model: str
+    openai_api_key: str
+    openai_model: str
     llm_provider: str
     trade_amount_usd: float
     short_qty: int
@@ -39,12 +41,14 @@ def _parse_float(key: str, default: str) -> float:
 def load_config() -> Config:
     load_dotenv()
 
-    provider = os.getenv("LLM_PROVIDER", "claude").lower()
-    if provider not in ("claude", "gemini"):
-        raise ValueError(f"LLM_PROVIDER must be 'claude' or 'gemini', got {provider!r}")
+    provider = os.getenv("LLM_PROVIDER", "chatgpt").lower()
+    if provider not in ("chatgpt", "claude", "gemini"):
+        raise ValueError(f"LLM_PROVIDER must be 'chatgpt', 'claude', or 'gemini', got {provider!r}")
 
     required = ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]
-    if provider == "claude":
+    if provider == "chatgpt":
+        required.append("OPENAI_API_KEY")
+    elif provider == "claude":
         required.append("ANTHROPIC_API_KEY")
     else:
         required.append("GOOGLE_API_KEY")
@@ -67,6 +71,8 @@ def load_config() -> Config:
         anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-opus-4-6"),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
         llm_provider=provider,
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),

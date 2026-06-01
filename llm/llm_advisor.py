@@ -8,6 +8,7 @@ import anthropic
 from google import genai
 from google.genai import errors as genai_errors
 from config import Config
+from llm.providers import ChatGPTProvider
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,9 @@ def _parse_response(text: str) -> Decision:
 class LLMAdvisor:
     def __init__(self, config: Config) -> None:
         self._provider = config.llm_provider
-        if self._provider == "claude":
+        if self._provider == "chatgpt":
+            self._chatgpt = ChatGPTProvider(config.openai_api_key, config.openai_model)
+        elif self._provider == "claude":
             self._claude = anthropic.Anthropic(api_key=config.anthropic_api_key)
             self._claude_model = config.anthropic_model
         else:
@@ -104,7 +107,9 @@ class LLMAdvisor:
             shorted_tickers=", ".join(shorted_tickers) if shorted_tickers else "none",
         )
         try:
-            if self._provider == "claude":
+            if self._provider == "chatgpt":
+                text = await self._call_chatgpt(prompt)
+            elif self._provider == "claude":
                 text = await self._call_claude(prompt)
             else:
                 text = await self._call_gemini(prompt)
@@ -115,6 +120,10 @@ class LLMAdvisor:
         except Exception as e:
             logger.error("LLM API error: %s", e)
             return Decision(action="hold", ticker=None, reasoning=f"api error: {e}")
+
+    async def _call_chatgpt(self, prompt: str) -> str:
+        result = await self._chatgpt.complete(prompt)
+        return result.text
 
     async def _call_claude(self, prompt: str) -> str:
         # Run the blocking Anthropic SDK call in a thread so it doesn't freeze the event loop

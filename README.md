@@ -49,7 +49,9 @@ Edit `.env` with your API keys and settings:
 | `ALPACA_API_KEY` | Alpaca API key ID | required |
 | `ALPACA_SECRET_KEY` | Alpaca secret key | required |
 | `ALPACA_BASE_URL` | Alpaca base URL | `https://paper-api.alpaca.markets` |
-| `LLM_PROVIDER` | LLM to use: `claude` or `gemini` | required |
+| `LLM_PROVIDER` | LLM to use: `chatgpt`, `claude`, or `gemini` | `chatgpt` |
+| `OPENAI_API_KEY` | OpenAI API key (if using ChatGPT) | conditional |
+| `OPENAI_MODEL` | OpenAI model ID | `gpt-5.4-mini` |
 | `ANTHROPIC_API_KEY` | Anthropic API key (if using Claude) | conditional |
 | `ANTHROPIC_MODEL` | Claude model ID | `claude-opus-4-6` |
 | `GOOGLE_API_KEY` | Google API key (if using Gemini) | conditional |

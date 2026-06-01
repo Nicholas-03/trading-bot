@@ -1,0 +1,47 @@
+import asyncio
+import logging
+
+import openai
+
+from llm.providers.base import CompletionResult
+
+logger = logging.getLogger(__name__)
+
+
+class ChatGPTProvider:
+    def __init__(self, api_key: str, model: str) -> None:
+        self._client = openai.AsyncOpenAI(api_key=api_key)
+        self._model = model
+
+    async def complete(self, prompt: str) -> CompletionResult:
+        max_retries = 3
+        for attempt in range(max_retries + 1):
+            try:
+                response = await self._client.chat.completions.create(
+                    model=self._model,
+                    max_completion_tokens=512,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                content = response.choices[0].message.content
+                if content is None:
+                    raise ValueError("OpenAI returned no text content")
+                return CompletionResult(
+                    text=content,
+                    input_tokens=response.usage.prompt_tokens,
+                    output_tokens=response.usage.completion_tokens,
+                )
+            except openai.APIStatusError as exc:
+                if exc.status_code >= 500 and attempt < max_retries:
+                    wait = 2**attempt
+                    logger.warning(
+                        "ChatGPT 5xx (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1,
+                        max_retries,
+                        wait,
+                        exc,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
+
+        raise RuntimeError("unreachable")
