@@ -21,6 +21,8 @@ logging.basicConfig(
     handlers=[RichHandler(rich_tracebacks=True, show_path=False)],
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def _make_trading_client(config: Config) -> TradingClient:
