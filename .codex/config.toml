@@ -1,0 +1,24 @@
+[mcp_servers.railway-mcp-server]
+args = [
+    "-y",
+    "@railway/mcp-server",
+]
+command = "npx"
+
+[mcp_servers.digitalocean-mcp]
+args = [
+    "-y",
+    "@digitalocean/mcp",
+    "--services",
+    "apps,droplets,databases,networking,accounts,docs",
+]
+command = "npx"
+env_vars = ["DIGITALOCEAN_API_TOKEN"]
+startup_timeout_sec = 30
+
+[mcp_servers.tradier]
+url = "https://mcp.tradier.com/mcp"
+
+[mcp_servers.tradier.http_headers]
+API_KEY = "Bo1fEWyCzC2wWLEaemMDxGDAOsKQ"
+PAPER_TRADING = "true"
