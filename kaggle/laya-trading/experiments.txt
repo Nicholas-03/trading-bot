@@ -1,0 +1,3 @@
+# <name> <finetune_laya.py args>, one GPU run each
+w_all   --labels data/laya_price_labels.jsonl --epochs 4
+w_max2  --labels data/laya_price_labels.jsonl --epochs 4 --max-tickers 2
