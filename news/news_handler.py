@@ -7,22 +7,13 @@ from typing import TYPE_CHECKING
 
 from alpaca.data.live import NewsDataStream
 
+from advisor.laya_advisor import LayaAdvisor
 from config import Config
-from llm.llm_advisor import LLMAdvisor
-from news.filters import (
-    compute_news_age_hours,
-    is_hard_catalyst_news,
-    is_retrospective_headline,
-    is_routine_news,
-    is_soft_partnership_without_materiality,
-    is_vague_or_analyst_news,
-)
 from trading.order_executor import OrderExecutor
 from trading.tradier_client import TradierClient
 
 if TYPE_CHECKING:
     from analytics.db import TradeDB
-    from trading.alpaca_data_client import AlpacaMarketDataClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,66 +23,12 @@ def _effective_hold_hours(requested: int, config: Config) -> int:
     return max(1, min(hold_hours, config.max_hold_hours))
 
 
-def _positive_float(value) -> float | None:
-    if value is None:
-        return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-
-def _format_entry_precheck_context(
-    symbols: list[str],
-    snapshots: dict,
-    *,
-    min_trade_price: float,
-    max_entry_spread_pct: float,
-) -> str:
-    clean_symbols: list[str] = []
-    seen: set[str] = set()
-    for symbol in symbols:
-        clean = str(symbol).strip().upper()
-        if clean and clean not in seen:
-            clean_symbols.append(clean)
-            seen.add(clean)
-
-    if not clean_symbols:
-        return "not checked (no symbols)"
-
-    tradable: list[str] = []
-    blocked: list[str] = []
-    normalized_snapshots = {str(k).upper(): v for k, v in snapshots.items()}
-    for symbol in clean_symbols:
-        snapshot = normalized_snapshots.get(symbol)
-        if snapshot is None:
-            blocked.append(f"{symbol}: no_quote")
-            continue
-
-        price = _positive_float(getattr(snapshot, "entry_price", None))
-        spread_pct = getattr(snapshot, "spread_pct", None)
-        if price is None:
-            blocked.append(f"{symbol}: no_quote")
-        elif price < min_trade_price:
-            blocked.append(f"{symbol}: low_price price=${price:.2f}")
-        elif spread_pct is None:
-            blocked.append(f"{symbol}: entry_spread_unavailable price=${price:.2f}")
-        elif spread_pct > max_entry_spread_pct:
-            blocked.append(
-                f"{symbol}: wide_spread price=${price:.2f} "
-                f"spread={spread_pct * 100:.2f}%"
-            )
-        else:
-            tradable.append(f"{symbol}: price=${price:.2f} spread={spread_pct * 100:.2f}%")
-
-    tradable_text = "; ".join(tradable) if tradable else "none"
-    blocked_text = "; ".join(blocked) if blocked else "none"
-    return (
-        f"tradable now: {tradable_text}. "
-        f"blocked now: {blocked_text}. "
-        f"minimum price=${min_trade_price:.2f}; max spread={max_entry_spread_pct * 100:.2f}%."
-    )
+def compute_news_age_hours(article_ts: datetime) -> float:
+    """Return hours elapsed since article_ts. Raises ValueError for naive datetimes."""
+    if article_ts.tzinfo is None:
+        raise ValueError("article_ts must be timezone-aware")
+    delta = datetime.now(timezone.utc) - article_ts
+    return delta.total_seconds() / 3600
 
 
 class NewsHandler:
@@ -99,17 +36,15 @@ class NewsHandler:
         self,
         client: TradierClient,
         config: Config,
-        llm_advisor: LLMAdvisor,
+        advisor: LayaAdvisor,
         order_executor: OrderExecutor,
         db: "TradeDB | None" = None,
-        market_data_client: "AlpacaMarketDataClient | None" = None,
     ) -> None:
         self._client = client
         self._config = config
-        self._advisor = llm_advisor
+        self._advisor = advisor
         self._executor = order_executor
         self._db = db
-        self._market_data_client = market_data_client
 
     async def run(self) -> None:
         while True:
@@ -145,29 +80,6 @@ class NewsHandler:
                 logger.debug("No tickers in news event - skipping")
                 return
 
-            if is_retrospective_headline(headline):
-                logger.info("SKIP [retrospective_headline_block] %s", headline[:100])
-                return
-
-            if is_routine_news(headline):
-                logger.info("SKIP [routine_news_block] %s", headline[:100])
-                return
-
-            if is_vague_or_analyst_news(headline, summary):
-                logger.info("SKIP [vague_or_analyst_news_block] %s", headline[:100])
-                return
-
-            if (
-                self._config.block_soft_partnership_news
-                and is_soft_partnership_without_materiality(headline, summary)
-            ):
-                logger.info("SKIP [soft_partnership_materiality_block] %s", headline[:100])
-                return
-
-            if self._config.require_hard_catalyst_news and not is_hard_catalyst_news(headline, summary):
-                logger.info("SKIP [hard_catalyst_required_block] %s", headline[:100])
-                return
-
             article_ts = getattr(news, "created_at", None)
             if not isinstance(article_ts, datetime):
                 article_ts = None
@@ -194,19 +106,16 @@ class NewsHandler:
                     )
 
             decision_monotonic = time.monotonic()
-            symbol_entry_context = await self._build_entry_precheck_context(symbols)
             decision = await self._advisor.analyze(
                 headline=headline,
                 summary=summary,
                 symbols=symbols,
                 held_tickers=self._executor.held_tickers,
                 shorted_tickers=self._executor.shorted_tickers,
-                news_age_hours=age_hours,
-                symbol_entry_context=symbol_entry_context,
             )
 
             logger.info(
-                "LLM decision [%s]: %s %s confidence=%.2f - %s",
+                "Decision [%s]: %s %s confidence=%.2f - %s",
                 decision.provider, decision.action, decision.ticker,
                 decision.confidence, decision.reasoning,
             )
@@ -239,9 +148,9 @@ class NewsHandler:
                         True,
                     )
                 except Exception as db_err:
-                    logger.warning("Failed to record LLM decision in analytics DB: %s", db_err)
+                    logger.warning("Failed to record decision in analytics DB: %s", db_err)
 
-            if decision.action in ("buy", "short") and decision.confidence < self._config.min_confidence:
+            if decision.action != "hold" and decision.confidence < self._config.min_confidence:
                 logger.info(
                     "Skipping %s %s - confidence %.2f below threshold %.2f",
                     decision.action, decision.ticker, decision.confidence, self._config.min_confidence,
@@ -283,20 +192,3 @@ class NewsHandler:
                 await self._executor.sell(decision.ticker)
         except Exception:
             logger.exception("Unhandled error processing news event")
-
-    async def _build_entry_precheck_context(self, symbols: list[str]) -> str:
-        if self._market_data_client is None:
-            return "not checked (market data client unavailable)"
-        try:
-            snapshots = await asyncio.to_thread(self._market_data_client.get_snapshots, symbols)
-            context = _format_entry_precheck_context(
-                symbols,
-                snapshots,
-                min_trade_price=self._config.min_trade_price,
-                max_entry_spread_pct=self._config.max_entry_spread_pct,
-            )
-            logger.info("ENTRY PRECHECK CONTEXT: %s", context)
-            return context
-        except Exception as exc:
-            logger.warning("Entry precheck unavailable for %s: %s", symbols, exc)
-            return "not checked (Alpaca precheck failed)"
