@@ -18,8 +18,8 @@ case "${1:-}" in
   upload)
     rm -rf "$STAGE" && mkdir -p "$STAGE"
     cp config.py advisor/laya_advisor.py scripts/finetune_laya.py scripts/predict_laya.py "$STAGE/"
-    cp "$HERE/experiments.txt" kaggle/laya-eval/eval.txt "$STAGE/"
-    cp data/laya_alpaca_labels_v2.jsonl "$STAGE/"
+    cp "$HERE/experiments.txt" kaggle/laya-eval/eval.txt kaggle/laya-premarket/experiments_premarket.txt "$STAGE/"
+    cp data/laya_alpaca_labels_v2.jsonl data/laya_premarket.jsonl "$STAGE/"
     printf '{"title": "Trading Bot Laya Finetune Data", "id": "%s", "licenses": [{"name": "other"}]}\n' "$DATASET" \
       > "$STAGE/dataset-metadata.json"
     if kaggle datasets status "$DATASET" >/dev/null 2>&1; then
@@ -29,6 +29,7 @@ case "${1:-}" in
     fi ;;
   start)    kaggle kernels push -p "$HERE" ;;
   eval)     kaggle kernels push -p kaggle/laya-eval ;;          # score models on held-out data (kaggle/laya-eval/eval.txt)
+  premarket) kaggle kernels push -p kaggle/laya-premarket ;;  # pre-market news traded at the open (experiments_premarket.txt)
   eval-results)
     mkdir -p "$HERE/results/eval" && kaggle kernels output nicholasb03/trading-bot-laya-eval -p "$HERE/results/eval" ;;
   status)   kaggle kernels status "$KERNEL" ;;

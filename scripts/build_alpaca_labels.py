@@ -8,6 +8,8 @@ Same news feed the bot trades live. Only regular-session news (09:31-15:30 ET) i
   ret_1h  = raw return entry -> exit;  excess_1h = ret_1h - SPY's return over the same minutes
   sim_long / sim_short = the bot's bracket trade (stop-loss 2%, take-profit 3%, time exit), stop checked first
   tradable = entry >= $20 and the 8 minutes before entry average >= 1000 shares and >= $50k per minute
+Pre-market mode (--premarket): news from 07:30-09:20 ET is traded at the open (entry 09:31 bar, 1h exit), with the
+opening gap vs the previous close (gap, spy_gap); cached in data/alpaca_labels_pre/.
 Labels: `label` = buy / short / hold on excess_1h at +-1%;  `label_sim` = buy if sim_long >= 1%, short if sim_short >= 1%.
 Also: react (entry vs the last close before the news), ex_5m/15m/30m/eod (excess return at other horizons).
 Per-day results are cached in data/alpaca_labels_v2/ (re-runs skip finished days); all days are merged into
@@ -30,6 +32,7 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "data" / "alpaca_labels_v2"
+CACHE_PRE = ROOT / "data" / "alpaca_labels_pre"
 ET = ZoneInfo("America/New_York")
 DATA = "https://data.alpaca.markets"
 STOP, TAKE, HORIZON_MIN, LATENCY_S = 0.02, 0.03, 60, 60
@@ -70,9 +73,10 @@ def get(path: str, params: dict) -> dict:
     raise RuntimeError(f"giving up on {url}")
 
 
-def fetch_news(day: date) -> list[dict]:
-    start = datetime(day.year, day.month, day.day, 9, 31, tzinfo=ET)
-    end = datetime(day.year, day.month, day.day, 15, 30, tzinfo=ET)
+def fetch_news(day: date, window: tuple[tuple[int, int], tuple[int, int]] = ((9, 31), (15, 30))) -> list[dict]:
+    (h0, m0), (h1, m1) = window
+    start = datetime(day.year, day.month, day.day, h0, m0, tzinfo=ET)
+    end = datetime(day.year, day.month, day.day, h1, m1, tzinfo=ET)
     params = {"start": start.astimezone(timezone.utc).isoformat(), "end": end.astimezone(timezone.utc).isoformat(),
               "limit": 50, "sort": "asc", "include_content": "false"}
     out, token = [], None
@@ -113,6 +117,31 @@ def fetch_bars(day: date, symbols: list[str]) -> dict[str, dict[int, tuple]]:
             if not token:
                 break
     return bars
+
+
+def fetch_prev_close(day: date, symbols: list[str]) -> dict[str, float]:
+    """Close of the last daily bar before `day` for each symbol."""
+    start = datetime(day.year, day.month, day.day, tzinfo=ET) - timedelta(days=7)
+    end = datetime(day.year, day.month, day.day, tzinfo=ET)
+    out: dict[str, float] = {}
+    chunks = [symbols[i:i + 200] for i in range(0, len(symbols), 200)]
+    while chunks:
+        chunk = chunks.pop()
+        params = {"symbols": ",".join(chunk), "timeframe": "1Day", "start": start.isoformat(),
+                  "end": end.isoformat(), "limit": 10000, "feed": "sip", "adjustment": "raw"}
+        try:
+            d = get("/v2/stocks/bars", params)
+        except urllib.error.HTTPError as e:
+            if e.code != 400:
+                raise
+            if len(chunk) > 1:
+                chunks += [chunk[: len(chunk) // 2], chunk[len(chunk) // 2:]]
+            continue
+        for sym, rows in (d.get("bars") or {}).items():
+            rows = [r for r in rows if r["t"][:10] < str(day)]  # daily bars are stamped at midnight ET = the day itself
+            if rows:
+                out[sym] = rows[-1]["c"]
+    return out
 
 
 def simulate(path: list[tuple], entry: float, side: int) -> float:
@@ -170,23 +199,32 @@ def label_pair(ts: int, bars: dict[int, tuple], spy: dict[int, tuple], flatten: 
     }
 
 
-def do_day(day: date, threshold: float) -> tuple[date, int]:
-    out = CACHE / f"{day}.jsonl"
+def do_day(day: date, threshold: float, premarket: bool = False) -> tuple[date, int]:
+    out = (CACHE_PRE if premarket else CACHE) / f"{day}.jsonl"
     if out.exists():
         return day, sum(1 for _ in open(out))
-    news = fetch_news(day)
+    news = fetch_news(day, ((7, 30), (9, 20)) if premarket else ((9, 31), (15, 30)))
     symbols = sorted({s for n in news for s in n["symbols"] if s.isascii() and s.replace(".", "").isalpha()} | {"SPY"})
     bars = fetch_bars(day, symbols) if news else {}
+    prev = fetch_prev_close(day, symbols) if news and premarket else {}
     spy = bars.get("SPY", {})
     flatten = int(datetime(day.year, day.month, day.day, 15, 50, tzinfo=ET).timestamp())
+    open_ts = int(datetime(day.year, day.month, day.day, 9, 30, tzinfo=ET).timestamp())
     rows = []
     for n in news:
         ts = int(datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp())
         syms = list(dict.fromkeys(n["symbols"]))
         for sym in syms:
-            lab = label_pair(ts, bars.get(sym, {}), spy, flatten) if spy else None
+            b = bars.get(sym, {})
+            # pre-market news is traded at the open: enter at the 09:31 bar, as if the news arrived at 09:30
+            lab = label_pair(open_ts if premarket else ts, b, spy, flatten) if spy else None
             if lab is None:
                 continue
+            if premarket:
+                first = b.get(open_ts)
+                lab["gap"] = round(lab["entry"] / prev[sym] - 1, 5) if prev.get(sym) else None
+                lab["spy_gap"] = round(spy[open_ts + 60][0] / prev["SPY"] - 1, 5) if prev.get("SPY") and open_ts + 60 in spy else None
+                lab["tradable"] = bool(first) and lab["entry"] >= 20 and first[4] >= 5000 and first[4] * first[3] >= 250_000
             ex, sl, ss = lab["excess_1h"] * 100, lab["sim_long"] * 100, lab["sim_short"] * 100
             rows.append({
                 "news_id": n["id"], "ts": n["created_at"], "ticker": sym, "headline": n["headline"],
@@ -210,8 +248,11 @@ def main() -> None:
     ap.add_argument("--threshold", type=float, default=1.0, help="label threshold in percent")
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--out", default=str(ROOT / "data" / "laya_alpaca_labels.jsonl"))
+    ap.add_argument("--premarket", action="store_true",
+                    help="news from 07:30-09:20 ET, traded at the open (09:31 -> 10:31); adds gap and spy_gap")
     args = ap.parse_args()
-    CACHE.mkdir(parents=True, exist_ok=True)
+    cache = CACHE_PRE if args.premarket else CACHE
+    cache.mkdir(parents=True, exist_ok=True)
 
     d, end, days = date.fromisoformat(args.start), date.fromisoformat(args.end), []
     while d <= end:
@@ -220,7 +261,7 @@ def main() -> None:
         d += timedelta(days=1)
     t0, total = time.time(), 0
     with ThreadPoolExecutor(args.workers) as pool:
-        for i, (day, n) in enumerate(pool.map(lambda x: do_day(x, args.threshold), days), 1):
+        for i, (day, n) in enumerate(pool.map(lambda x: do_day(x, args.threshold, args.premarket), days), 1):
             total += n
             if i % 10 == 0 or i == len(days):
                 print(f"{i}/{len(days)} days ({day}), {total} pairs, {time.time() - t0:.0f}s", flush=True)
@@ -228,7 +269,7 @@ def main() -> None:
     counts: dict[str, int] = {}
     with open(args.out, "w") as f:
         for day in days:
-            for line in open(CACHE / f"{day}.jsonl"):
+            for line in open(cache / f"{day}.jsonl"):
                 r = json.loads(line)
                 counts[r["label"]] = counts.get(r["label"], 0) + 1
                 f.write(line)
