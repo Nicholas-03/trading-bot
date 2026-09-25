@@ -9,7 +9,8 @@ Same news feed the bot trades live. Only regular-session news (09:31-15:30 ET) i
   sim_long / sim_short = the bot's bracket trade (stop-loss 2%, take-profit 3%, time exit), stop checked first
   tradable = entry >= $20 and the 8 minutes before entry average >= 1000 shares and >= $50k per minute
 Labels: `label` = buy / short / hold on excess_1h at +-1%;  `label_sim` = buy if sim_long >= 1%, short if sim_short >= 1%.
-Per-day results are cached in data/alpaca_labels/ (re-runs skip finished days); all days are merged into
+Also: react (entry vs the last close before the news), ex_5m/15m/30m/eod (excess return at other horizons).
+Per-day results are cached in data/alpaca_labels_v2/ (re-runs skip finished days); all days are merged into
 data/laya_alpaca_labels.jsonl.
 """
 import argparse
@@ -28,7 +29,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-CACHE = ROOT / "data" / "alpaca_labels"
+CACHE = ROOT / "data" / "alpaca_labels_v2"
 ET = ZoneInfo("America/New_York")
 DATA = "https://data.alpaca.markets"
 STOP, TAKE, HORIZON_MIN, LATENCY_S = 0.02, 0.03, 60, 60
@@ -145,7 +146,20 @@ def label_pair(ts: int, bars: dict[int, tuple], spy: dict[int, tuple], flatten: 
     ret = path[-1][3] / entry - 1
     spy_ret = spy[spy_last][3] / spy[entry_t][0] - 1
     pre = [bars[t] for t in range(entry_t - 30 * 60, entry_t, 60) if t in bars]
+    last_before = next((bars[t][3] for t in range(ts // 60 * 60 - 60, ts // 60 * 60 - 16 * 60, -60) if t in bars), None)
+
+    def ret_at(minutes: int, until: int | None = None) -> float | None:
+        """Raw return from entry to the close of the last bar before entry + minutes (or `until`), excess vs SPY."""
+        end = min(until or entry_t + minutes * 60, flatten)
+        t = next((t for t in range(end - 60, entry_t - 60, -60) if t in bars), None)
+        u = next((t for t in range(end - 60, entry_t - 60, -60) if t in spy), None)
+        if t is None or u is None:
+            return None
+        return round(bars[t][3] / entry - 1 - (spy[u][3] / spy[entry_t][0] - 1), 5)
+
     return {
+        "react": round(entry / last_before - 1, 5) if last_before else None,
+        "ex_5m": ret_at(5), "ex_15m": ret_at(15), "ex_30m": ret_at(30), "ex_eod": ret_at(0, flatten),
         "entry": round(entry, 4),
         "ret_1h": round(ret, 5),
         "excess_1h": round(ret - spy_ret, 5),

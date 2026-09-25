@@ -30,3 +30,4 @@ data/*
 models/
 kaggle/*/.dataset/
 kaggle/*/results/
+runs/

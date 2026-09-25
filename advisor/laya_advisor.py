@@ -67,16 +67,23 @@ def _position_for(ticker: str, held: set[str], shorted: set[str]) -> str:
     return "none"
 
 
-def _build_state(headline: str, summary: str, ticker: str, position: str) -> dict[str, str]:
+def _build_state(
+    headline: str, summary: str, ticker: str, position: str, reaction: float | None = None
+) -> dict[str, str]:
+    """`reaction`: the stock's return from the last close before the news to now (e.g. 0.012 for +1.2%).
+    Only models fine-tuned with it (finetune_laya.py --with-reaction) should be given it."""
     summary = (summary or "").strip()
     if len(summary) > _MAX_SUMMARY_CHARS:
         summary = summary[:_MAX_SUMMARY_CHARS].rstrip() + "..."
-    return {
+    state = {
         "headline": headline,
         "summary": summary or "(no summary)",
         "ticker": ticker,
         "current_position": position,
     }
+    if reaction is not None:
+        state["price_reaction"] = f"{reaction * 100:+.1f}% since the news"
+    return state
 
 
 def _build_questions(position: str) -> dict[str, dict[str, Any]]:

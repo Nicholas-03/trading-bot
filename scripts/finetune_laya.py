@@ -41,14 +41,18 @@ OPTIONS = list(_build_questions("none")["action"]["criteria"])  # ["buy", "short
 QUESTION = _build_questions("none")
 
 
-def load_rows(path, max_tickers=None, tradable_only=False, label_field="label"):
+def load_rows(path, max_tickers=None, tradable_only=False, label_field="label", threshold=1.0):
     rows = [json.loads(line) for line in open(path)]
     if max_tickers:
         rows = [r for r in rows if r["n_tickers"] <= max_tickers]
     if tradable_only:
         rows = [r for r in rows if r.get("tradable", True)]
     for r in rows:
-        r["label"] = r[label_field]
+        if label_field == "label_ret":  # raw 1h return, no bracket: what a plain 1h trade earns
+            x = r["ret_1h"] * 100
+            r["label"] = "buy" if x >= threshold else "short" if x <= -threshold else "hold"
+        else:
+            r["label"] = r[label_field]
     news_ids = sorted({r["news_id"] for r in rows}, key=lambda n: next(r["ts"] for r in rows if r["news_id"] == n))
     a, b = int(0.70 * len(news_ids)), int(0.85 * len(news_ids))
     split_of = {n: ("train" if i < a else "valid" if i < b else "test") for i, n in enumerate(news_ids)}
@@ -58,11 +62,12 @@ def load_rows(path, max_tickers=None, tradable_only=False, label_field="label"):
     return out
 
 
-def encode(agent, rows):
+def encode(agent, rows, with_reaction=False):
     internal = {"action": Agent._to_internal(QUESTION["action"])}
     groups = []
     for r in rows:
-        state = _build_state(r["headline"], r["summary"], r["ticker"], "none")
+        state = _build_state(r["headline"], r["summary"], r["ticker"], "none",
+                             r.get("react") if with_reaction else None)
         item = agent._encode_state(state, ["action"], internal)[0]
         item["label"] = OPTIONS.index(r["label"])
         groups.append([item])
@@ -93,11 +98,16 @@ def softmax(z, t=1.0):
     return e / e.sum(-1, keepdims=True)
 
 
+PNL = "raw"
+
+
 def trade_pnl(rows):
-    """% result of a long and of a short per row: the bot's bracket trade when simulated, else the raw 1h return."""
+    """% result of a long and of a short per row: the raw 1h return (no stop-loss / take-profit), or with
+    --pnl bracket the simulated 2%/3% bracket trade."""
     ret = np.array([r.get("ret_1h", r["excess_1h"]) for r in rows]) * 100
-    long_ = np.array([r["sim_long"] * 100 if "sim_long" in r else x for r, x in zip(rows, ret)])
-    short = np.array([r["sim_short"] * 100 if "sim_short" in r else -x for r, x in zip(rows, ret)])
+    bracket = PNL == "bracket"
+    long_ = np.array([r["sim_long"] * 100 if bracket and "sim_long" in r else x for r, x in zip(rows, ret)])
+    short = np.array([r["sim_short"] * 100 if bracket and "sim_short" in r else -x for r, x in zip(rows, ret)])
     shortable = np.array([r["ticker"] in _DEFAULT_SHORT_LIQUID_SYMBOLS for r in rows])
     return long_, short, shortable
 
@@ -159,22 +169,33 @@ def main():
                     help="balanced: weight each label by 1/frequency so the model can't win by always saying hold")
     ap.add_argument("--max-tickers", type=int, help="drop news that mention more than N tickers")
     ap.add_argument("--cost-pct", type=float, default=0.10, help="round-trip trading cost in percent")
-    ap.add_argument("--label-field", default="label", help="label (excess 1h return) or label_sim (bot bracket trade)")
+    ap.add_argument("--label-field", default="label",
+                    help="label (1h excess vs SPY), label_ret (raw 1h return) or label_sim (2%%/3%% bracket trade)")
+    ap.add_argument("--label-threshold", type=float, default=1.0, help="percent move for buy/short with label_ret")
+    ap.add_argument("--pnl", choices=["raw", "bracket"], default="raw", help="how trades are scored")
     ap.add_argument("--tradable-only", action="store_true", help="drop pairs the bot's price/liquidity gates would skip")
     ap.add_argument("--hold-frac", type=float, default=1.0, help="keep this fraction of train 'hold' pairs")
     ap.add_argument("--max-train", type=int, help="subsample train to at most N pairs (after --hold-frac)")
+    ap.add_argument("--with-reaction", action="store_true",
+                    help="give the model the price move from the news to entry (needs react in the labels)")
+    ap.add_argument("--max-eval", type=int, help="subsample valid and test to at most N pairs each")
     ap.add_argument("--freeze-layers", type=int, default=0, help="freeze the embeddings and the first N encoder layers")
     ap.add_argument("--grad-ckpt", action="store_true", help="gradient checkpointing (less GPU memory, slower)")
     args = ap.parse_args()
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     dev = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
-    data = load_rows(args.labels, args.max_tickers, args.tradable_only, args.label_field)
+    global PNL
+    PNL = args.pnl
+    data = load_rows(args.labels, args.max_tickers, args.tradable_only, args.label_field, args.label_threshold)
     rng = random.Random(args.seed)
     if args.hold_frac < 1:
         data["train"] = [r for r in data["train"] if r["label"] != "hold" or rng.random() < args.hold_frac]
     if args.max_train and len(data["train"]) > args.max_train:
         data["train"] = sorted(rng.sample(data["train"], args.max_train), key=lambda r: r["ts"])
+    for split in ("valid", "test"):
+        if args.max_eval and len(data[split]) > args.max_eval:
+            data[split] = sorted(rng.sample(data[split], args.max_eval), key=lambda r: r["ts"])
     if args.limit:
         data["train"] = data["train"][: args.limit]
         data["valid"] = data["valid"][: args.limit]
@@ -185,7 +206,7 @@ def main():
 
     agent = laya.load(args.base, subfolder=args.subfolder, device=str(dev))
     model, pad_id = agent.model.float(), agent.tok.pad_token_id
-    enc = {s: encode(agent, rows) for s, rows in data.items()}
+    enc = {s: encode(agent, rows, args.with_reaction) for s, rows in data.items()}
 
     base_t = agent.temperature_by_options.get("choice:3-5", agent.temperature[0])
     base_valid = metrics(softmax(logits_of(model, enc["valid"], pad_id, dev), base_t), data["valid"])
@@ -287,6 +308,7 @@ def save(model, agent, args, best, history, data):
                                             "class_weights": args.class_weights, "max_tickers": args.max_tickers,
                                             "label_field": args.label_field, "tradable_only": args.tradable_only,
                                             "hold_frac": args.hold_frac, "freeze_layers": args.freeze_layers,
+                                            "with_reaction": args.with_reaction,
                                             "pairs": {s: len(r) for s, r in data.items()},
                                             "lr": args.lr, "head_lr": args.head_lr, "seed": args.seed,
                                             "frozen": "encoder.embeddings.tok_embeddings", "history": history}}

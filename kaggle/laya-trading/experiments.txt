@@ -1,3 +1,3 @@
-# <name> <finetune_laya.py args>, one GPU run each
-w_all   --labels data/laya_price_labels.jsonl --epochs 4
-w_max2  --labels data/laya_price_labels.jsonl --epochs 4 --max-tickers 2
+# <name> <finetune_laya.py args>, one GPU run each. P&L = raw 1h return after 60s latency, minus 0.1% cost.
+f_ret        --labels data/laya_alpaca_labels_v2.jsonl --label-field label_ret --tradable-only --hold-frac 0.3 --max-train 60000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2
+f_ret_react  --labels data/laya_alpaca_labels_v2.jsonl --label-field label_ret --tradable-only --hold-frac 0.3 --max-train 60000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2 --with-reaction
