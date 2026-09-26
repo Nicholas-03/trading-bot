@@ -27,3 +27,7 @@ AGENTS.md
 data/trades.db
 CLAUDE.md
 data/*
+models/
+kaggle/*/.dataset/
+kaggle/*/results/
+runs/

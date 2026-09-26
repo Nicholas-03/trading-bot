@@ -1,0 +1,5 @@
+# <name> <finetune_laya.py args>, one GPU run each. P&L = 1h return after 60s latency, minus cost.
+# Earlier (2026-09-25, 2024-26 labels, raw 1h return): f_ret, f_ret_react -> no edge (see memory / results/logs).
+# 2021-2026 labels (data/laya_labels_2021_2026.jsonl), label and P&L = 1h move minus SPY's (hedged), test = last 15% (~2025-06..2026-09).
+xs_big       --labels data/laya_labels_2021_2026.jsonl --label-field label_excess --pnl excess --cost-pct 0.15 --tradable-only --hold-frac 0.25 --max-train 100000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2 --lr 1e-5
+xs_big_react --labels data/laya_labels_2021_2026.jsonl --label-field label_excess --pnl excess --cost-pct 0.15 --tradable-only --hold-frac 0.25 --max-train 100000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2 --lr 1e-5 --with-reaction

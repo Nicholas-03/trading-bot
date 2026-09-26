@@ -8,7 +8,7 @@ from trading.tradier_client import TradierClient, TradierOrder
 from config import load_config, Config
 from trading.order_executor import OrderExecutor
 from trading.alpaca_data_client import AlpacaMarketDataClient
-from llm.llm_advisor import LLMAdvisor
+from advisor.laya_advisor import LayaAdvisor
 from news.news_handler import NewsHandler
 from trading.position_monitor import PositionMonitor
 from notifications.telegram_notifier import TelegramNotifier, TelegramCommandListener, TelegramLogHandler, NoOpNotifier
@@ -320,8 +320,9 @@ async def main() -> None:
             )
             order_executor.seed_from_db(open_trades)
             logger.info("Seeded %d open trade(s) from analytics DB", len(open_trades))
-        llm_advisor = LLMAdvisor(config)
-        news_handler = NewsHandler(client, config, llm_advisor, order_executor, db, market_data_client)
+        advisor = LayaAdvisor(config)
+        await asyncio.to_thread(advisor.load)
+        news_handler = NewsHandler(client, config, advisor, order_executor, db)
         position_monitor = PositionMonitor(client, config, order_executor, notifier, db, market_data_client)
 
         coroutines = [news_handler.run(), position_monitor.run()]
