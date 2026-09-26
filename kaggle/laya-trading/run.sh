@@ -19,7 +19,7 @@ case "${1:-}" in
     rm -rf "$STAGE" && mkdir -p "$STAGE"
     cp config.py advisor/laya_advisor.py scripts/finetune_laya.py scripts/predict_laya.py "$STAGE/"
     cp "$HERE/experiments.txt" kaggle/laya-eval/eval.txt kaggle/laya-premarket/experiments_premarket.txt "$STAGE/"
-    cp data/laya_alpaca_labels_v2.jsonl data/laya_premarket.jsonl "$STAGE/"
+    cp data/laya_alpaca_labels_v2.jsonl data/laya_premarket.jsonl data/laya_labels_2021_2026.jsonl "$STAGE/"
     printf '{"title": "Trading Bot Laya Finetune Data", "id": "%s", "licenses": [{"name": "other"}]}\n' "$DATASET" \
       > "$STAGE/dataset-metadata.json"
     if kaggle datasets status "$DATASET" >/dev/null 2>&1; then

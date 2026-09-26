@@ -48,12 +48,15 @@ def load_rows(path, max_tickers=None, tradable_only=False, label_field="label", 
     if tradable_only:
         rows = [r for r in rows if r.get("tradable", True)]
     for r in rows:
-        if label_field == "label_ret":  # raw 1h return, no bracket: what a plain 1h trade earns
-            x = r["ret_1h"] * 100
+        if label_field in ("label_ret", "label_excess"):  # 1h return (raw, or minus SPY's), no bracket
+            x = (r["ret_1h"] if label_field == "label_ret" else r["excess_1h"]) * 100
             r["label"] = "buy" if x >= threshold else "short" if x <= -threshold else "hold"
         else:
             r["label"] = r[label_field]
-    news_ids = sorted({r["news_id"] for r in rows}, key=lambda n: next(r["ts"] for r in rows if r["news_id"] == n))
+    first_ts = {}
+    for r in rows:
+        first_ts[r["news_id"]] = min(first_ts.get(r["news_id"], r["ts"]), r["ts"])
+    news_ids = sorted(first_ts, key=lambda n: (first_ts[n], n))
     a, b = int(0.70 * len(news_ids)), int(0.85 * len(news_ids))
     split_of = {n: ("train" if i < a else "valid" if i < b else "test") for i, n in enumerate(news_ids)}
     out = {"train": [], "valid": [], "test": []}
@@ -104,11 +107,12 @@ PNL = "raw"
 def trade_pnl(rows):
     """% result of a long and of a short per row: the raw 1h return (no stop-loss / take-profit), or with
     --pnl bracket the simulated 2%/3% bracket trade."""
-    ret = np.array([r.get("ret_1h", r["excess_1h"]) for r in rows]) * 100
+    field = "excess_1h" if PNL == "excess" else "ret_1h"  # excess: long/short the stock hedged with SPY
+    ret = np.array([r.get(field, r["excess_1h"]) for r in rows]) * 100
     bracket = PNL == "bracket"
     long_ = np.array([r["sim_long"] * 100 if bracket and "sim_long" in r else x for r, x in zip(rows, ret)])
     short = np.array([r["sim_short"] * 100 if bracket and "sim_short" in r else -x for r, x in zip(rows, ret)])
-    shortable = np.array([r["ticker"] in _DEFAULT_SHORT_LIQUID_SYMBOLS for r in rows])
+    shortable = np.array([r["ticker"] in _DEFAULT_SHORT_LIQUID_SYMBOLS or PNL == "excess" for r in rows])
     return long_, short, shortable
 
 
@@ -124,6 +128,14 @@ def trade_stats(probs, rows, cost_pct):
         pnl = np.where(pred == 0, long_, short)[acted] - cost_pct
         out[f"c{gate:.1f}"] = (int(acted.sum()), round(float(pnl.mean()), 3) if acted.any() else 0.0,
                                round(float((pnl > 0).mean()), 2) if acted.any() else 0.0)
+    # Rank gates, independent of calibration: buy the top q by p(buy) - p(short), short the bottom q.
+    score = probs[:, 0] - probs[:, 1]
+    for q in (0.10, 0.02, 0.005):
+        lo, hi = np.quantile(score, [q, 1 - q])
+        acted = (score >= hi) | ((score <= lo) & shortable)
+        pnl = np.where(score >= hi, long_, short)[acted] - cost_pct
+        out[f"top{q:g}"] = (int(acted.sum()), round(float(pnl.mean()), 3) if acted.any() else 0.0,
+                            round(float(pnl.std() / np.sqrt(max(1, acted.sum()))), 3) if acted.any() else 0.0)
     return out
 
 
@@ -172,7 +184,8 @@ def main():
     ap.add_argument("--label-field", default="label",
                     help="label (1h excess vs SPY), label_ret (raw 1h return) or label_sim (2%%/3%% bracket trade)")
     ap.add_argument("--label-threshold", type=float, default=1.0, help="percent move for buy/short with label_ret")
-    ap.add_argument("--pnl", choices=["raw", "bracket"], default="raw", help="how trades are scored")
+    ap.add_argument("--pnl", choices=["raw", "bracket", "excess"], default="raw",
+                    help="how trades are scored (excess: the 1h move minus SPY's, i.e. hedged)")
     ap.add_argument("--tradable-only", action="store_true", help="drop pairs the bot's price/liquidity gates would skip")
     ap.add_argument("--hold-frac", type=float, default=1.0, help="keep this fraction of train 'hold' pairs")
     ap.add_argument("--max-train", type=int, help="subsample train to at most N pairs (after --hold-frac)")
