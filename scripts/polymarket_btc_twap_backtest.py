@@ -47,8 +47,9 @@ def load(paths: list[str]):
                 cl.append((r["t"], r["ts"], r["v"]))
             elif k == "m":
                 markets[r["slug"]] = r
-    for v in books.values():
-        v.sort()
+    for k, v in books.items():
+        v.sort(key=lambda r: r[0])
+        books[k] = ([r[0] for r in v], v)
     return markets, sorted(cl), sorted(bn), books
 
 
@@ -148,10 +149,10 @@ def main():
                     bk = books.get(tok)
                     if not bk:
                         continue
-                    i = bisect.bisect_right(bk, (now + lat * 1000, 9e9)) - 1
-                    if i < 0 or bk[i][3] is None:
+                    i = bisect.bisect_right(bk[0], now + lat * 1000) - 1
+                    if i < 0 or bk[1][i][3] is None:
                         continue
-                    ask, size = bk[i][3], bk[i][4]
+                    ask, size = bk[1][i][3], bk[1][i][4]
                     edge = pw - ask
                     for thr in (0.03, 0.05, 0.10, 0.20):
                         if edge >= thr and size >= 5 and 0.02 <= ask <= 0.98 and now - last.get((thr, side), -1e12) >= 30000:
