@@ -61,7 +61,7 @@ def markets(n: int, min_volume: float) -> list[dict]:
                     continue  # binary, cleanly resolved, liquid enough
                 out.append({"q": m["question"], "yes": prices[0] == 1.0, "token": json.loads(m["clobTokenIds"])[0],
                             "end": ts(m.get("endDate")), "closed": ts(m.get("closedTime")) or ts(m.get("endDate")),
-                            "volume": float(m["volumeNum"])})
+                            "volume": float(m["volumeNum"]), "cid": m.get("conditionId")})
                 taken += 1
     return out
 
