@@ -35,7 +35,7 @@ case "${1:-}" in
   status)   kaggle kernels status "$KERNEL" ;;
   logs)     kaggle kernels logs "$KERNEL" ;;
   results)
-    rm -rf "$HERE/results" && mkdir -p "$HERE/results"
+    mkdir -p "$HERE/results" && rm -rf "$HERE/results/logs"   # keep results/eval (from eval-results)
     kaggle kernels output "$KERNEL" -p "$HERE/results" --file-pattern '.*(\.log|test_predictions\.jsonl|rl_agent_config\.json)$' ;;
   download)
     name=${2:?experiment name}
