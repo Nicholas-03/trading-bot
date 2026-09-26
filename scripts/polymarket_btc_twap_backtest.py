@@ -40,7 +40,7 @@ def load(paths: list[str]):
                 continue
             k = r["k"]
             if k == "bk":
-                books[r["a"]].append((r["t"], r["b"], r["bs"], r["x"], r["xs"]))
+                books[r["a"]].append((r.get("ts", r["t"]), r["b"], r["bs"], r["x"], r["xs"]))  # server time if recorded
             elif k == "bn":
                 bn.append((r["t"], r["p"]))
             elif k == "cl":
