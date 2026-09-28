@@ -17,6 +17,10 @@ A stock gets one real position at a time (Alpaca nets positions per symbol): the
 books on the same stock are recorded as virtual trades at their own reference price, so all books are scored the
 same way (reference price -> close of the exit day, minus SPY). Every signal is logged with Alpaca's shortable /
 easy-to-borrow flags, since borrow availability is the main unknown. Refuses to run against a live account.
+
+Logs: results/drift5d_paper.jsonl (signals, orders, fills, covers, a daily account snapshot) and
+results/drift5d_observed.jsonl (every scored first hour of the day, traded or not, with the news text and the borrow flags
+at that moment: the part of the dataset that cannot be rebuilt from Alpaca's history later).
 """
 import argparse
 import json
@@ -35,6 +39,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_alpaca_labels as bal  # noqa: E402
 
 LOG = ROOT / "results" / "drift5d_paper.jsonl"
+OBSERVED = ROOT / "results" / "drift5d_observed.jsonl"  # every scored first hour, traded or not: a growing dataset
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
 MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
@@ -84,7 +89,11 @@ def exit_date(entry_day: str) -> str | None:
 
 def first_hours(day: date, now_ts: float, skip: set[str] = frozenset()) -> list[dict]:
     """Scored first news of each stock today whose first hour is over by now_ts (stocks in `skip` are left out)."""
-    news = [n for n in bal.fetch_news(day) if datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp() < now_ts]
+    # Alpaca filters news by update time: keep stories written in the session (09:31-15:30 ET), as the backtest labels did
+    lo = datetime(day.year, day.month, day.day, 9, 31, tzinfo=bal.ET).timestamp()
+    hi = datetime(day.year, day.month, day.day, 15, 30, tzinfo=bal.ET).timestamp()
+    news = [n for n in bal.fetch_news(day)
+            if lo <= datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp() <= min(hi, now_ts)]
     first: dict[str, dict] = {}
     for n in sorted(news, key=lambda n: n["created_at"]):
         for sym in dict.fromkeys(n["symbols"]):
@@ -108,6 +117,7 @@ def first_hours(day: date, now_ts: float, skip: set[str] = frozenset()) -> list[
             out.append({"ticker": sym, "scored": False})
             continue
         out.append({"ticker": sym, "scored": True, "news_id": n["id"], "news_ts": n["created_at"], "headline": n["headline"],
+                    "summary": n.get("summary") or "", "source": n.get("source") or "", "n_tickers": len(set(n["symbols"])),
                     "first_hour_excess": lab["excess_1h"], "entry_1m": lab["entry"], "tradable_gate": lab["tradable"],
                     "last": b[max(b)][3], "spy_last": spy[max(spy)][3]})
     return out
@@ -156,6 +166,35 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
          "entry": "close" if tif == "cls" else "hour", "order": resp})
 
 
+def observe(s: dict, today: date, when: str) -> None:
+    """Append a scored first hour to OBSERVED with Alpaca's borrow flags at that moment (not recoverable later)."""
+    asset = trading("GET", f"/assets/{s['ticker']}") if s["scored"] else {}
+    with open(OBSERVED, "a") as f:
+        f.write(json.dumps({"logged": datetime.now(timezone.utc).isoformat(), "day": today.isoformat(), "when": when, **s,
+                            "shortable": asset.get("shortable"), "easy_to_borrow": asset.get("easy_to_borrow"),
+                            "marginable": asset.get("marginable"), "exchange": asset.get("exchange")}) + "\n")
+
+
+def observed_today(today: date) -> set[str]:
+    if not OBSERVED.exists():
+        return set()
+    return {r["ticker"] for r in map(json.loads, open(OBSERVED)) if r["day"] == today.isoformat()}
+
+
+def check_fills() -> None:
+    """Log the outcome (fill price, or cancel/reject) of every real order that has none logged yet."""
+    evs = read_log()
+    settled = {e["order_id"] for e in evs if e.get("event") == "fill"}
+    for e in evs:
+        oid = (e.get("order") or {}).get("id")
+        if e.get("event") in ("short", "cover") and oid and oid not in settled:
+            o = trading("GET", f"/orders/{oid}")
+            if o.get("status") in ("filled", "canceled", "expired", "rejected", "done_for_day"):
+                log({"event": "fill", "order_id": oid, "book": e.get("book"), "ticker": e["ticker"], "side": o.get("side"),
+                     "status": o["status"], "filled_qty": o.get("filled_qty"), "filled_avg_price": o.get("filled_avg_price"),
+                     "filled_at": o.get("filled_at"), "for": e["event"], "day": e.get("day") or e.get("entry_day")})
+
+
 def qualifies(kind: str, s: dict) -> bool:
     return s["scored"] and (s["first_hour_excess"] <= -0.10 if kind == "drop" else s["first_hour_excess"] >= 0.10)
 
@@ -165,12 +204,13 @@ def intraday(today: date | None = None) -> None:
     today = today or datetime.now(bal.ET).date()
     if today.isoformat() not in trading_days(today, today):
         return
-    done: set[str] = set()
+    done = observed_today(today)  # after a restart, carry on where the scan left off
     end = datetime(today.year, today.month, today.day, 15, 44, tzinfo=bal.ET).timestamp()
     while time.time() < end:
         try:
             for s in first_hours(today, time.time(), skip=done):
                 done.add(s["ticker"])
+                observe(s, today, "hour")
                 for book, (kind, when) in BOOKS.items():
                     if when == "hour" and qualifies(kind, s):
                         enter(book, s, today, "day")
@@ -186,6 +226,10 @@ def day(today: date | None = None) -> None:
     if today.isoformat() not in trading_days(today, today):
         print(today, "is not a trading day")
         return
+    check_fills()
+    acct = trading("GET", "/account")
+    log({"event": "account", "day": today.isoformat(), **{k: acct.get(k) for k in
+         ("equity", "cash", "long_market_value", "short_market_value", "buying_power")}})
     pos = positions()
     for e in read_log():
         if (e.get("event") == "short" and not e.get("virtual") and e.get("exit_day") and e["exit_day"] <= today.isoformat()
@@ -196,7 +240,10 @@ def day(today: date | None = None) -> None:
                                                "time_in_force": "cls"})
             log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
             print("cover", e["ticker"], qty, resp.get("status", resp), flush=True)
+    seen = observed_today(today)
     for s in first_hours(today, time.time() + 3600):  # every first news of the day, windows ending by 15:50 at the latest
+        if s["ticker"] not in seen:
+            observe(s, today, "close")
         for book, (kind, when) in BOOKS.items():
             if when == "close" and qualifies(kind, s):
                 enter(book, s, today, "cls")
@@ -223,6 +270,7 @@ def daemon() -> None:
 
 
 def report() -> None:
+    check_fills()
     evs = read_log()
     today = datetime.now(bal.ET).date().isoformat()
     for book in BOOKS:
