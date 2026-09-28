@@ -1,0 +1,8 @@
+{
+  "frozen_at": "2026-09-28",
+  "found_on": "tradable pairs 2021-01..2026-09 (data/laya_daily_labels.jsonl): first-hour excess <= -10% -> 5-day excess short +12.3% mean (n=388), monotone in the threshold",
+  "rule": "regular-session news 09:31-15:30 ET on a stock; first_hour = SPY-hedged return from the open of the first 1-min bar >= news+60s to 60 minutes later (flattened 15:50 ET); if first_hour <= -10% (first qualifying news per stock and day): SHORT at the news day's close, cover at the close 5 trading days later; P&L = stock return minus SPY's over the same closes",
+  "primary_metric": "mean and median 5-day SPY-hedged short return after 0.5% cost, clustered by entry day",
+  "pass_if": "hold-out mean > 0 with day-clustered t > 2 and median > 0",
+  "hold_outs": ["pairs the bot's price/liquidity gates skip (tradable=false), same years", "forward paper trading from 2026-09-28"]
+}

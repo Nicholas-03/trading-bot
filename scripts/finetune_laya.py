@@ -41,8 +41,15 @@ OPTIONS = list(_build_questions("none")["action"]["criteria"])  # ["buy", "short
 QUESTION = _build_questions("none")
 
 
-def load_rows(path, max_tickers=None, tradable_only=False, label_field="label", threshold=1.0):
+def load_rows(path, max_tickers=None, tradable_only=False, label_field="label", threshold=1.0, ret_field=None,
+              react_field=None):
     rows = [json.loads(line) for line in open(path)]
+    for r in rows:
+        r["hour_excess"] = r.get("excess_1h")
+        if ret_field:  # score and label another horizon: it stands in for both the raw and the excess 1h return
+            r["ret_1h"] = r["excess_1h"] = r[ret_field]
+        if react_field:  # what the model is told happened after the news (default: the first-minute move)
+            r["react"] = r[react_field] if react_field != "hour_excess" else r["hour_excess"]
     if max_tickers:
         rows = [r for r in rows if r["n_tickers"] <= max_tickers]
     if tradable_only:
@@ -191,6 +198,8 @@ def main():
     ap.add_argument("--max-train", type=int, help="subsample train to at most N pairs (after --hold-frac)")
     ap.add_argument("--with-reaction", action="store_true",
                     help="give the model the price move from the news to entry (needs react in the labels)")
+    ap.add_argument("--ret-field", help="use this return field (e.g. d5_excess) instead of the 1h return for labels and P&L")
+    ap.add_argument("--react-field", help="field shown to the model as the reaction with --with-reaction (e.g. hour_excess)")
     ap.add_argument("--max-eval", type=int, help="subsample valid and test to at most N pairs each")
     ap.add_argument("--freeze-layers", type=int, default=0, help="freeze the embeddings and the first N encoder layers")
     ap.add_argument("--grad-ckpt", action="store_true", help="gradient checkpointing (less GPU memory, slower)")
@@ -200,7 +209,8 @@ def main():
 
     global PNL
     PNL = args.pnl
-    data = load_rows(args.labels, args.max_tickers, args.tradable_only, args.label_field, args.label_threshold)
+    data = load_rows(args.labels, args.max_tickers, args.tradable_only, args.label_field, args.label_threshold,
+                     args.ret_field, args.react_field)
     rng = random.Random(args.seed)
     if args.hold_frac < 1:
         data["train"] = [r for r in data["train"] if r["label"] != "hold" or rng.random() < args.hold_frac]
@@ -296,7 +306,7 @@ def main():
             for name, z, t in (("laya_base", zb, base_t), ("laya_ft", zf, best["temperature"])):
                 p = softmax(z, t)
                 f.write(json.dumps({"model": name, "news_id": r["news_id"], "ticker": r["ticker"],
-                                    "label": r["label"], "excess_1h": r["excess_1h"],
+                                    "label": r["label"], "excess_1h": r["excess_1h"], "hour_excess": r["hour_excess"],
                                     "probs": dict(zip(OPTIONS, map(float, p))),
                                     "confidence": confidence_from_probs(p, 3)}) + "\n")
 
