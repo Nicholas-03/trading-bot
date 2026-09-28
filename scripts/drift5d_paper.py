@@ -44,6 +44,7 @@ HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
 MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
 MIN_PRICE = 2.0
+SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
 BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_hour": ("pop", "hour")}
 
 
@@ -107,7 +108,7 @@ def first_hours(day: date, now_ts: float, skip: set[str] = frozenset()) -> list[
             due[sym] = (n, ts)
     if not due:
         return []
-    bars = bal.fetch_bars(day, sorted(set(due) | {"SPY"}))
+    bars, tail = live_bars(day, sorted(set(due) | {"SPY"}), now_ts)
     spy = bars.get("SPY", {})
     out = []
     for sym, (n, ts) in due.items():
@@ -119,8 +120,55 @@ def first_hours(day: date, now_ts: float, skip: set[str] = frozenset()) -> list[
         out.append({"ticker": sym, "scored": True, "news_id": n["id"], "news_ts": n["created_at"], "headline": n["headline"],
                     "summary": n.get("summary") or "", "source": n.get("source") or "", "n_tickers": len(set(n["symbols"])),
                     "first_hour_excess": lab["excess_1h"], "entry_1m": lab["entry"], "tradable_gate": lab["tradable"],
-                    "last": b[max(b)][3], "spy_last": spy[max(spy)][3]})
+                    "last": b[max(b)][3], "spy_last": spy[max(spy)][3], "last_bar": max(b), "iex_tail": tail})
     return out
+
+
+def live_bars(day: date, symbols: list[str], now_ts: float) -> tuple[dict, bool]:
+    """1-minute bars as in the backtest (SIP, all exchanges). Alpaca's free plan serves SIP only 15 minutes delayed,
+    so the last SIP_DELAY minutes come from the real-time IEX feed (one exchange: thinner, but real trade prices)."""
+    if time.time() - SIP_DELAY >= _ts(day, 16, 0):  # a past session: all SIP
+        return bal.fetch_bars(day, symbols), False
+    cut = int(time.time() - SIP_DELAY) // 60 * 60
+    sip = fetch_bars_feed(symbols, _ts(day, 9, 0), cut, "sip")
+    for sym, rows in fetch_bars_feed(symbols, cut, int(time.time()) + 60, "iex").items():
+        m = sip.setdefault(sym, {})
+        for t, bar in rows.items():
+            m.setdefault(t, bar)
+    return sip, True
+
+
+def _ts(day: date, h: int, m: int) -> int:
+    return int(datetime(day.year, day.month, day.day, h, m, tzinfo=bal.ET).timestamp())
+
+
+def fetch_bars_feed(symbols: list[str], start: int, end: int, feed: str) -> dict[str, dict[int, tuple]]:
+    """{symbol: {minute_epoch: (o, h, l, c, v)}} for [start, end) from one feed; invalid symbols are dropped by bisection."""
+    bars: dict[str, dict[int, tuple]] = {}
+    chunks = [symbols[i:i + 200] for i in range(0, len(symbols), 200)]
+    while chunks:
+        chunk = chunks.pop()
+        params = {"symbols": ",".join(chunk), "timeframe": "1Min", "limit": 10000, "feed": feed, "adjustment": "raw",
+                  "start": datetime.fromtimestamp(start, timezone.utc).isoformat(),
+                  "end": datetime.fromtimestamp(end, timezone.utc).isoformat()}
+        token = None
+        while True:
+            try:
+                d = bal.get("/v2/stocks/bars", {**params, **({"page_token": token} if token else {})})
+            except urllib.error.HTTPError as e:
+                if e.code != 400 or token:
+                    raise
+                if len(chunk) > 1:
+                    chunks += [chunk[: len(chunk) // 2], chunk[len(chunk) // 2:]]
+                break
+            for sym, rows in (d.get("bars") or {}).items():
+                m = bars.setdefault(sym, {})
+                for b in rows:
+                    m[int(datetime.fromisoformat(b["t"].replace("Z", "+00:00")).timestamp())] = (b["o"], b["h"], b["l"], b["c"], b["v"])
+            token = d.get("next_page_token")
+            if not token:
+                break
+    return bars
 
 
 def positions() -> dict[str, dict]:
@@ -249,6 +297,12 @@ def day(today: date | None = None) -> None:
                 enter(book, s, today, "cls")
 
 
+def sleep_until(ts: float) -> None:
+    """Sleep in short steps against the wall clock (one long sleep can overrun, e.g. across a system sleep)."""
+    while time.time() < ts:
+        time.sleep(min(60.0, ts - time.time()))
+
+
 def daemon() -> None:
     while True:
         now = datetime.now(bal.ET)
@@ -257,11 +311,10 @@ def daemon() -> None:
         if now > close:
             start += timedelta(days=1)
             close += timedelta(days=1)
-        if now < start:
-            time.sleep((start - now).total_seconds())
+        sleep_until(start.timestamp())
         try:
             intraday()
-            time.sleep(max(0.0, close.timestamp() - time.time()))
+            sleep_until(close.timestamp())
             day()
         except Exception as exc:  # keep the daemon alive; the next day retries covers too
             log({"event": "error", "error": repr(exc)})
