@@ -36,14 +36,16 @@ MIN_PRICE = 2.0
 
 
 def trading(method: str, path: str, body: dict | None = None, params: dict | None = None):
-    base = os.environ["ALPACA_BASE_URL"].rstrip("/")
+    # the dedicated paper account (ALPACA_PAPER2_*) if configured, else the bot's Alpaca account
+    pre = "ALPACA_PAPER2_" if os.environ.get("ALPACA_PAPER2_API_KEY") else "ALPACA_"
+    base = os.environ[pre + "BASE_URL"].rstrip("/")
     if "paper" not in base:
         sys.exit("ALPACA_BASE_URL is not a paper account; this script only paper-trades")
     base = base if base.endswith("/v2") else base + "/v2"
     url = base + path + ("?" + bal.urllib.parse.urlencode(params) if params else "")
     req = urllib.request.Request(url, method=method, data=json.dumps(body).encode() if body else None,
-                                 headers={"APCA-API-KEY-ID": os.environ["ALPACA_API_KEY"],
-                                          "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET_KEY"],
+                                 headers={"APCA-API-KEY-ID": os.environ[pre + "API_KEY"],
+                                          "APCA-API-SECRET-KEY": os.environ[pre + "SECRET_KEY"],
                                           "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
