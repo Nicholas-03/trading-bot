@@ -1,15 +1,22 @@
-"""Forward paper test of the frozen 5-day post-news drift rule (results/frozen_rule_drift5d.json) on Alpaca PAPER.
+"""Forward paper test of the 5-day post-news drift (results/frozen_rule_drift5d.json, scripts/study_drift.py) on Alpaca PAPER.
 
-    .venv/bin/python scripts/drift5d_paper.py day      # once per trading day, between 15:45 and 15:49 ET
-    .venv/bin/python scripts/drift5d_paper.py daemon   # waits for 15:46 ET every trading day and runs `day`
-    .venv/bin/python scripts/drift5d_paper.py report   # realised and open P&L of the paper trades
+    .venv/bin/python scripts/drift5d_paper.py daemon   # every trading day: intraday scan 10:32-15:44 ET, close run 15:46 ET
+    .venv/bin/python scripts/drift5d_paper.py day      # the close run only (covers, drop_close entries)
+    .venv/bin/python scripts/drift5d_paper.py intraday # the intraday scan only (until 15:44 ET)
+    .venv/bin/python scripts/drift5d_paper.py report   # P&L per book
+    .venv/bin/python scripts/drift5d_paper.py scan --date YYYY-MM-DD   # what the rule flags on a past day, no orders
 
-`day`: covers (buy at the close) positions entered 5 trading days ago; then scans today's news (09:31-15:30 ET) with
-the exact label code used in the backtest (scripts/build_alpaca_labels.py, bars up to now) and, for each stock whose
-first hour after news fell >= 10% versus SPY (first such news per stock today, price >= $2), sells short
-NOTIONAL_USD at the close (market-on-close) if Alpaca lets it be shorted. Every qualifying stock is logged, shortable
-or not, to results/drift5d_paper.jsonl, because borrow availability is the main unknown of this edge.
-Refuses to run against a live (non-paper) Alpaca account.
+The first regular-session news of each stock and day (09:31-15:30 ET) is scored exactly as in the backtest labels
+(scripts/build_alpaca_labels.py label_pair): first hour = SPY-hedged return from the first 1-minute bar >= news + 60 s
+to 60 minutes later (15:50 ET at the latest). Three books, each short NOTIONAL_USD per signal and covered at the close
+5 trading days after the news day:
+  drop_close  first hour <= -10%, short at the news day's close (the frozen rule)
+  drop_hour   first hour <= -10%, short as soon as the first hour is over (backtest: +8.1% vs +7.0% at the close)
+  pop_hour    first hour >= +10%, short as soon as the first hour is over (backtest, at the close: +5.2%)
+A stock gets one real position at a time (Alpaca nets positions per symbol): the first book to fire trades it, later
+books on the same stock are recorded as virtual trades at their own reference price, so all books are scored the
+same way (reference price -> close of the exit day, minus SPY). Every signal is logged with Alpaca's shortable /
+easy-to-borrow flags, since borrow availability is the main unknown. Refuses to run against a live account.
 """
 import argparse
 import json
@@ -28,11 +35,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import build_alpaca_labels as bal  # noqa: E402
 
 LOG = ROOT / "results" / "drift5d_paper.jsonl"
-THRESHOLD = -0.10
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
-MAX_OPEN = 15
+MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
 MIN_PRICE = 2.0
+BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_hour": ("pop", "hour")}
 
 
 def trading(method: str, path: str, body: dict | None = None, params: dict | None = None):
@@ -75,123 +82,187 @@ def exit_date(entry_day: str) -> str | None:
     return days[HOLD_DAYS - 1] if len(days) >= HOLD_DAYS else None
 
 
-def signals(day: date) -> list[dict]:
-    """Qualifying (news, stock) pairs today, computed exactly as in the backtest labels, with bars up to now."""
-    news = bal.fetch_news(day)
-    symbols = sorted({s for n in news for s in n["symbols"] if s.isascii() and s.replace(".", "").isalpha()} | {"SPY"})
-    bars = bal.fetch_bars(day, symbols) if news else {}
-    spy = bars.get("SPY", {})
-    flatten = int(datetime(day.year, day.month, day.day, 15, 50, tzinfo=bal.ET).timestamp())
-    best: dict[str, dict] = {}
+def first_hours(day: date, now_ts: float, skip: set[str] = frozenset()) -> list[dict]:
+    """Scored first news of each stock today whose first hour is over by now_ts (stocks in `skip` are left out)."""
+    news = [n for n in bal.fetch_news(day) if datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp() < now_ts]
+    first: dict[str, dict] = {}
     for n in sorted(news, key=lambda n: n["created_at"]):
-        ts = int(datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp())
         for sym in dict.fromkeys(n["symbols"]):
-            if sym in best or not spy:
-                continue
-            lab = bal.label_pair(ts, bars.get(sym, {}), spy, flatten)
-            if lab and lab["excess_1h"] <= THRESHOLD:
-                best[sym] = {"ticker": sym, "news_id": n["id"], "news_ts": n["created_at"], "headline": n["headline"],
-                             "first_hour_excess": lab["excess_1h"], "entry_1m": lab["entry"], "tradable_gate": lab["tradable"],
-                             "last": bars[sym][max(bars[sym])][3]}
-    return list(best.values())
+            if sym.isascii() and sym.replace(".", "").isalpha():
+                first.setdefault(sym, n)
+    flatten = int(datetime(day.year, day.month, day.day, 15, 50, tzinfo=bal.ET).timestamp())
+    due = {}
+    for sym, n in first.items():
+        ts = int(datetime.fromisoformat(n["created_at"].replace("Z", "+00:00")).timestamp())
+        if sym not in skip and min(ts + 60 + 3660, flatten) <= now_ts:  # entry bar + 60 minutes are behind us
+            due[sym] = (n, ts)
+    if not due:
+        return []
+    bars = bal.fetch_bars(day, sorted(set(due) | {"SPY"}))
+    spy = bars.get("SPY", {})
+    out = []
+    for sym, (n, ts) in due.items():
+        b = bars.get(sym, {})
+        lab = bal.label_pair(ts, b, spy, flatten) if spy and b else None
+        if not lab:
+            out.append({"ticker": sym, "scored": False})
+            continue
+        out.append({"ticker": sym, "scored": True, "news_id": n["id"], "news_ts": n["created_at"], "headline": n["headline"],
+                    "first_hour_excess": lab["excess_1h"], "entry_1m": lab["entry"], "tradable_gate": lab["tradable"],
+                    "last": b[max(b)][3], "spy_last": spy[max(spy)][3]})
+    return out
+
+
+def positions() -> dict[str, dict]:
+    return {p["symbol"]: p for p in (trading("GET", "/positions") or []) if isinstance(p, dict)}
+
+
+def enter(book: str, s: dict, today: date, tif: str) -> None:
+    """Log the signal for `book`; short for real if the stock is free, shortable and within limits, else virtually."""
+    evs = read_log()
+    if any(e.get("event") == "signal" and e.get("book") == book and e["ticker"] == s["ticker"] and e["day"] == today.isoformat()
+           for e in evs):
+        return
+    held = {e["ticker"] for e in evs if e.get("event") == "short" and not e.get("virtual")
+            and (e.get("exit_day") or "9") >= today.isoformat()}
+    asset = trading("GET", f"/assets/{s['ticker']}")
+    shortable = bool(asset.get("shortable") and asset.get("easy_to_borrow"))
+    ev = {"event": "signal", "book": book, "day": today.isoformat(), **s, "shortable": asset.get("shortable"),
+          "easy_to_borrow": asset.get("easy_to_borrow")}
+    real = False
+    if s["last"] < MIN_PRICE:
+        ev["skip"] = "price"
+    elif not shortable:
+        ev["skip"] = "not shortable at Alpaca"
+    elif s["ticker"] in held:
+        ev["note"] = "already short in another book (virtual)"
+    elif len(held) >= MAX_OPEN:
+        ev["note"] = "max open (virtual)"
+    else:
+        real = True
+    log(ev)
+    print(f"{datetime.now(bal.ET):%H:%M} {book:10s} {s['ticker']:6s} first hour {s['first_hour_excess'] * 100:+.1f}% "
+          f"${s['last']:.2f} shortable={asset.get('shortable')} etb={asset.get('easy_to_borrow')} "
+          f"{ev.get('skip') or ev.get('note') or 'SHORT'} | {s['headline'][:60]}", flush=True)
+    if "skip" in ev:
+        return
+    qty = int(NOTIONAL_USD // s["last"])
+    if qty < 1:
+        return
+    resp = trading("POST", "/orders", {"symbol": s["ticker"], "qty": str(qty), "side": "sell", "type": "market",
+                                       "time_in_force": tif}) if real else None
+    log({"event": "short", "book": book, "virtual": not real, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
+         "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "spy_ref": s["spy_last"],
+         "entry": "close" if tif == "cls" else "hour", "order": resp})
+
+
+def qualifies(kind: str, s: dict) -> bool:
+    return s["scored"] and (s["first_hour_excess"] <= -0.10 if kind == "drop" else s["first_hour_excess"] >= 0.10)
+
+
+def intraday(today: date | None = None) -> None:
+    """Every minute until 15:44 ET: score first hours as they complete; hour books short right away."""
+    today = today or datetime.now(bal.ET).date()
+    if today.isoformat() not in trading_days(today, today):
+        return
+    done: set[str] = set()
+    end = datetime(today.year, today.month, today.day, 15, 44, tzinfo=bal.ET).timestamp()
+    while time.time() < end:
+        try:
+            for s in first_hours(today, time.time(), skip=done):
+                done.add(s["ticker"])
+                for book, (kind, when) in BOOKS.items():
+                    if when == "hour" and qualifies(kind, s):
+                        enter(book, s, today, "day")
+        except Exception as exc:  # a bad minute must not stop the scan
+            log({"event": "error", "where": "intraday", "error": repr(exc)})
+            print("intraday error:", exc, flush=True)
+        time.sleep(60)
 
 
 def day(today: date | None = None) -> None:
+    """Close run: cover due positions at the close, then enter the close book."""
     today = today or datetime.now(bal.ET).date()
     if today.isoformat() not in trading_days(today, today):
         print(today, "is not a trading day")
         return
-    # 1. cover positions whose 5 trading days are up
-    positions = {p["symbol"]: p for p in (trading("GET", "/positions") or []) if isinstance(p, dict)}
+    pos = positions()
     for e in read_log():
-        if e.get("event") == "short" and e.get("exit_day") and e["exit_day"] <= today.isoformat() and e["ticker"] in positions:
-            p = positions.pop(e["ticker"])
+        if (e.get("event") == "short" and not e.get("virtual") and e.get("exit_day") and e["exit_day"] <= today.isoformat()
+                and e["ticker"] in pos):
+            p = pos.pop(e["ticker"])
             qty = abs(int(float(p["qty"])))
             resp = trading("POST", "/orders", {"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market",
                                                "time_in_force": "cls"})
-            log({"event": "cover", "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
-            print("cover", e["ticker"], qty, resp.get("status", resp))
-    # 2. today's signals (virtual shorts when the paper account cannot short: cash account or equity < $2,000)
-    acct = trading("GET", "/account")
-    virtual = not acct.get("shorting_enabled")
-    open_days = {e["ticker"] for e in read_log() if e.get("event") == "short" and (e.get("exit_day") or "") > today.isoformat()}
-    held = open_days if virtual else {e["ticker"] for e in read_log() if e.get("event") == "short" and e["ticker"] in positions}
-    for s in signals(today):
-        ev = {"event": "signal", "day": today.isoformat(), **s}
-        asset = trading("GET", f"/assets/{s['ticker']}")
-        ev.update(shortable=asset.get("shortable"), easy_to_borrow=asset.get("easy_to_borrow"))
-        if s["last"] < MIN_PRICE:
-            ev["skip"] = "price"
-        elif s["ticker"] in held:
-            ev["skip"] = "already short"
-        elif len(held) >= MAX_OPEN:
-            ev["skip"] = "max open"
-        elif not (asset.get("shortable") and asset.get("easy_to_borrow")):
-            ev["skip"] = "not shortable at Alpaca"
-        log(ev)
-        print(f"signal {s['ticker']:6s} first hour {s['first_hour_excess'] * 100:+.1f}% last ${s['last']:.2f} "
-              f"shortable={asset.get('shortable')} etb={asset.get('easy_to_borrow')} {ev.get('skip', 'SHORT')} | {s['headline'][:70]}")
-        if "skip" in ev:
-            continue
-        qty = int(NOTIONAL_USD // s["last"])
-        if qty < 1:
-            continue
-        resp = None if virtual else trading("POST", "/orders", {"symbol": s["ticker"], "qty": str(qty), "side": "sell",
-                                                                "type": "market", "time_in_force": "cls"})
-        log({"event": "short", "virtual": virtual, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
-             "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "order": resp})
-        held.add(s["ticker"])
+            log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
+            print("cover", e["ticker"], qty, resp.get("status", resp), flush=True)
+    for s in first_hours(today, time.time() + 3600):  # every first news of the day, windows ending by 15:50 at the latest
+        for book, (kind, when) in BOOKS.items():
+            if when == "close" and qualifies(kind, s):
+                enter(book, s, today, "cls")
 
 
 def daemon() -> None:
     while True:
         now = datetime.now(bal.ET)
-        run_at = now.replace(hour=15, minute=46, second=0, microsecond=0)
-        if now > run_at:
-            run_at += timedelta(days=1)
-        time.sleep((run_at - now).total_seconds())
+        start = now.replace(hour=10, minute=32, second=0, microsecond=0)
+        close = now.replace(hour=15, minute=46, second=0, microsecond=0)
+        if now > close:
+            start += timedelta(days=1)
+            close += timedelta(days=1)
+        if now < start:
+            time.sleep((start - now).total_seconds())
         try:
+            intraday()
+            time.sleep(max(0.0, close.timestamp() - time.time()))
             day()
         except Exception as exc:  # keep the daemon alive; the next day retries covers too
             log({"event": "error", "error": repr(exc)})
             print("error:", exc, flush=True)
+        time.sleep(60)
 
 
 def report() -> None:
     evs = read_log()
-    shorts = [e for e in evs if e.get("event") == "short"]
-    sig = [e for e in evs if e.get("event") == "signal"]
-    print(f"{len(sig)} signals, {sum('skip' not in e for e in sig)} traded; skips: "
-          + ", ".join(f"{k} {sum(e.get('skip') == k for e in sig)}" for k in sorted({e.get('skip') for e in sig if e.get('skip')})))
-    pnl = []
-    for e in shorts:  # close of the entry day -> close of the exit day (or latest), minus SPY's move
-        end = min(e["exit_day"] or e["day"], datetime.now(bal.ET).date().isoformat())
-        d = bal.get("/v2/stocks/bars", {"symbols": f"{e['ticker']},SPY", "timeframe": "1Day", "start": e["day"],
-                                         "end": end, "feed": "sip", "adjustment": "all"}).get("bars", {})
-        c, spy = [b["c"] for b in d.get(e["ticker"], [])], [b["c"] for b in d.get("SPY", [])]
-        if len(c) < 2 or len(spy) < 2:
-            print(f"{e['day']} {e['ticker']:6s} {'virtual ' if e.get('virtual') else ''}short: no closes yet")
-            continue
-        r = -((c[-1] / c[0] - 1) - (spy[-1] / spy[0] - 1)) * 100
-        done = end >= (e["exit_day"] or "9")
-        pnl.append(r) if done else None
-        print(f"{e['day']} {e['ticker']:6s} {'virtual ' if e.get('virtual') else ''}short @ {c[0]:.2f} -> {c[-1]:.2f}: "
-              f"{r:+.1f}% vs SPY {'(closed)' if done else '(open)'}")
-    if pnl:
-        print(f"closed: n={len(pnl)} mean {sum(pnl) / len(pnl):+.2f}% win {sum(x > 0 for x in pnl) / len(pnl):.0%}")
+    today = datetime.now(bal.ET).date().isoformat()
+    for book in BOOKS:
+        sig = [e for e in evs if e.get("event") == "signal" and e.get("book", "drop_close") == book]
+        shorts = [e for e in evs if e.get("event") == "short" and e.get("book", "drop_close") == book]
+        print(f"\n== {book}: {len(sig)} signals, {len(shorts)} shorts ({sum(not e.get('virtual') for e in shorts)} real); skips: "
+              + ", ".join(f"{k} {sum(e.get('skip') == k for e in sig)}" for k in sorted({e.get('skip') for e in sig if e.get('skip')})))
+        pnl = []
+        for e in shorts:  # reference price -> close of the exit day (or latest), minus SPY's move
+            end = min(e["exit_day"] or e["day"], today)
+            d = bal.get("/v2/stocks/bars", {"symbols": f"{e['ticker']},SPY", "timeframe": "1Day", "start": e["day"],
+                                             "end": end, "feed": "sip", "adjustment": "all"}).get("bars", {})
+            c, spy = d.get(e["ticker"], []), d.get("SPY", [])
+            if not c or not spy:
+                continue
+            ref, spy_ref = e.get("ref_price") or c[0]["c"], e.get("spy_ref") or spy[0]["c"]
+            r = -((c[-1]["c"] / ref - 1) - (spy[-1]["c"] / spy_ref - 1)) * 100
+            done = end >= (e["exit_day"] or "9") and c[-1]["t"][:10] >= end
+            if done:
+                pnl.append(r)
+            print(f"  {e['day']} {e['ticker']:6s} {'virtual' if e.get('virtual') else 'real   '} short @ {ref:.2f} -> "
+                  f"{c[-1]['c']:.2f}: {r:+.1f}% vs SPY {'(closed)' if done else '(open)'}")
+        if pnl:
+            print(f"  closed: n={len(pnl)} mean {sum(pnl) / len(pnl):+.2f}% win {sum(x > 0 for x in pnl) / len(pnl):.0%}")
 
 
 def main():
     load_dotenv(ROOT / ".env")
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=("day", "daemon", "report", "scan"))
+    ap.add_argument("cmd", choices=("day", "intraday", "daemon", "report", "scan"))
     ap.add_argument("--date", help="scan only: YYYY-MM-DD")
     args = ap.parse_args()
-    if args.cmd == "scan":  # dry: print what the rule would have flagged on a past day, no orders
-        for s in signals(date.fromisoformat(args.date)):
-            print(s["ticker"], round(s["first_hour_excess"] * 100, 1), s["last"], s["headline"][:80])
+    if args.cmd == "scan":  # dry run on a past day: what each book would have flagged (no orders)
+        d = date.fromisoformat(args.date)
+        for s in first_hours(d, datetime(d.year, d.month, d.day, 16, 0, tzinfo=bal.ET).timestamp()):
+            books = [b for b, (k, _) in BOOKS.items() if qualifies(k, s)]
+            if books:
+                print(f"{s['ticker']:6s} {s['first_hour_excess'] * 100:+6.1f}% ${s['last']:.2f} {','.join(books)} | {s['headline'][:70]}")
         return
-    {"day": day, "daemon": daemon, "report": report}[args.cmd]()
+    {"day": day, "intraday": intraday, "daemon": daemon, "report": report}[args.cmd]()
 
 
 if __name__ == "__main__":
