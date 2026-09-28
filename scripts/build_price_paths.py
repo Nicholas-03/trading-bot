@@ -110,7 +110,7 @@ def path(ts: int, bars: dict[int, tuple], spy: dict[int, tuple], flatten: int) -
 
 
 def do_day(day: str, pairs: list[dict]) -> tuple[str, int]:
-    out = CACHE / f"{day}.jsonl"
+    out = CACHE / f"{day}.jsonl"  # CACHE may be redirected by --cache
     if out.exists():
         return day, sum(1 for _ in open(out))
     d = date.fromisoformat(day)
@@ -137,12 +137,17 @@ def main() -> None:
     ap.add_argument("--labels", default=str(ROOT / "data" / "laya_alpaca_labels_v2.jsonl"))
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--out", default=str(ROOT / "data" / "laya_price_paths.jsonl"))
+    ap.add_argument("--all", action="store_true", help="include pairs the bot's price/liquidity gates would skip")
+    ap.add_argument("--cache", help="per-day cache folder (default data/price_paths/)")
     args = ap.parse_args()
+    global CACHE
+    if args.cache:
+        CACHE = Path(args.cache)
     CACHE.mkdir(parents=True, exist_ok=True)
     by_day: dict[str, list[dict]] = defaultdict(list)
     for line in open(args.labels):
         r = json.loads(line)
-        if r["tradable"]:
+        if r["tradable"] or args.all:
             by_day[r["ts"][:10]].append({k: r[k] for k in ("news_id", "ticker", "ts")})
     days = sorted(by_day)
     t0, total = time.time(), 0
