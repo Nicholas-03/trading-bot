@@ -27,7 +27,9 @@ case "${1:-}" in
     else
       kaggle datasets create -p "$STAGE"            # private by default
     fi ;;
-  start)    kaggle kernels push -p "$HERE" ;;
+  start)    # a kernel pushed while a new dataset version is still processing silently runs on the previous version
+    until kaggle datasets status "$DATASET" 2>/dev/null | grep -q ready; do echo "waiting for the dataset version..."; sleep 20; done
+    kaggle kernels push -p "$HERE" ;;
   eval)     kaggle kernels push -p kaggle/laya-eval ;;          # score models on held-out data (kaggle/laya-eval/eval.txt)
   premarket) kaggle kernels push -p kaggle/laya-premarket ;;  # pre-market news traded at the open (experiments_premarket.txt)
   eval-results)
