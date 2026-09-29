@@ -27,6 +27,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -51,7 +52,11 @@ NOTIONAL_USD = 2000.0
 MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
-BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_hour": ("pop", "hour")}
+BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_halt": ("pop_halt", "close"),
+         "pop_hour": ("pop", "hour")}
+VIRTUAL_ONLY = {"pop_hour"}  # all pops: weak without a halt (+2.9%/trade, ~0 with a stop), tracked for comparison only
+STOPS = {"pop_halt": 0.30}  # buy-stop 30% above the short's fill (backtest: +12.5% -> +9.1%/trade, t 5.1 -> 6.1)
+HALT = re.compile(r"halted|resume|circuit breaker", re.I)  # same pattern as scripts/study_drift.py CATS
 logger = logging.getLogger("drift5d")
 
 
@@ -217,6 +222,8 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
         ev["skip"] = "price"
     elif not shortable:
         ev["skip"] = "not shortable at Alpaca"
+    elif book in VIRTUAL_ONLY:
+        ev["note"] = "comparison book (virtual)"
     elif s["ticker"] in held:
         ev["note"] = "already short in another book (virtual)"
     elif len(held) >= MAX_OPEN:
@@ -236,7 +243,7 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
                                        "time_in_force": tif}) if real else None
     log({"event": "short", "book": book, "virtual": not real, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
          "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "spy_ref": s["spy_last"],
-         "entry": "close" if tif == "cls" else "hour", "order": resp})
+         "entry": "close" if tif == "cls" else "hour", "stop": STOPS.get(book), "order": resp})
     if real:
         logger.info(f"ORDER short {qty} {s['ticker']} ({book}, {tif}): {resp.get('status') or resp}")
 
@@ -282,16 +289,55 @@ def check_fills() -> None:
     settled = {e["order_id"] for e in evs if e.get("event") == "fill"}
     for e in evs:
         oid = (e.get("order") or {}).get("id")
-        if e.get("event") in ("short", "cover") and oid and oid not in settled:
+        if e.get("event") in ("short", "cover", "stop_placed") and oid and oid not in settled:
             o = trading("GET", f"/orders/{oid}")
             if o.get("status") in ("filled", "canceled", "expired", "rejected", "done_for_day"):
                 log({"event": "fill", "order_id": oid, "book": e.get("book"), "ticker": e["ticker"], "side": o.get("side"),
                      "status": o["status"], "filled_qty": o.get("filled_qty"), "filled_avg_price": o.get("filled_avg_price"),
                      "filled_at": o.get("filled_at"), "for": e["event"], "day": e.get("day") or e.get("entry_day")})
+                if e["event"] == "stop_placed" and o["status"] == "filled":
+                    logger.info(f"STOPPED OUT {e['ticker']} ({e.get('book')}) at {o.get('filled_avg_price')}")
 
 
 def qualifies(kind: str, s: dict) -> bool:
-    return s["scored"] and (s["first_hour_excess"] <= -0.10 if kind == "drop" else s["first_hour_excess"] >= 0.10)
+    if not s["scored"]:
+        return False
+    if kind == "drop":
+        return s["first_hour_excess"] <= -0.10
+    return s["first_hour_excess"] >= 0.10 and (kind == "pop" or bool(HALT.search(s["headline"])))
+
+
+def place_stops() -> None:
+    """Buy-stop orders (GTC) for filled real shorts in books with a stop, once per entry."""
+    evs = read_log()
+    fills = {e["order_id"]: e for e in evs if e.get("event") == "fill"}
+    placed = {e["entry_order"] for e in evs if e.get("event") == "stop_placed"}
+    pos = None
+    for e in evs:
+        oid = (e.get("order") or {}).get("id")
+        if e.get("event") != "short" or e.get("virtual") or not e.get("stop") or not oid or oid in placed:
+            continue
+        f = fills.get(oid)
+        if not f or f["status"] != "filled" or not f.get("filled_avg_price"):
+            continue
+        pos = pos if pos is not None else positions()
+        if e["ticker"] not in pos:
+            continue
+        level = round(float(f["filled_avg_price"]) * (1 + e["stop"]), 2)
+        qty = abs(int(float(pos[e["ticker"]]["qty"])))
+        resp = trading("POST", "/orders", {"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "stop",
+                                           "stop_price": str(level), "time_in_force": "gtc"})
+        log({"event": "stop_placed", "book": e["book"], "ticker": e["ticker"], "entry_order": oid, "qty": qty,
+             "stop_price": level, "day": e["day"], "order": resp})
+        logger.info(f"ORDER stop buy {qty} {e['ticker']} @ {level} ({e['book']}): {resp.get('status') or resp}")
+
+
+def cancel_open_orders(symbol: str) -> None:
+    """Before covering at the close: an open stop order would hold the shares and block the cover."""
+    for o in trading("GET", "/orders", params={"status": "open", "symbols": symbol}) or []:
+        if isinstance(o, dict) and o.get("id"):
+            trading("DELETE", f"/orders/{o['id']}")
+            log({"event": "cancel", "ticker": symbol, "order_id": o["id"], "type": o.get("type")})
 
 
 def intraday(today: date | None = None) -> None:
@@ -333,6 +379,7 @@ def day(today: date | None = None) -> None:
         return
     logger.info("close run")
     check_fills()
+    place_stops()
     acct = trading("GET", "/account")
     log({"event": "account", "day": today.isoformat(), **{k: acct.get(k) for k in
          ("equity", "cash", "long_market_value", "short_market_value", "buying_power")}})
@@ -342,6 +389,7 @@ def day(today: date | None = None) -> None:
                 and e["ticker"] in pos):
             p = pos.pop(e["ticker"])
             qty = abs(int(float(p["qty"])))
+            cancel_open_orders(e["ticker"])
             resp = trading("POST", "/orders", {"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market",
                                                "time_in_force": "cls"})
             log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
@@ -414,11 +462,20 @@ def daemon() -> None:
                 f"shorting {acct.get('shorting_enabled')}, Jev {'on' if os.environ.get('TYPESAFE_API_KEY') else 'off'}")
     while True:
         now = datetime.now(bal.ET)
+        pre_open = now.replace(hour=9, minute=20, second=0, microsecond=0)
         start = now.replace(hour=10, minute=32, second=0, microsecond=0)
         close = now.replace(hour=15, minute=46, second=0, microsecond=0)
         if now > close:
+            pre_open += timedelta(days=1)
             start += timedelta(days=1)
             close += timedelta(days=1)
+        if now < pre_open:
+            sleep_until(pre_open.timestamp())
+            try:  # yesterday's closing fills are known now: protect them before the open
+                check_fills()
+                place_stops()
+            except Exception:
+                logger.exception("pre-open stops failed")
         sleep_until(start.timestamp())
         try:
             intraday()
@@ -450,12 +507,19 @@ def report() -> None:
             if not c or not spy:
                 continue
             ref, spy_ref = e.get("ref_price") or c[0]["c"], e.get("spy_ref") or spy[0]["c"]
-            r = -((c[-1]["c"] / ref - 1) - (spy[-1]["c"] / spy_ref - 1)) * 100
-            done = end >= (e["exit_day"] or "9") and c[-1]["t"][:10] >= end
+            exit_px, k = c[-1]["c"], len(c) - 1
+            if e.get("stop"):  # as in the backtest: stopped on the first later day whose high reaches the level
+                level = ref * (1 + e["stop"])
+                hit = next((i for i in range(1, len(c)) if c[i]["h"] >= level), None)
+                if hit is not None:
+                    exit_px, k = max(level, c[hit]["o"]), hit
+            spy_k = spy[min(k, len(spy) - 1)]["c"]
+            r = -((exit_px / ref - 1) - (spy_k / spy_ref - 1)) * 100
+            done = end >= (e["exit_day"] or "9") and c[-1]["t"][:10] >= end or k < len(c) - 1
             if done:
                 pnl.append(r)
             print(f"  {e['day']} {e['ticker']:6s} {'virtual' if e.get('virtual') else 'real   '} short @ {ref:.2f} -> "
-                  f"{c[-1]['c']:.2f}: {r:+.1f}% vs SPY {'(closed)' if done else '(open)'}")
+                  f"{exit_px:.2f}{' (stopped)' if k < len(c) - 1 else ''}: {r:+.1f}% vs SPY {'(closed)' if done else '(open)'}")
         if pnl:
             print(f"  closed: n={len(pnl)} mean {sum(pnl) / len(pnl):+.2f}% win {sum(x > 0 for x in pnl) / len(pnl):.0%}")
 
