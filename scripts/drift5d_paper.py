@@ -24,6 +24,8 @@ at that moment: the part of the dataset that cannot be rebuilt from Alpaca's his
 """
 import argparse
 import json
+import logging
+import logging.handlers
 import os
 import sys
 import time
@@ -38,14 +40,36 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_alpaca_labels as bal  # noqa: E402
 
-LOG = ROOT / "results" / "drift5d_paper.jsonl"
-OBSERVED = ROOT / "results" / "drift5d_observed.jsonl"  # every scored first hour, traded or not: a growing dataset
+DATA_DIR = Path(os.environ.get("DRIFT_DATA_DIR", ROOT / "results"))
+LOG = DATA_DIR / "drift5d_paper.jsonl"
+OBSERVED = DATA_DIR / "drift5d_observed.jsonl"  # every scored first hour, traded or not: a growing dataset
+OUTCOMES = DATA_DIR / "drift5d_outcomes.jsonl"  # what happened next to each observed stock (filled in 5 days later)
+HEARTBEAT = DATA_DIR / "heartbeat"  # touched every minute while the daemon is alive
+JEV_MIN_MOVE = 0.05  # ask Jev about first hours at least this big (cheap: ~$0.00003 per event)
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
 MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
 BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_hour": ("pop", "hour")}
+logger = logging.getLogger("drift5d")
+
+
+def setup_logging() -> None:
+    """Human-readable log to stdout (docker logs) and to DATA_DIR/logs/drift5d.log, rotated daily, 90 days kept."""
+    (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = logging.handlers.TimedRotatingFileHandler(DATA_DIR / "logs" / "drift5d.log", when="midnight", backupCount=90)
+    sh = logging.StreamHandler(sys.stdout)
+    for h in (fh, sh):
+        h.setFormatter(fmt)
+        logger.addHandler(h)
+    logger.setLevel(logging.INFO)
+
+
+def beat() -> None:
+    HEARTBEAT.parent.mkdir(parents=True, exist_ok=True)
+    HEARTBEAT.write_text(datetime.now(timezone.utc).isoformat())
 
 
 def trading(method: str, path: str, body: dict | None = None, params: dict | None = None):
@@ -68,7 +92,7 @@ def trading(method: str, path: str, body: dict | None = None, params: dict | Non
 
 
 def log(event: dict) -> None:
-    LOG.parent.mkdir(exist_ok=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, "a") as f:
         f.write(json.dumps({"logged": datetime.now(timezone.utc).isoformat(), **event}) + "\n")
 
@@ -142,13 +166,14 @@ def _ts(day: date, h: int, m: int) -> int:
     return int(datetime(day.year, day.month, day.day, h, m, tzinfo=bal.ET).timestamp())
 
 
-def fetch_bars_feed(symbols: list[str], start: int, end: int, feed: str) -> dict[str, dict[int, tuple]]:
+def fetch_bars_feed(symbols: list[str], start: int, end: int, feed: str, timeframe: str = "1Min",
+                    adjustment: str = "raw") -> dict[str, dict[int, tuple]]:
     """{symbol: {minute_epoch: (o, h, l, c, v)}} for [start, end) from one feed; invalid symbols are dropped by bisection."""
     bars: dict[str, dict[int, tuple]] = {}
     chunks = [symbols[i:i + 200] for i in range(0, len(symbols), 200)]
     while chunks:
         chunk = chunks.pop()
-        params = {"symbols": ",".join(chunk), "timeframe": "1Min", "limit": 10000, "feed": feed, "adjustment": "raw",
+        params = {"symbols": ",".join(chunk), "timeframe": timeframe, "limit": 10000, "feed": feed, "adjustment": adjustment,
                   "start": datetime.fromtimestamp(start, timezone.utc).isoformat(),
                   "end": datetime.fromtimestamp(end, timezone.utc).isoformat()}
         token = None
@@ -199,9 +224,9 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
     else:
         real = True
     log(ev)
-    print(f"{datetime.now(bal.ET):%H:%M} {book:10s} {s['ticker']:6s} first hour {s['first_hour_excess'] * 100:+.1f}% "
-          f"${s['last']:.2f} shortable={asset.get('shortable')} etb={asset.get('easy_to_borrow')} "
-          f"{ev.get('skip') or ev.get('note') or 'SHORT'} | {s['headline'][:60]}", flush=True)
+    logger.info(f"SIGNAL {book:10s} {s['ticker']:6s} first hour {s['first_hour_excess'] * 100:+.1f}% "
+                f"${s['last']:.2f} shortable={asset.get('shortable')} etb={asset.get('easy_to_borrow')} "
+                f"-> {ev.get('skip') or ev.get('note') or 'SHORT'} | {s['headline'][:70]}")
     if "skip" in ev:
         return
     qty = int(NOTIONAL_USD // s["last"])
@@ -212,15 +237,37 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
     log({"event": "short", "book": book, "virtual": not real, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
          "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "spy_ref": s["spy_last"],
          "entry": "close" if tif == "cls" else "hour", "order": resp})
+    if real:
+        logger.info(f"ORDER short {qty} {s['ticker']} ({book}, {tif}): {resp.get('status') or resp}")
 
 
 def observe(s: dict, today: date, when: str) -> None:
     """Append a scored first hour to OBSERVED with Alpaca's borrow flags at that moment (not recoverable later)."""
     asset = trading("GET", f"/assets/{s['ticker']}") if s["scored"] else {}
+    jev = jev_features(s) if s["scored"] and abs(s["first_hour_excess"]) >= JEV_MIN_MOVE else {}
     with open(OBSERVED, "a") as f:
         f.write(json.dumps({"logged": datetime.now(timezone.utc).isoformat(), "day": today.isoformat(), "when": when, **s,
                             "shortable": asset.get("shortable"), "easy_to_borrow": asset.get("easy_to_borrow"),
-                            "marginable": asset.get("marginable"), "exchange": asset.get("exchange")}) + "\n")
+                            "marginable": asset.get("marginable"), "exchange": asset.get("exchange"), **jev}) + "\n")
+
+
+def jev_features(s: dict) -> dict:
+    """TypeSafe Jev's reading of the news (same questions as scripts/jev_drift.py), for a forward test of Jev filters."""
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        return {}
+    import jev_drift
+    import jev_score
+    state = {"ticker": s["ticker"], "headline": s["headline"], "summary": (s.get("summary") or "")[:2000],
+             "first_hour_move": f"{s['first_hour_excess'] * 100:+.0f}% relative to the overall market in the hour after the news"}
+    try:
+        a = jev_score.ask_body({"model": jev_score.MODEL, "state": state,
+                                "questions": jev_drift.questions(s["first_hour_excess"] < 0)}, attempts=3)
+    except Exception as exc:  # Jev is optional: record the failure and move on
+        return {"jev_error": repr(exc)[:200]}
+    ans = a["answers"]
+    return {"jev_model": a["model"], "jev_category": ans["category"]["choice"], "jev_category_p": ans["category"]["probabilities"],
+            "jev_next_week": ans["next_week"]["probabilities"], "jev_explains": ans["explains"]["noul"],
+            "jev_lasting": ans["lasting"]["noul"], "jev_dilution": ans["dilution"]["noul"]}
 
 
 def observed_today(today: date) -> set[str]:
@@ -253,18 +300,28 @@ def intraday(today: date | None = None) -> None:
     if today.isoformat() not in trading_days(today, today):
         return
     done = observed_today(today)  # after a restart, carry on where the scan left off
+    logger.info(f"intraday scan starts ({len(done)} stocks already observed today)")
     end = datetime(today.year, today.month, today.day, 15, 44, tzinfo=bal.ET).timestamp()
+    last_note = 0.0
     while time.time() < end:
+        beat()
         try:
-            for s in first_hours(today, time.time(), skip=done):
+            new = first_hours(today, time.time(), skip=done)
+            for s in new:
                 done.add(s["ticker"])
                 observe(s, today, "hour")
                 for book, (kind, when) in BOOKS.items():
                     if when == "hour" and qualifies(kind, s):
                         enter(book, s, today, "day")
+            big = [f"{s['ticker']} {s['first_hour_excess'] * 100:+.0f}%" for s in new
+                   if s["scored"] and abs(s["first_hour_excess"]) >= JEV_MIN_MOVE]
+            if big or time.time() - last_note > 1800:  # moves worth seeing, else a status line every 30 min
+                logger.info(f"scan: {len(new)} new first hours, {len(done)} observed today"
+                            + (f"; >=5%: {', '.join(big)}" if big else ""))
+                last_note = time.time()
         except Exception as exc:  # a bad minute must not stop the scan
             log({"event": "error", "where": "intraday", "error": repr(exc)})
-            print("intraday error:", exc, flush=True)
+            logger.exception("intraday scan failed")
         time.sleep(60)
 
 
@@ -272,8 +329,9 @@ def day(today: date | None = None) -> None:
     """Close run: cover due positions at the close, then enter the close book."""
     today = today or datetime.now(bal.ET).date()
     if today.isoformat() not in trading_days(today, today):
-        print(today, "is not a trading day")
+        logger.info(f"{today} is not a trading day")
         return
+    logger.info("close run")
     check_fills()
     acct = trading("GET", "/account")
     log({"event": "account", "day": today.isoformat(), **{k: acct.get(k) for k in
@@ -287,7 +345,7 @@ def day(today: date | None = None) -> None:
             resp = trading("POST", "/orders", {"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market",
                                                "time_in_force": "cls"})
             log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
-            print("cover", e["ticker"], qty, resp.get("status", resp), flush=True)
+            logger.info(f"ORDER cover {qty} {e['ticker']} ({e.get('book')}, entered {e['day']}): {resp.get('status') or resp}")
     seen = observed_today(today)
     for s in first_hours(today, time.time() + 3600):  # every first news of the day, windows ending by 15:50 at the latest
         if s["ticker"] not in seen:
@@ -295,15 +353,65 @@ def day(today: date | None = None) -> None:
         for book, (kind, when) in BOOKS.items():
             if when == "close" and qualifies(kind, s):
                 enter(book, s, today, "cls")
+    logger.info(f"account: equity {acct.get('equity')} cash {acct.get('cash')} short value {acct.get('short_market_value')}; "
+                f"{len(observed_today(today))} stocks observed today")
+
+
+def label_outcomes(today: date) -> None:
+    """Dataset: for each observed day whose 5-day window has closed, what each stock did next (split-adjusted daily
+    bars, SIP): news-day close, next open/close, close 5 trading days later, the 5-day high and low, SPY and IWM."""
+    if not OBSERVED.exists():
+        return
+    done = {r["day"] for r in map(json.loads, open(OUTCOMES))} if OUTCOMES.exists() else set()
+    by_day: dict[str, dict[str, dict]] = {}
+    for r in map(json.loads, open(OBSERVED)):
+        if r.get("scored") and r["day"] not in done:
+            by_day.setdefault(r["day"], {}).setdefault(r["ticker"], r)
+    for d, obs in sorted(by_day.items()):
+        exit_day = exit_date(d)
+        if not exit_day or exit_day >= today.isoformat():
+            continue
+        d0 = date.fromisoformat(d)
+        bars = fetch_bars_feed(sorted(set(obs) | {"SPY", "IWM"}), _ts(d0, 0, 0), _ts(date.fromisoformat(exit_day), 23, 0),
+                               "sip", timeframe="1Day", adjustment="all")
+        daykey = lambda t: datetime.fromtimestamp(t, bal.ET).date().isoformat()
+        series = {sym: {daykey(t): b for t, b in rows.items()} for sym, rows in bars.items()}
+        days = [x for x in trading_days(d0, date.fromisoformat(exit_day))]
+        n = 0
+        with open(OUTCOMES, "a") as f:
+            for sym, r in obs.items():
+                b = series.get(sym, {})
+                if d not in b:
+                    continue
+                path = [b.get(x) for x in days]
+                later = [p for p in path[1:] if p]
+                out = {"day": d, "ticker": sym, "news_id": r.get("news_id"), "first_hour_excess": r.get("first_hour_excess"),
+                       "exit_day": exit_day, "c0": b[d][3], "v0": b[d][4],
+                       "o1": path[1][0] if len(path) > 1 and path[1] else None,
+                       "c1": path[1][3] if len(path) > 1 and path[1] else None,
+                       "c5": b[exit_day][3] if exit_day in b else None,
+                       "hi5": max((p[1] for p in later), default=None), "lo5": min((p[2] for p in later), default=None)}
+                for idx in ("SPY", "IWM"):
+                    ib = series.get(idx, {})
+                    out[idx.lower()] = [ib[x][3] if x in ib else None for x in (d, days[1] if len(days) > 1 else d, exit_day)]
+                f.write(json.dumps(out) + "\n")
+                n += 1
+            f.write(json.dumps({"day": d, "marker": "day labeled", "n": n}) + "\n")
+        logger.info(f"outcomes: labeled {n} stocks observed on {d} (exit {exit_day})")
 
 
 def sleep_until(ts: float) -> None:
     """Sleep in short steps against the wall clock (one long sleep can overrun, e.g. across a system sleep)."""
     while time.time() < ts:
-        time.sleep(min(60.0, ts - time.time()))
+        beat()
+        time.sleep(min(60.0, max(0.0, ts - time.time())))
 
 
 def daemon() -> None:
+    pre = "ALPACA_PAPER2_" if os.environ.get("ALPACA_PAPER2_API_KEY") else "ALPACA_"
+    acct = trading("GET", "/account")
+    logger.info(f"daemon up: data dir {DATA_DIR}, paper account via {pre}*, equity {acct.get('equity')}, "
+                f"shorting {acct.get('shorting_enabled')}, Jev {'on' if os.environ.get('TYPESAFE_API_KEY') else 'off'}")
     while True:
         now = datetime.now(bal.ET)
         start = now.replace(hour=10, minute=32, second=0, microsecond=0)
@@ -316,9 +424,11 @@ def daemon() -> None:
             intraday()
             sleep_until(close.timestamp())
             day()
+            label_outcomes(datetime.now(bal.ET).date())
         except Exception as exc:  # keep the daemon alive; the next day retries covers too
             log({"event": "error", "error": repr(exc)})
-            print("error:", exc, flush=True)
+            logger.exception("daily run failed")
+        logger.info("day done; sleeping until the next session")
         time.sleep(60)
 
 
@@ -353,7 +463,7 @@ def report() -> None:
 def main():
     load_dotenv(ROOT / ".env")
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=("day", "intraday", "daemon", "report", "scan"))
+    ap.add_argument("cmd", choices=("day", "intraday", "daemon", "report", "scan", "label"))
     ap.add_argument("--date", help="scan only: YYYY-MM-DD")
     args = ap.parse_args()
     if args.cmd == "scan":  # dry run on a past day: what each book would have flagged (no orders)
@@ -362,6 +472,10 @@ def main():
             books = [b for b, (k, _) in BOOKS.items() if qualifies(k, s)]
             if books:
                 print(f"{s['ticker']:6s} {s['first_hour_excess'] * 100:+6.1f}% ${s['last']:.2f} {','.join(books)} | {s['headline'][:70]}")
+        return
+    setup_logging()
+    if args.cmd == "label":
+        label_outcomes(datetime.now(bal.ET).date())
         return
     {"day": day, "intraday": intraday, "daemon": daemon, "report": report}[args.cmd]()
 
