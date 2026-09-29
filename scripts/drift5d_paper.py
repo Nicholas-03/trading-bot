@@ -49,11 +49,14 @@ HEARTBEAT = DATA_DIR / "heartbeat"  # touched every minute while the daemon is a
 JEV_MIN_MOVE = 0.05  # ask Jev about first hours at least this big (cheap: ~$0.00003 per event)
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
-MAX_OPEN = 40  # real positions across books (~$80k of a $100k paper account)
+MAX_OPEN = 60  # real positions across books (~$120k short on a $100k paper account with 2x margin)
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
 BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_halt": ("pop_halt", "close"),
-         "pop_hour": ("pop", "hour")}
+         "liquid_fade": ("fade", "close"), "pop_hour": ("pop", "hour")}
+# liquid_fade: liquid stocks (the labels' tradable gate: >= $20, active just before the news) whose news-day move
+# (previous close -> close) beat SPY by >= 10% either way, shorted at the close for 5 days. Backtest 2021-26 on
+# data/laya_daily_labels.jsonl: +1.53%/trade after 0.2% cost, t 9.0, every year > 0; quiet news days: +0.07%.
 VIRTUAL_ONLY = {"pop_hour"}  # all pops: weak without a halt (+2.9%/trade, ~0 with a stop), tracked for comparison only
 STOPS = {"pop_halt": 0.30}  # buy-stop 30% above the short's fill (backtest: +12.5% -> +9.1%/trade, t 5.1 -> 6.1)
 HALT = re.compile(r"halted|resume|circuit breaker", re.I)  # same pattern as scripts/study_drift.py CATS
@@ -304,6 +307,8 @@ def qualifies(kind: str, s: dict) -> bool:
         return False
     if kind == "drop":
         return s["first_hour_excess"] <= -0.10
+    if kind == "fade":
+        return bool(s.get("tradable_gate")) and abs(s.get("day_excess") or 0) >= 0.10
     return s["first_hour_excess"] >= 0.10 and (kind == "pop" or bool(HALT.search(s["headline"])))
 
 
@@ -395,7 +400,9 @@ def day(today: date | None = None) -> None:
             log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
             logger.info(f"ORDER cover {qty} {e['ticker']} ({e.get('book')}, entered {e['day']}): {resp.get('status') or resp}")
     seen = observed_today(today)
-    for s in first_hours(today, time.time() + 3600):  # every first news of the day, windows ending by 15:50 at the latest
+    firsts = first_hours(today, time.time() + 3600)  # every first news of the day, windows ending by 15:50 at the latest
+    add_day_moves(today, firsts)
+    for s in firsts:
         if s["ticker"] not in seen:
             observe(s, today, "close")
         for book, (kind, when) in BOOKS.items():
@@ -403,6 +410,21 @@ def day(today: date | None = None) -> None:
                 enter(book, s, today, "cls")
     logger.info(f"account: equity {acct.get('equity')} cash {acct.get('cash')} short value {acct.get('short_market_value')}; "
                 f"{len(observed_today(today))} stocks observed today")
+
+
+def add_day_moves(today: date, firsts: list[dict]) -> None:
+    """The news day's move so far against SPY (previous close -> latest price), for the liquid_fade book."""
+    scored = [s for s in firsts if s["scored"]]
+    if not scored:
+        return
+    prev = bal.fetch_prev_close(today, sorted({s["ticker"] for s in scored} | {"SPY"}))
+    for s in scored:
+        if prev.get(s["ticker"]) and prev.get("SPY"):
+            s["prev_close"] = prev[s["ticker"]]
+            s["day_excess"] = round(s["last"] / prev[s["ticker"]] - s["spy_last"] / prev["SPY"], 5)
+    big = [f"{s['ticker']} {s['day_excess'] * 100:+.0f}%" for s in scored
+           if s.get("tradable_gate") and abs(s.get("day_excess") or 0) >= 0.10]
+    logger.info(f"news-day moves: {len(scored)} stocks, liquid >= 10%: {', '.join(big) or 'none'}")
 
 
 def label_outcomes(today: date) -> None:
@@ -420,7 +442,7 @@ def label_outcomes(today: date) -> None:
         if not exit_day or exit_day >= today.isoformat():
             continue
         d0 = date.fromisoformat(d)
-        bars = fetch_bars_feed(sorted(set(obs) | {"SPY", "IWM"}), _ts(d0, 0, 0), _ts(date.fromisoformat(exit_day), 23, 0),
+        bars = fetch_bars_feed(sorted(set(obs) | {"SPY", "IWM"}), _ts(d0 - timedelta(days=7), 0, 0), _ts(date.fromisoformat(exit_day), 23, 0),
                                "sip", timeframe="1Day", adjustment="all")
         daykey = lambda t: datetime.fromtimestamp(t, bal.ET).date().isoformat()
         series = {sym: {daykey(t): b for t, b in rows.items()} for sym, rows in bars.items()}
@@ -434,7 +456,8 @@ def label_outcomes(today: date) -> None:
                 path = [b.get(x) for x in days]
                 later = [p for p in path[1:] if p]
                 out = {"day": d, "ticker": sym, "news_id": r.get("news_id"), "first_hour_excess": r.get("first_hour_excess"),
-                       "exit_day": exit_day, "c0": b[d][3], "v0": b[d][4],
+                       "exit_day": exit_day, "cm1": next((b[x][3] for x in sorted(b, reverse=True) if x < d), None),
+                       "c0": b[d][3], "v0": b[d][4],
                        "o1": path[1][0] if len(path) > 1 and path[1] else None,
                        "c1": path[1][3] if len(path) > 1 and path[1] else None,
                        "c5": b[exit_day][3] if exit_day in b else None,
