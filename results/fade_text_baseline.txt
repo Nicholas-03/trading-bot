@@ -1,0 +1,39 @@
+train 12217 events (to 2024), valid 1908, test 2743 (|day move| >= 10%)
+
+== ridge alpha 3.0: corr(pred, pnl) valid +0.141 test +0.118; skip cut -0.05
+  valid all fades                        n= 1908   +1.68%/trade  t  +3.8
+  valid kept (pred >= cut)               n= 1272   +2.24%/trade  t  +4.1
+  valid skipped                          n=  636   +0.56%/trade  t  +1.2
+  valid up moves                         n= 1235   +1.82%/trade  t  +2.9
+  valid down moves                       n=  673   +1.43%/trade  t  +3.3
+  test all fades                         n= 2743   +1.13%/trade  t  +2.5
+  test kept (pred >= cut)                n= 1802   +1.27%/trade  t  +1.8
+  test skipped                           n=  941   +0.85%/trade  t  +1.9
+  test up moves                          n= 1803   +1.89%/trade  t  +3.4
+  test down moves                        n=  940   -0.34%/trade  t  +0.5
+
+== ridge alpha 10.0: corr(pred, pnl) valid +0.167 test +0.145; skip cut +0.11
+  valid all fades                        n= 1908   +1.68%/trade  t  +3.8
+  valid kept (pred >= cut)               n= 1272   +2.17%/trade  t  +3.5
+  valid skipped                          n=  636   +0.70%/trade  t  +0.9
+  valid up moves                         n= 1235   +1.82%/trade  t  +2.9
+  valid down moves                       n=  673   +1.43%/trade  t  +3.3
+  test all fades                         n= 2743   +1.13%/trade  t  +2.5
+  test kept (pred >= cut)                n= 1872   +1.41%/trade  t  +2.3
+  test skipped                           n=  871   +0.51%/trade  t  +0.6
+  test up moves                          n= 1803   +1.89%/trade  t  +3.4
+  test down moves                        n=  940   -0.34%/trade  t  +0.5
+  words -> fade loses: friday 39, nyse, life, 45, russia, ii, 61 stocks, coinbase, results, lows monday, sale, 10 industrials, 15, monday 671, 671 companies, 671, biosciences shares, systems, share, ev, 198, roblox, trump, q4, stocks traded
+  words -> fade wins:  group shares, circuit, halted circuit, breaker, circuit breaker, volume, halted, koss, 14, resume, resume trade, wednesday morning, shares resume, stock, reddit, irobot, wednesday 131, 131 stocks, 60 stocks, shares, republic bank, high, 2021 upgrades, downside, downgrades november
+
+== ridge alpha 30.0: corr(pred, pnl) valid +0.179 test +0.150; skip cut +0.15
+  valid all fades                        n= 1908   +1.68%/trade  t  +3.8
+  valid kept (pred >= cut)               n= 1272   +1.89%/trade  t  +3.1
+  valid skipped                          n=  636   +1.26%/trade  t  +2.1
+  valid up moves                         n= 1235   +1.82%/trade  t  +2.9
+  valid down moves                       n=  673   +1.43%/trade  t  +3.3
+  test all fades                         n= 2743   +1.13%/trade  t  +2.5
+  test kept (pred >= cut)                n= 1932   +1.41%/trade  t  +2.2
+  test skipped                           n=  811   +0.45%/trade  t  +0.5
+  test up moves                          n= 1803   +1.89%/trade  t  +3.4
+  test down moves                        n=  940   -0.34%/trade  t  +0.5
