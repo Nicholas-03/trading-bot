@@ -52,6 +52,7 @@ NOTIONAL_USD = 2000.0
 MAX_OPEN = 60  # real positions across books (~$120k short on a $100k paper account with 2x margin)
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
+CLOSE_SEND = (15, 57)  # ET: when the close run sends its market orders (the run itself starts at 15:46)
 BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_halt": ("pop_halt", "close"),
          "liquid_fade": ("fade", "close"), "pop_hour": ("pop", "hour")}
 # liquid_fade: liquid stocks (the labels' tradable gate: >= $20, active just before the news) whose news-day move
@@ -208,14 +209,16 @@ def positions() -> dict[str, dict]:
     return {p["symbol"]: p for p in (trading("GET", "/positions") or []) if isinstance(p, dict)}
 
 
-def enter(book: str, s: dict, today: date, tif: str) -> None:
-    """Log the signal for `book`; short for real if the stock is free, shortable and within limits, else virtually."""
+def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None) -> None:
+    """Log the signal for `book`; short for real if the stock is free, shortable and within limits, else virtually.
+    With `pending`, the real order is queued there for send_at_close() instead of being sent now."""
     evs = read_log()
     if any(e.get("event") == "signal" and e.get("book") == book and e["ticker"] == s["ticker"] and e["day"] == today.isoformat()
            for e in evs):
         return
+    unfilled = {e["order_id"] for e in evs if e.get("event") == "fill" and e.get("status") != "filled"}
     held = {e["ticker"] for e in evs if e.get("event") == "short" and not e.get("virtual")
-            and (e.get("exit_day") or "9") >= today.isoformat()}
+            and (e.get("exit_day") or "9") >= today.isoformat() and (e.get("order") or {}).get("id") not in unfilled}
     asset = trading("GET", f"/assets/{s['ticker']}")
     shortable = bool(asset.get("shortable") and asset.get("easy_to_borrow"))
     ev = {"event": "signal", "book": book, "day": today.isoformat(), **s, "shortable": asset.get("shortable"),
@@ -242,13 +245,31 @@ def enter(book: str, s: dict, today: date, tif: str) -> None:
     qty = int(NOTIONAL_USD // s["last"])
     if qty < 1:
         return
-    resp = trading("POST", "/orders", {"symbol": s["ticker"], "qty": str(qty), "side": "sell", "type": "market",
-                                       "time_in_force": tif}) if real else None
-    log({"event": "short", "book": book, "virtual": not real, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
-         "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "spy_ref": s["spy_last"],
-         "entry": "close" if tif == "cls" else "hour", "stop": STOPS.get(book), "order": resp})
+    order = {"symbol": s["ticker"], "qty": str(qty), "side": "sell", "type": "market", "time_in_force": tif}
+    rec = {"event": "short", "book": book, "virtual": not real, "day": today.isoformat(), "exit_day": exit_date(today.isoformat()),
+           "ticker": s["ticker"], "qty": qty, "ref_price": s["last"], "spy_ref": s["spy_last"],
+           "entry": "close" if pending is not None else "hour", "stop": STOPS.get(book), "order": None}
+    if real and pending is not None:
+        pending.append((order, rec, f"short {qty} {s['ticker']} ({book})"))
+        return
     if real:
-        logger.info(f"ORDER short {qty} {s['ticker']} ({book}, {tif}): {resp.get('status') or resp}")
+        rec["order"] = trading("POST", "/orders", order)
+        logger.info(f"ORDER short {qty} {s['ticker']} ({book}, {tif}): {rec['order'].get('status') or rec['order']}")
+    log(rec)
+
+
+def send_at_close(pending: list) -> None:
+    """Send the queued close orders as plain market orders a few minutes before 16:00 ET. Alpaca paper let our
+    market-on-close (cls) orders expire unfilled, so a market order just before the close stands in for the close price."""
+    now = datetime.now(bal.ET)
+    sleep_until(now.replace(hour=CLOSE_SEND[0], minute=CLOSE_SEND[1], second=0, microsecond=0).timestamp())
+    for order, rec, what in pending:
+        try:
+            rec["order"] = trading("POST", "/orders", order)
+        except Exception as exc:  # one bad order must not block the rest
+            rec["order"] = {"error": repr(exc)}
+        log(rec)
+        logger.info(f"ORDER {what}: {rec['order'].get('status') or rec['order']}")
 
 
 def observe(s: dict, today: date, when: str) -> None:
@@ -389,16 +410,16 @@ def day(today: date | None = None) -> None:
     log({"event": "account", "day": today.isoformat(), **{k: acct.get(k) for k in
          ("equity", "cash", "long_market_value", "short_market_value", "buying_power")}})
     pos = positions()
+    pending, covering = [], []  # orders sent together just before the close; covers first
     for e in read_log():
         if (e.get("event") == "short" and not e.get("virtual") and e.get("exit_day") and e["exit_day"] <= today.isoformat()
                 and e["ticker"] in pos):
             p = pos.pop(e["ticker"])
             qty = abs(int(float(p["qty"])))
-            cancel_open_orders(e["ticker"])
-            resp = trading("POST", "/orders", {"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market",
-                                               "time_in_force": "cls"})
-            log({"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"], "order": resp})
-            logger.info(f"ORDER cover {qty} {e['ticker']} ({e.get('book')}, entered {e['day']}): {resp.get('status') or resp}")
+            pending.append(({"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market", "time_in_force": "day"},
+                            {"event": "cover", "book": e.get("book"), "ticker": e["ticker"], "qty": qty, "entry_day": e["day"]},
+                            f"cover {qty} {e['ticker']} ({e.get('book')}, entered {e['day']})"))
+            covering.append(e["ticker"])
     seen = observed_today(today)
     firsts = first_hours(today, time.time() + 3600)  # every first news of the day, windows ending by 15:50 at the latest
     add_day_moves(today, firsts)
@@ -407,7 +428,10 @@ def day(today: date | None = None) -> None:
             observe(s, today, "close")
         for book, (kind, when) in BOOKS.items():
             if when == "close" and qualifies(kind, s):
-                enter(book, s, today, "cls")
+                enter(book, s, today, "day", pending)
+    for t in covering:  # the stop orders of positions being covered
+        cancel_open_orders(t)
+    send_at_close(pending)
     logger.info(f"account: equity {acct.get('equity')} cash {acct.get('cash')} short value {acct.get('short_market_value')}; "
                 f"{len(observed_today(today))} stocks observed today")
 
