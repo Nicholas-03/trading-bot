@@ -1,0 +1,13 @@
+services:
+  polymaker:
+    build: .
+    container_name: polymaker
+    restart: unless-stopped
+    env_file: .env            # PK, BROWSER_ADDRESS (chmod 600)
+    environment:
+      TZ: Europe/Rome
+    volumes:
+      - ./mycfg:/app/mycfg    # config + state.db + logs + journal survive rebuilds
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
