@@ -1,15 +1,15 @@
 # News Trading Bot
 
-Listens to real-time news from Alpaca's WebSocket feed, uses an LLM to decide whether to buy, short, sell, or hold based on the news, and executes trades via Tradier.
+Listens to real-time news from Alpaca's WebSocket feed, uses the [Laya](https://huggingface.co/convaiinnovations/laya) decision model to decide whether to buy, short, sell, or hold based on the news, and executes trades via Tradier.
 
 ## How it works
 
 1. Connects to Alpaca's news WebSocket and receives live news events.
-2. Pre-checks mentioned tickers with Alpaca snapshots and sends the LLM a tradable/blocked ticker context along with current long/short positions.
-3. The LLM returns a `buy`, `short`, `sell`, or `hold` decision with a confidence score and expected hold duration.
-4. Decisions below `MIN_CONFIDENCE` are skipped; production also applies `MIN_CONFIDENCE_FLOOR` so stale `.env` values cannot lower the safety floor.
-5. News must pass the hard-catalyst gate: quantified earnings/guidance surprise, FDA/EMA or trial endpoint result, signed M&A with value, major contract/order with value, or material legal/regulatory decision with financial amount.
-6. Entries must pass price, bid/ask spread, recent 1-minute volume, dollar-volume, and direction-confirmation checks. The LLM is instructed not to choose tickers already blocked by the snapshot precheck.
+2. News older than `NEWS_STALE_HOURS` or without tickers is skipped. There is no catalyst/headline filter.
+3. For every ticker in the news, Laya answers one `choice` question in a local forward pass (no API calls). Tickers with no open position get `buy`/`short`/`hold`; tickers already held long or short get `sell`/`hold`.
+4. The most confident non-`hold` answer across the tickers becomes the decision. Laya's `confidence` (normalized entropy of its probabilities) is compared to `MIN_CONFIDENCE`; production also applies `MIN_CONFIDENCE_FLOOR`. New entries use `DEFAULT_HOLD_HOURS`.
+5. Buy/short entries must still pass the execution-time price, bid/ask spread, recent 1-minute volume, dollar-volume, and direction-confirmation checks in the order executor.
+6. The Laya checkpoint is loaded once at startup and downloaded from Hugging Face on first run (~808MB for the English root checkpoint; `HF_HOME` controls the cache location).
 7. On `buy`: uses Alpaca market data for price checks, places a capped DAY limit entry through Tradier, confirms the actual fill, then places a protective OCO take-profit/stop bracket.
 8. On `short`: only liquid large-cap/ETF symbols from the short allowlist can be shorted; the bot places a capped limit short entry for `SHORT_QTY` shares.
 9. On `sell`: closes the full long or short position for the ticker.
@@ -40,7 +40,7 @@ See [docs/trading-execution-policy.md](docs/trading-execution-policy.md) for the
 
 - [Alpaca](https://alpaca.markets) account - used for the real-time news feed and stock market data (not order execution); a free account works with the IEX feed
 - [Tradier](https://developer.tradier.com) account — used for all trading; sandbox is free
-- An OpenAI API key for ChatGPT decisions
+- About 2GB of free RAM for the Laya checkpoint on CPU (a GPU is optional)
 
 ## Local development
 
@@ -77,15 +77,15 @@ Edit `.env` with your API keys and settings:
 | `TRADIER_PAPER` | Use Tradier sandbox environment | `true` |
 | `TRADIER_LIVE_TOKEN` | Deprecated/unused; market data comes from Alpaca | optional |
 | `ALPACA_DATA_FEED` | Alpaca stock-data feed for quotes, snapshots, and entry-confirmation bars (`iex`, `sip`, `delayed_sip`, `otc`) | `iex` |
-| `LLM_PROVIDER` | LLM provider to use | `chatgpt` |
-| `OPENAI_API_KEY` | OpenAI API key | required |
-| `OPENAI_MODEL` | OpenAI model ID | `gpt-5.4-mini` |
+| `LAYA_MODEL_ID` | Hugging Face repo (or local path) of the Laya checkpoint | `convaiinnovations/laya` |
+| `LAYA_SUBFOLDER` | Checkpoint subfolder in the repo (`multilingual`, `typed-decisions`); empty = English root | empty |
+| `LAYA_DEVICE` | Torch device (`cpu`, `cuda`, `mps`); empty = auto | empty |
 | `TRADE_AMOUNT_USD` | Dollar amount per buy order | `5.0` |
 | `ALLOW_SHORT` | Enable short selling | `false` |
 | `SHORT_QTY` | Shares per short sell order | `1` |
 | `STOP_LOSS_PCT` | Stop-loss threshold (e.g. `2` = 2%) | `2` |
 | `TAKE_PROFIT_PCT` | Take-profit threshold (e.g. `3` = 3%) | `3` |
-| `MIN_CONFIDENCE` | Minimum LLM confidence (0.0-1.0) to act on a decision | `0.70` |
+| `MIN_CONFIDENCE` | Minimum Laya confidence (0.0-1.0) to act on a decision | `0.70` |
 | `MIN_CONFIDENCE_FLOOR` | Safety floor applied over `MIN_CONFIDENCE`; lower `.env` values are raised to this | `0.70` |
 | `MIN_TRADE_PRICE` | Minimum entry price; lower-price names are skipped | `20.0` |
 | `MIN_TRADE_PRICE_FLOOR` | Safety floor applied over `MIN_TRADE_PRICE` | `20.0` |
@@ -96,7 +96,6 @@ Edit `.env` with your API keys and settings:
 | `MAX_HOLD_HOURS` | Maximum requested hold window before cap | `1` |
 | `MAX_HOLD_HOURS_CAP` | Safety cap applied over `MAX_HOLD_HOURS` | `1` |
 | `CLOSE_BEFORE_MARKET_CLOSE_MINUTES` | Close open bot positions before the regular-session close | `10` |
-| `REQUIRE_HARD_CATALYST_NEWS` | Skip news before the LLM unless it matches a hard catalyst | `true` |
 | `SHORT_LIQUID_ONLY` | Restrict shorts to the configured liquid symbol allowlist | `true` |
 | `SHORT_LIQUID_SYMBOLS` | Optional comma-separated override for the built-in liquid short allowlist | built-in list |
 | `ANALYTICS_DB_PATH` | Path to the SQLite analytics database | `data/trades.db` |
@@ -171,7 +170,7 @@ See [docs/digitalocean-deployment.md](docs/digitalocean-deployment.md) for the f
 
 ## Analytics
 
-All news events, LLM decisions, and trade executions are stored in a local SQLite database (default: `data/trades.db`). Use `analytics/export_db.py` to dump the database as markdown for LLM analysis:
+All news events, model decisions, and trade executions are stored in a local SQLite database (default: `data/trades.db`). Use `analytics/export_db.py` to dump the database as markdown for LLM analysis:
 
 ```bash
 python analytics/export_db.py

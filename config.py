@@ -79,9 +79,9 @@ class Config:
     tradier_account_id: str
     tradier_paper: bool
     tradier_live_token: str
-    openai_api_key: str
-    openai_model: str
-    llm_provider: str
+    laya_model_id: str
+    laya_subfolder: str
+    laya_device: str
     trade_amount_usd: float
     short_qty: int
     allow_short: bool
@@ -102,8 +102,6 @@ class Config:
     default_hold_hours: int
     max_hold_hours: int
     close_before_market_close_minutes: int
-    require_hard_catalyst_news: bool
-    block_soft_partnership_news: bool
     short_liquid_only: bool
     short_liquid_symbols: frozenset[str]
     bracket_reprice_enabled: bool
@@ -149,17 +147,12 @@ def _parse_symbol_set(key: str, default: frozenset[str]) -> frozenset[str]:
 def load_config() -> Config:
     load_dotenv()
 
-    provider = os.getenv("LLM_PROVIDER", "chatgpt").lower()
-    if provider != "chatgpt":
-        raise ValueError(f"LLM_PROVIDER must be 'chatgpt', got {provider!r}")
-
     # ALPACA_API_KEY/SECRET_KEY are used by NewsDataStream only, not trading.
     required = [
         "ALPACA_API_KEY",
         "ALPACA_SECRET_KEY",
         "TRADIER_ACCESS_TOKEN",
         "TRADIER_ACCOUNT_ID",
-        "OPENAI_API_KEY",
     ]
     missing = [k for k in required if not os.getenv(k)]
     if missing:
@@ -187,9 +180,9 @@ def load_config() -> Config:
         tradier_account_id=os.environ["TRADIER_ACCOUNT_ID"],
         tradier_paper=os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"),
         tradier_live_token=os.getenv("TRADIER_LIVE_TOKEN", ""),
-        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"),
-        llm_provider=provider,
+        laya_model_id=os.getenv("LAYA_MODEL_ID", "convaiinnovations/laya"),
+        laya_subfolder=os.getenv("LAYA_SUBFOLDER", ""),
+        laya_device=os.getenv("LAYA_DEVICE", ""),
         trade_amount_usd=_parse_float("TRADE_AMOUNT_USD", "5.0"),
         short_qty=int(os.getenv("SHORT_QTY", "1")),
         allow_short=os.getenv("ALLOW_SHORT", "true").lower() in ("true", "1", "yes"),
@@ -210,8 +203,6 @@ def load_config() -> Config:
         default_hold_hours=default_hold_hours,
         max_hold_hours=max_hold_hours,
         close_before_market_close_minutes=int(os.getenv("CLOSE_BEFORE_MARKET_CLOSE_MINUTES", "10")),
-        require_hard_catalyst_news=_parse_bool("REQUIRE_HARD_CATALYST_NEWS", "true"),
-        block_soft_partnership_news=_parse_bool("BLOCK_SOFT_PARTNERSHIP_NEWS", "true"),
         short_liquid_only=_parse_bool("SHORT_LIQUID_ONLY", "true"),
         short_liquid_symbols=_parse_symbol_set("SHORT_LIQUID_SYMBOLS", _DEFAULT_SHORT_LIQUID_SYMBOLS),
         bracket_reprice_enabled=_parse_bool("BRACKET_REPRICE_ENABLED", "true"),

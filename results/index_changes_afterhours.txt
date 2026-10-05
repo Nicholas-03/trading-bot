@@ -1,0 +1,23 @@
+116 additions with after-hours bars
+all (raw returns, 0.3% cost for after-hours spread)
+  jump: close -> next open (total, reference)             n=116  +1.93% t +5.7 win 59%
+  buy 2 min after headline -> next open                   n=110  -0.72% t -4.1 win 25%
+  buy 2 min after headline -> close before effective      n=110  +0.87% t +1.1 win 42%
+  buy 5 min after headline -> next open                   n=110  -0.74% t -4.6 win 27%
+  buy 5 min after headline -> close before effective      n=110  +0.84% t +1.1 win 44%
+  buy 15 min after headline -> next open                  n=110  -0.74% t -5.0 win 24%
+  buy 15 min after headline -> close before effective     n=110  +0.86% t +1.1 win 44%
+  buy 60 min after headline -> next open                  n=105  -0.66% t -5.0 win 27%
+  buy 60 min after headline -> close before effective     n=105  +1.11% t +1.4 win 47%
+  median 10-min after-hours volume at +2 min: 6300
+2021-26 (raw returns, 0.3% cost for after-hours spread)
+  jump: close -> next open (total, reference)             n= 50  +3.18% t +5.5 win 76%
+  buy 2 min after headline -> next open                   n= 49  -0.96% t -2.8 win 24%
+  buy 2 min after headline -> close before effective      n= 49  +2.71% t +2.0 win 57%
+  buy 5 min after headline -> next open                   n= 49  -0.95% t -3.0 win 27%
+  buy 5 min after headline -> close before effective      n= 49  +2.72% t +2.0 win 57%
+  buy 15 min after headline -> next open                  n= 49  -0.97% t -3.4 win 27%
+  buy 15 min after headline -> close before effective     n= 49  +2.71% t +2.0 win 59%
+  buy 60 min after headline -> next open                  n= 48  -0.82% t -3.2 win 31%
+  buy 60 min after headline -> close before effective     n= 48  +3.00% t +2.2 win 60%
+  median 10-min after-hours volume at +2 min: 18033
