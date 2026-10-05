@@ -16,8 +16,8 @@ from dotenv import find_dotenv, load_dotenv
 from py_clob_client_v2 import ClobClient
 from py_clob_client_v2.clob_types import OrderScoringParams, TradeParams
 
-SLUG = "will-jay-clayton-be-trumps-ai-czar"
-START = date(2026, 10, 1)  # first live day
+SLUG = "will-chinas-annual-inflation-in-2026-be-between-0pt6-and-1pt0"
+START = date(2026, 10, 5)  # first live day on this market
 
 
 def main():
