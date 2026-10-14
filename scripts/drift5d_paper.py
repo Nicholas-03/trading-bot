@@ -411,9 +411,16 @@ def day(today: date | None = None) -> None:
          ("equity", "cash", "long_market_value", "short_market_value", "buying_power")}})
     pos = positions()
     pending, covering = [], []  # orders sent together just before the close; covers first
-    for e in read_log():
-        if (e.get("event") == "short" and not e.get("virtual") and e.get("exit_day") and e["exit_day"] <= today.isoformat()
-                and e["ticker"] in pos):
+    evs = read_log()
+    unfilled = {e["order_id"] for e in evs if e.get("event") == "fill" and e.get("status") != "filled"}
+    open_short: dict[str, dict] = {}  # the latest real short per ticker, until a (filled) cover follows it
+    for e in evs:
+        if e.get("event") == "short" and not e.get("virtual") and (e.get("order") or {}).get("id") not in unfilled:
+            open_short[e["ticker"]] = e
+        elif e.get("event") == "cover" and (e.get("order") or {}).get("id") not in unfilled:
+            open_short.pop(e["ticker"], None)
+    for e in open_short.values():
+        if e.get("exit_day") and e["exit_day"] <= today.isoformat() and e["ticker"] in pos:
             p = pos.pop(e["ticker"])
             qty = abs(int(float(p["qty"])))
             pending.append(({"symbol": e["ticker"], "qty": str(qty), "side": "buy", "type": "market", "time_in_force": "day"},
