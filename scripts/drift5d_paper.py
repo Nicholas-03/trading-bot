@@ -95,7 +95,8 @@ def trading(method: str, path: str, body: dict | None = None, params: dict | Non
                                           "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            return json.load(r)
+            raw = r.read()
+            return json.loads(raw) if raw.strip() else {}  # DELETE /orders/{id} answers 204 with no body
     except urllib.error.HTTPError as e:
         return {"error": e.code, "message": e.read().decode()[:300]}
 
@@ -437,7 +438,11 @@ def day(today: date | None = None) -> None:
             if when == "close" and qualifies(kind, s):
                 enter(book, s, today, "day", pending)
     for t in covering:  # the stop orders of positions being covered
-        cancel_open_orders(t)
+        try:
+            cancel_open_orders(t)
+        except Exception as exc:  # noqa: BLE001  (never let one cancel block the covers and entries)
+            log({"event": "error", "where": "cancel", "ticker": t, "error": repr(exc)})
+            logger.exception(f"cancelling the open orders of {t} failed")
     send_at_close(pending)
     logger.info(f"account: equity {acct.get('equity')} cash {acct.get('cash')} short value {acct.get('short_market_value')}; "
                 f"{len(observed_today(today))} stocks observed today")
