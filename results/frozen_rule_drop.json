@@ -1,0 +1,8 @@
+{
+  "frozen_at": "2026-09-26",
+  "found_on": "tradable pairs 2024-01-02..2026-09-23 (data/laya_price_paths.jsonl)",
+  "rule": "regular-session news 09:31-15:30 ET, tradable ticker (price>=20, avg vol>=1000/min, avg $vol>=50k/min); move = open of first 1-min bar >= news+60s / close of last bar before news - 1; if move <= -3%: SHORT at that open, cover at close of the bar ending entry+60min (flatten by 15:50 ET)",
+  "primary_metric": "mean and median net return per trade after 0.10% cost, and after a 0.30% cost (wider small-cap spreads)",
+  "pass_if": "median gross 60m return < -0.5% AND mean net (0.30% cost) > 0 AND median negative in at least 2 of 3 years",
+  "secondary_thresholds_report_only": [-0.02, -0.04, -0.05]
+}

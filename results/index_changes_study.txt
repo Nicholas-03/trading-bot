@@ -1,0 +1,45 @@
+431 S&P 500 changes since 2016 (215 adds), announcement found for 234
+
+== ADDITIONS (long, minus SPY, after 0.2% cost; gap is not tradable)
+ all:
+  gap: announcement-day close -> next open         n= 122   +1.91%  t  +6.0  win 61%
+  run-up: next open -> close before effective      n= 122   +0.77%  t  +1.2  win 40%
+  post: rebalance close -> +5 days (short)         n= 121   +0.61%  t  +1.2  win 50%
+  post: rebalance close -> +20 days (short)        n= 121   -0.23%  t  -0.2  win 46%
+ market-cap changes:
+  gap: announcement-day close -> next open         n=  37   +2.03%  t  +3.9  win 62%
+  run-up: next open -> close before effective      n=  37   +2.43%  t  +1.6  win 46%
+  post: rebalance close -> +5 days (short)         n=  37   -0.09%  t  -0.2  win 46%
+  post: rebalance close -> +20 days (short)        n=  37   -3.39%  t  -1.8  win 35%
+ 2016-2020:
+  gap: announcement-day close -> next open         n=  72   +0.94%  t  +2.8  win 47%
+  run-up: next open -> close before effective      n=  72   -0.70%  t  -1.1  win 31%
+  post: rebalance close -> +5 days (short)         n=  71   +1.08%  t  +1.5  win 52%
+  post: rebalance close -> +20 days (short)        n=  71   -0.09%  t  -0.1  win 49%
+ 2021-2026:
+  gap: announcement-day close -> next open         n=  50   +3.31%  t  +5.9  win 82%
+  run-up: next open -> close before effective      n=  50   +2.88%  t  +2.4  win 54%
+  post: rebalance close -> +5 days (short)         n=  50   -0.07%  t  -0.1  win 48%
+  post: rebalance close -> +20 days (short)        n=  50   -0.44%  t  -0.2  win 42%
+
+== REMOVALS (short, minus SPY, after 0.2% cost; gap is not tradable)
+ all:
+  gap: announcement-day close -> next open         n=  93   -0.05%  t  -0.4  win 39%
+  run-up: next open -> close before effective      n=  84   +0.27%  t  +0.5  win 57%
+  post: rebalance close -> +5 days (long)          n=  59   -1.63%  t  -0.8  win 46%
+  post: rebalance close -> +20 days (long)         n=  56   -4.32%  t  -2.1  win 34%
+ market-cap changes:
+  gap: announcement-day close -> next open         n=  35   -0.36%  t  -1.6  win 40%
+  run-up: next open -> close before effective      n=  34   +1.01%  t  +1.1  win 56%
+  post: rebalance close -> +5 days (long)          n=  35   -1.01%  t  -0.7  win 46%
+  post: rebalance close -> +20 days (long)         n=  35   -1.59%  t  -0.7  win 31%
+ 2016-2020:
+  gap: announcement-day close -> next open         n=  56   -0.09%  t  -0.5  win 30%
+  run-up: next open -> close before effective      n=  51   -0.72%  t  -1.4  win 51%
+  post: rebalance close -> +5 days (long)          n=  36   -2.18%  t  -0.7  win 42%
+  post: rebalance close -> +20 days (long)         n=  33   -8.12%  t  -3.1  win 27%
+ 2021-2026:
+  gap: announcement-day close -> next open         n=  37   +0.02%  t  +0.1  win 51%
+  run-up: next open -> close before effective      n=  33   +1.81%  t  +1.9  win 67%
+  post: rebalance close -> +5 days (long)          n=  23   -0.77%  t  -0.4  win 52%
+  post: rebalance close -> +20 days (long)         n=  23   +1.13%  t  +0.4  win 43%

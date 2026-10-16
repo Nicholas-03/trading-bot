@@ -1,0 +1,12 @@
+# <name> <finetune_laya.py args>, one GPU run each.
+# Earlier: f_ret, f_ret_react (2024-26, raw 1h) and xs_big, xs_big_react (2021-26, SPY-hedged 1h) -> no tradable edge.
+# 2026-09-28: 5-day horizon. Entry at the news day's close, label and P&L = 5-day return minus SPY's (data/laya_daily_labels.jsonl,
+# scripts/build_daily_labels.py); d5_react also sees the first-hour move after the news (a >=10% drop there is followed by
+# -12% on average over 5 days; the question is whether the text adds to that). Test = last 15% (~2025-11..2026-09).
+# d5_react --labels data/laya_daily_labels.jsonl --label-field label_ret --ret-field d5_excess --label-threshold 5 --react-field hour_excess --with-reaction --cost-pct 0.2 --tradable-only --hold-frac 0.3 --max-train 100000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2 --lr 1e-5
+# d5_text  --labels data/laya_daily_labels.jsonl --label-field label_ret --ret-field d5_excess --label-threshold 5 --cost-pct 0.2 --tradable-only --hold-frac 0.3 --max-train 100000 --max-eval 20000 --freeze-layers 14 --grad-ckpt --epochs 2 --lr 1e-5
+# Result: standalone no tradable edge, but as a filter on liquid_fade, d5_text "down" +2.14%/trade vs "up" +0.53% (test n=1186).
+# 2026-10-01: a model trained only on liquid_fade's events (tradable, news-day move >= 8% vs SPY either way, 53.8k pairs,
+# data/laya_fade_labels.jsonl from scripts/build_fade_labels.py), to pick which fades to skip. fade_react also sees the day's move.
+fade_react --labels data/laya_fade_labels.jsonl --label-field label_ret --ret-field d5_excess --label-threshold 5 --react-field day_excess --with-reaction --cost-pct 0.2 --tradable-only --freeze-layers 10 --grad-ckpt --epochs 3 --lr 1e-5
+fade_text  --labels data/laya_fade_labels.jsonl --label-field label_ret --ret-field d5_excess --label-threshold 5 --cost-pct 0.2 --tradable-only --freeze-layers 10 --grad-ckpt --epochs 3 --lr 1e-5

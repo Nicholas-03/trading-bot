@@ -1,0 +1,40 @@
+2006 thin markets (volume $1k-100k), YES price 7 days before the end, 2-98c; returns per $ to resolution after a 3c entry cost
+
+== jev: 2009 scored
+  Brier p          0.1089
+  Brier yes_title  0.1830
+  Brier yes_rules  0.1687
+  gap: stricter 1338, looser 174, YES rate stricter 21.7% (avg price 24.1%), looser 20.7% (avg price 24.1%)
+  buy NO on all markets (baseline)                           n= 2009    -4.8% ±  1.6%  win 76%
+  buy NO when rules stricter                                 n= 1338    -4.4% ±  1.8%  win 78%
+  buy YES on all markets (baseline)                          n= 2009   -32.3% ±  4.4%  win 24%
+  buy YES when rules looser                                  n=  174   -45.5% ± 13.0%  win 21%
+    price 0.02-0.20: buy NO all / stricter                   n= 1177    -2.5% ±  0.8%  win 93% | n=  823    -2.2% ±  0.9%  win 94%
+    price 0.20-0.50: buy NO all / stricter                   n=  432    +6.8% ±  3.1%  win 74% | n=  280    +7.0% ±  3.9%  win 75%
+    price 0.50-0.80: buy NO all / stricter                   n=  231   +10.0% ±  8.3%  win 46% | n=  139    +8.4% ± 10.6%  win 46%
+    price 0.80-0.98: buy NO all / stricter                   n=  169   -70.5% ± 10.5%  win 5% | n=   96   -75.4% ± 12.3%  win 4%
+  trade the rules shift |P_rules - P_title| >= 0.10          n=  853    -6.4% ±  3.1%  win 71%
+  rules shift agrees with |P_rules - price| >= 0.10          n=  650   -19.3% ±  7.1%  win 30%
+  trade the rules shift |P_rules - P_title| >= 0.20          n=  239    -0.6% ±  6.0%  win 73%
+  rules shift agrees with |P_rules - price| >= 0.20          n=  462   -24.3% ±  8.5%  win 24%
+  buy NO when stricter, by year: 2024 -1.1% n=720, 2025 -8.0% n=513, 2026 -9.9% n=105
+
+== clef: 2009 scored
+  Brier p          0.1089
+  Brier yes_title  0.2190
+  Brier yes_rules  0.1878
+  gap: stricter 763, looser 39, YES rate stricter 22.5% (avg price 25.1%), looser 0.0% (avg price 9.8%)
+  buy NO on all markets (baseline)                           n= 2009    -4.8% ±  1.6%  win 76%
+  buy NO when rules stricter                                 n=  763    -5.7% ±  2.4%  win 77%
+  buy YES on all markets (baseline)                          n= 2009   -32.3% ±  4.4%  win 24%
+  buy YES when rules looser                                  n=   39  -100.0% ±  0.0%  win 0%
+    price 0.02-0.20: buy NO all / stricter                   n= 1177    -2.5% ±  0.8%  win 93% | n=  469    -2.3% ±  1.2%  win 94%
+    price 0.20-0.50: buy NO all / stricter                   n=  432    +6.8% ±  3.1%  win 74% | n=  146    +8.4% ±  5.3%  win 75%
+    price 0.50-0.80: buy NO all / stricter                   n=  231   +10.0% ±  8.3%  win 46% | n=   77   +11.7% ± 14.2%  win 48%
+    price 0.80-0.98: buy NO all / stricter                   n=  169   -70.5% ± 10.5%  win 5% | n=   71   -76.1% ± 13.8%  win 4%
+  trade the rules shift |P_rules - P_title| >= 0.10          n= 1122   -12.9% ±  3.0%  win 65%
+  rules shift agrees with |P_rules - price| >= 0.10          n=  703   -17.1% ±  7.3%  win 32%
+  trade the rules shift |P_rules - P_title| >= 0.20          n=  639    -5.1% ±  4.5%  win 69%
+  rules shift agrees with |P_rules - price| >= 0.20          n=  507   -13.7% ±  9.1%  win 29%
+  buy NO when stricter, by year: 2024 -4.7% n=400, 2025 -3.0% n=301, 2026 -25.7% n=62
+

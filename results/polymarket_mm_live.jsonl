@@ -1,0 +1,4 @@
+{"t": 1790435640.974247, "event": "start", "market": "Will the U.S. invade Iran before 2027?", "slug": "will-the-us-invade-iran-before-2027", "size": 5.0, "tick": "0.01"}
+{"t": 1790435641.148588, "event": "quote", "side": "YES", "price": 0.16}
+{"t": 1790435641.35938, "event": "quote", "side": "NO", "price": 0.83}
+{"t": 1790437443.098853, "event": "end", "held": {"YES": 0.0, "NO": 0.0}, "avg_price": {"YES": 0, "NO": 0}, "pairs": 0.0, "locked_profit": 0.0, "balance": 43.412178}
