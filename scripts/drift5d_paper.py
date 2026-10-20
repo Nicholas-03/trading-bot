@@ -59,6 +59,9 @@ BOOKS = {"drop_close": ("drop", "close"), "drop_hour": ("drop", "hour"), "pop_ha
 # (previous close -> close) beat SPY by >= 10% either way, shorted at the close for 5 days. Backtest 2021-26 on
 # data/laya_daily_labels.jsonl: +1.53%/trade after 0.2% cost, t 9.0, every year > 0; quiet news days: +0.07%.
 VIRTUAL_ONLY = {"pop_hour"}  # all pops: weak without a halt (+2.9%/trade, ~0 with a stop), tracked for comparison only
+HEDGE = "SPY"  # held long against the open shorts (same dollars), set at each close run; scripts/eval_fade_risk.py:
+# on liquid_fade 2021-23 / 2024-26 the hedge cut the max drawdown 24% -> 20% / 27% -> 18% and the worst month
+# 20% -> 13% / 19% -> 10%, and raised the mean per trade (+1.49 -> +1.80% / +0.79 -> +1.26%)
 STOPS = {"pop_halt": 0.30}  # buy-stop 30% above the short's fill (backtest: +12.5% -> +9.1%/trade, t 5.1 -> 6.1)
 HALT = re.compile(r"halted|resume|circuit breaker", re.I)  # same pattern as scripts/study_drift.py CATS
 logger = logging.getLogger("drift5d")
@@ -227,6 +230,8 @@ def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None
     real = False
     if s["last"] < MIN_PRICE:
         ev["skip"] = "price"
+    elif s["ticker"] == HEDGE:
+        ev["skip"] = "hedge symbol"
     elif not shortable:
         ev["skip"] = "not shortable at Alpaca"
     elif book in VIRTUAL_ONLY:
@@ -437,6 +442,11 @@ def day(today: date | None = None) -> None:
         for book, (kind, when) in BOOKS.items():
             if when == "close" and qualifies(kind, s):
                 enter(book, s, today, "day", pending)
+    try:
+        hedge_order(pos, pending)
+    except Exception as exc:  # noqa: BLE001  (the hedge must never block the covers and entries)
+        log({"event": "error", "where": "hedge", "error": repr(exc)})
+        logger.exception("hedge sizing failed")
     for t in covering:  # the stop orders of positions being covered
         try:
             cancel_open_orders(t)
@@ -446,6 +456,22 @@ def day(today: date | None = None) -> None:
     send_at_close(pending)
     logger.info(f"account: equity {acct.get('equity')} cash {acct.get('cash')} short value {acct.get('short_market_value')}; "
                 f"{len(observed_today(today))} stocks observed today")
+
+
+def hedge_order(pos: dict, pending: list) -> None:
+    """Queue the SPY order that brings the long hedge to the dollar value of the shorts held after today's close
+    orders: the positions not being covered (`pos`, covered ones already removed) plus today's new shorts."""
+    held = pos.pop(HEDGE, None)
+    short = sum(abs(float(p["market_value"])) for p in pos.values() if float(p["qty"]) < 0)
+    short += sum(int(o["qty"]) * rec["ref_price"] for o, rec, _ in pending if o["side"] == "sell")
+    px = float(held["current_price"]) if held else bal.get("/v2/stocks/trades/latest", {"symbols": HEDGE, "feed": "iex"})["trades"][HEDGE]["p"]
+    have = int(float(held["qty"])) if held else 0
+    diff = int(short // px) - have
+    if diff == 0:
+        return
+    order = {"symbol": HEDGE, "qty": str(abs(diff)), "side": "buy" if diff > 0 else "sell", "type": "market", "time_in_force": "day"}
+    rec = {"event": "hedge", "ticker": HEDGE, "qty": diff, "target_qty": have + diff, "short_value": round(short, 2), "price": px}
+    pending.append((order, rec, f"hedge {order['side']} {abs(diff)} {HEDGE} (shorts ${short:,.0f})"))
 
 
 def add_day_moves(today: date, firsts: list[dict]) -> None:
