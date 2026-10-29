@@ -49,7 +49,7 @@ HEARTBEAT = DATA_DIR / "heartbeat"  # touched every minute while the daemon is a
 JEV_MIN_MOVE = 0.05  # ask Jev about first hours at least this big (cheap: ~$0.00003 per event)
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
-MAX_OPEN = 60  # real positions across books (~$120k short on a $100k paper account with 2x margin)
+MAX_OPEN = 45  # real positions across books: ~$90k short + the same in SPY fits the 1.9x cap on a $100k account
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
 CLOSE_SEND = (15, 57)  # ET: when the close run sends its market orders (the run itself starts at 15:46)
@@ -224,6 +224,8 @@ def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None
     unfilled = {e["order_id"] for e in evs if e.get("event") == "fill" and e.get("status") != "filled"}
     held = {e["ticker"] for e in evs if e.get("event") == "short" and not e.get("virtual")
             and (e.get("exit_day") or "9") >= today.isoformat() and (e.get("order") or {}).get("id") not in unfilled}
+    held |= {rec["ticker"] for _, rec, _ in (pending or []) if rec.get("event") == "short"}  # queued for today's close,
+    # not logged until sent: without them every signal of a busy day passed MAX_OPEN (79 shorts open on 2026-10-29)
     asset = trading("GET", f"/assets/{s['ticker']}")
     shortable = bool(asset.get("shortable") and asset.get("easy_to_borrow"))
     ev = {"event": "signal", "book": book, "day": today.isoformat(), **s, "shortable": asset.get("shortable"),
