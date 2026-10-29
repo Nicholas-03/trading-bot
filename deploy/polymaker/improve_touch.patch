@@ -1,0 +1,123 @@
+diff --git a/src/polymaker/config.py b/src/polymaker/config.py
+index 3f0af35..74c7f2e 100644
+--- a/src/polymaker/config.py
++++ b/src/polymaker/config.py
+@@ -93,6 +93,8 @@ class StrategyProfile(BaseModel):
+     # multiplier on the market's reward min-size that reward-eligible orders are
+     # bumped to (margin above the scoring floor). 1.5 => 100-share min -> 150.
+     reward_size_mult: float = 1.0
++    # bid inside a wide book (up to the reward band) instead of joining a best bid that sits outside it
++    improve_touch: bool = False
+     # placement / churn
+     reprice_ticks: int = 2
+     resize_frac: float = 0.15
+diff --git a/src/polymaker/engine.py b/src/polymaker/engine.py
+index 12a105d..92b0f26 100644
+--- a/src/polymaker/engine.py
++++ b/src/polymaker/engine.py
+@@ -16,6 +16,8 @@ import time
+ from datetime import datetime
+ from typing import Any
+ 
++from sortedcontainers import SortedDict
++
+ from polymaker.alerts import Alerter
+ from polymaker.catalog.gamma import GammaClient, fetch_reward_rates, parse_market
+ from polymaker.catalog.store import CatalogStore
+@@ -25,6 +27,7 @@ from polymaker.execution.gateway import ExecutionGateway
+ from polymaker.execution.reconciler import reconcile
+ from polymaker.journal import Journal
+ from polymaker.logging import get_logger
++from polymaker.marketdata.orderbook import OrderBook
+ from polymaker.marketdata.parse import TradePrint
+ from polymaker.marketdata.service import MarketDataService
+ from polymaker.merge import Merger
+@@ -354,6 +357,24 @@ class Engine:
+                 wake = min(wake, 10.0)
+         return max(1.0, wake)
+ 
++    def _book_without_own(self, yes_book: OrderBook, meta: MarketMeta) -> OrderBook:
++        """The YES book minus our resting orders (a NO order at q sits in the YES book at 1 - q, on the other side)."""
++        b = OrderBook(yes_book.tick_size)
++        b.bids, b.asks = SortedDict(yes_book.bids), SortedDict(yes_book.asks)
++        dec = meta.price_decimals
++        for tok, flip in ((meta.yes.token_id, False), (meta.no.token_id, True)):
++            for o in self.state.orders_for(tok):
++                price = round(1.0 - o.price if flip else o.price, dec)
++                on_bids = (o.side is Side.BUY) != flip
++                side = b.bids if on_bids else b.asks
++                if price in side:
++                    left = side[price] - o.size
++                    if left > 1e-6:
++                        side[price] = left
++                    else:
++                        del side[price]
++        return b
++
+     async def _recompute(self, cid: str) -> None:
+         lock = self._locks.get(cid)
+         if lock is None:
+@@ -368,14 +389,19 @@ class Engine:
+         no_book = self.md.book(meta.no.token_id)
+         if yes_book is None or yes_book.is_empty:
+             return
++        fv_book = self._book_without_own(yes_book, meta)  # our quotes must not move our own fair value
+ 
+         # crossed/locked or one-sided book -> FV is unreliable; skip this tick
+-        bb, ba = yes_book.best_bid(), yes_book.best_ask()
++        bb, ba = fv_book.best_bid(), fv_book.best_ask()
+         if bb is None or ba is None or bb.price >= ba.price:
+             return
+ 
+         now = time.time()
+-        micro = yes_book.microprice(p.micro_levels)
++        micro = fv_book.microprice(p.micro_levels)
++        if p.improve_touch:  # wide thin books: the reward program's midpoint (best levels of at least the reward size)
++            qb, _, _ = fv_book.best_with_min_size(Side.BUY, meta.rewards_min_size * 0.999)
++            qa, _, _ = fv_book.best_with_min_size(Side.SELL, meta.rewards_min_size * 0.999)
++            micro = (qb + qa) / 2.0 if qb is not None and qa is not None and qb < qa else None
+         if micro is None:
+             return
+         est = self.est[cid]
+diff --git a/src/polymaker/strategy/quoting.py b/src/polymaker/strategy/quoting.py
+index fadc7e8..725b04b 100644
+--- a/src/polymaker/strategy/quoting.py
++++ b/src/polymaker/strategy/quoting.py
+@@ -101,7 +101,7 @@ def construct_quotes(inp: QuoteInputs) -> TargetQuotes:
+ 
+     # entry: BUY YES
+     if add_yes:
+-        price = _place_bid(yes_bid_target, inp.yes_view, tick, dec, inp.fv, p.min_edge_ticks)
++        price = _place_bid(yes_bid_target, inp.yes_view, tick, dec, inp.fv, p.min_edge_ticks, p.improve_touch)
+         if price is not None:
+             _add_layers(quotes, m.yes.token_id, Side.BUY, price, tick, dec,
+                         _size_shares(p.base_size_usdc, price, common_scale * (1 - max(u, 0.0)), m),
+@@ -111,7 +111,7 @@ def construct_quotes(inp: QuoteInputs) -> TargetQuotes:
+     # entry: BUY NO
+     if add_no:
+         no_fv = 1.0 - inp.fv
+-        price = _place_bid(no_bid_target, inp.no_view, tick, dec, no_fv, p.min_edge_ticks)
++        price = _place_bid(no_bid_target, inp.no_view, tick, dec, no_fv, p.min_edge_ticks, p.improve_touch)
+         if price is not None:
+             _add_layers(quotes, m.no.token_id, Side.BUY, price, tick, dec,
+                         _size_shares(p.base_size_usdc, price, common_scale * (1 - max(-u, 0.0)), m),
+@@ -135,14 +135,16 @@ def _clamp(x: float, lo: float, hi: float) -> float:
+ 
+ 
+ def _place_bid(
+-    target: float, view: BookView, tick: float, dec: int, fv: float, min_edge_ticks: int
++    target: float, view: BookView, tick: float, dec: int, fv: float, min_edge_ticks: int,
++    improve_touch: bool = False,
+ ) -> float | None:
+-    """Position a BUY: join the touch or sit behind, never cross, keep min edge vs FV."""
++    """Position a BUY: join the touch or sit behind, never cross, keep min edge vs FV.
++    improve_touch: when the target is above the best bid (a wide book), bid at the target instead of joining."""
+     price = target
+     # never bid above (FV - min_edge*tick): we don't pay through fair value
+     price = min(price, fv - min_edge_ticks * tick)
+     # join the queue rather than jump it (conservative maker default)
+-    if view.best_bid is not None and price >= view.best_bid:
++    if view.best_bid is not None and price >= view.best_bid and not improve_touch:
+         price = view.best_bid
+     # never cross the ask
+     if view.best_ask is not None and price >= view.best_ask:

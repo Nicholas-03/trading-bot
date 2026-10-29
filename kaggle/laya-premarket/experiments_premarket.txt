@@ -1,0 +1,3 @@
+# Pre-market news (07:30-09:20 ET) traded at the open: entry 09:31, exit 10:31. One row per (day, ticker).
+pm_gap    --labels data/laya_premarket.jsonl --label-field label_ret --tradable-only --hold-frac 0.5 --max-eval 12000 --freeze-layers 14 --grad-ckpt --epochs 2 --with-reaction
+pm_nogap  --labels data/laya_premarket.jsonl --label-field label_ret --tradable-only --hold-frac 0.5 --max-eval 12000 --freeze-layers 14 --grad-ckpt --epochs 2

@@ -1,0 +1,2 @@
+# <name> <model dir in the finetune notebook output> <predict_laya.py args>
+oos_p_ret  p_ret  --labels data/laya_alpaca_labels_v2.jsonl --start 2025-03-05 --tradable-only --max-rows 60000

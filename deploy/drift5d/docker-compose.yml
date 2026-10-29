@@ -1,0 +1,14 @@
+services:
+  drift5d:
+    build: .
+    image: trading-bot-drift5d
+    container_name: drift5d
+    restart: unless-stopped
+    env_file: .env          # Alpaca data + paper keys, TypeSafe key (written by deploy.sh, chmod 600)
+    environment:
+      TZ: America/New_York  # log timestamps in market time
+    volumes:
+      - ./data:/data        # the dataset and logs: drift5d_*.jsonl, logs/drift5d.log
+    logging:
+      driver: json-file
+      options: {max-size: "20m", max-file: "5"}
