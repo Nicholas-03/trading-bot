@@ -28,6 +28,7 @@ import logging
 import logging.handlers
 import os
 import re
+import statistics
 import sys
 import time
 import urllib.error
@@ -49,6 +50,8 @@ HEARTBEAT = DATA_DIR / "heartbeat"  # touched every minute while the daemon is a
 JEV_MIN_MOVE = 0.05  # ask Jev about first hours at least this big (cheap: ~$0.00003 per event)
 HOLD_DAYS = 5
 NOTIONAL_USD = 2000.0
+BUSY_DAY = 20  # liquid_fade signals in one day above which the book sits out (see fade_regime)
+MAX_SPY_VOL = 0.013  # SPY 20-day daily volatility at or above which the book sits out
 MAX_OPEN = 45  # real positions across books: ~$90k short + the same in SPY fits the 1.9x cap on a $100k account
 MIN_PRICE = 2.0
 SIP_DELAY = 16 * 60  # Alpaca's free data plan: SIP (all exchanges) bars only once they are 15+ minutes old
@@ -214,7 +217,7 @@ def positions() -> dict[str, dict]:
     return {p["symbol"]: p for p in (trading("GET", "/positions") or []) if isinstance(p, dict)}
 
 
-def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None) -> None:
+def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None, regime: str | None = None) -> None:
     """Log the signal for `book`; short for real if the stock is free, shortable and within limits, else virtually.
     With `pending`, the real order is queued there for send_at_close() instead of being sent now."""
     evs = read_log()
@@ -239,6 +242,8 @@ def enter(book: str, s: dict, today: date, tif: str, pending: list | None = None
         ev["skip"] = "not shortable at Alpaca"
     elif book in VIRTUAL_ONLY:
         ev["note"] = "comparison book (virtual)"
+    elif regime and book == "liquid_fade":
+        ev["note"] = regime
     elif s["ticker"] in held:
         ev["note"] = "already short in another book (virtual)"
     elif len(held) >= MAX_OPEN:
@@ -330,6 +335,31 @@ def check_fills() -> None:
                      "filled_at": o.get("filled_at"), "for": e["event"], "day": e.get("day") or e.get("entry_day")})
                 if e["event"] == "stop_placed" and o["status"] == "filled":
                     logger.info(f"STOPPED OUT {e['ticker']} ({e.get('book')}) at {o.get('filled_avg_price')}")
+
+
+def fade_regime(today: date, firsts: list[dict]) -> str | None:
+    """Days the liquid_fade book sits out (scripts/eval_fade_regime.py, SPY-hedged, 2021-23 / 2024-26): with more than
+    BUSY_DAY signals the trades made +0.35% / +0.39% (t 0.9 / 1.2) against +1.80% / +1.26% for all; with SPY's 20-day
+    volatility >= MAX_SPY_VOL, +0.27% / -0.49%. Skipping both: +2.47% / +1.58% per trade, max drawdown 19.5 -> 15.7% /
+    17.9 -> 17.5%."""
+    n = len({s["ticker"] for s in firsts if qualifies("fade", s)})
+    if n > BUSY_DAY:
+        return f"busy day: {n} signals (virtual)"
+    vol = spy_vol_20d(today)
+    if vol is not None and vol >= MAX_SPY_VOL:
+        return f"SPY volatility {vol * 100:.2f}%/day (virtual)"
+    return None
+
+
+def spy_vol_20d(today: date) -> float | None:
+    """Daily volatility of SPY over the 20 sessions before today (None if the bars are unavailable)."""
+    try:
+        bars = bal.get("/v2/stocks/bars", {"symbols": "SPY", "timeframe": "1Day", "start": (today - timedelta(days=45)).isoformat(),
+                                           "end": (today - timedelta(days=1)).isoformat(), "feed": "sip", "adjustment": "all"})
+        c = [b["c"] for b in bars.get("bars", {}).get("SPY", [])][-21:]
+    except Exception:  # noqa: BLE001  (no data: trade as usual)
+        return None
+    return statistics.pstdev([c[i] / c[i - 1] - 1 for i in range(1, len(c))]) if len(c) == 21 else None
 
 
 def qualifies(kind: str, s: dict) -> bool:
@@ -439,12 +469,15 @@ def day(today: date | None = None) -> None:
     seen = observed_today(today)
     firsts = first_hours(today, time.time() + 3600)  # every first news of the day, windows ending by 15:50 at the latest
     add_day_moves(today, firsts)
+    regime = fade_regime(today, firsts)
+    if regime:
+        logger.info(f"liquid_fade sits out today: {regime}")
     for s in firsts:
         if s["ticker"] not in seen:
             observe(s, today, "close")
         for book, (kind, when) in BOOKS.items():
             if when == "close" and qualifies(kind, s):
-                enter(book, s, today, "day", pending)
+                enter(book, s, today, "day", pending, regime)
     try:
         hedge_order(pos, pending, float(acct.get("equity") or 0))
     except Exception as exc:  # noqa: BLE001  (the hedge must never block the covers and entries)
